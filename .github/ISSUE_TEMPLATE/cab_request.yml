@@ -1,0 +1,256 @@
+name: "📋 CAB Change Request"
+description: Request approval to deploy a change to production or a controlled environment
+title: "[CAB] <system/component> – <short summary>"
+labels: ["cab", "change-request"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## ✅ Change Advisory Board (CAB) Request
+        Provide the details below so reviewers can assess risk, impact, and readiness.
+
+        **Formatting tips**
+        - Use clear, concise bullets
+        - Include links to PRs, dashboards, and runbooks
+        - Date/time in **UTC** (e.g., `2025-08-20 21:30 UTC`)
+
+  - type: input
+    id: change_owner
+    attributes:
+      label: Change Owner
+      description: Primary engineer responsible for execution and rollbacks
+      placeholder: "@owner-handle or team alias"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: change_category
+    attributes:
+      label: Change Category
+      description: CAB categories
+      options:
+        - Standard – Pre-approved, low risk, runbook-driven
+        - Normal – Typical change, requires CAB review
+        - Emergency – Critical fix; expedited review
+        - Hotfix – Urgent production patch outside normal window
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: change_type
+    attributes:
+      label: Change Type (select all that apply)
+      options:
+        - label: Code deploy / application release
+        - label: Configuration change / feature flag
+        - label: Infrastructure / networking / DNS
+        - label: Database schema change
+        - label: Data migration / backfill
+        - label: Access / permissions / secrets
+        - label: Third-party integration change
+        - label: Rollback / revert
+        - label: Other (explain below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Change Summary
+      description: What is changing and why?
+      placeholder: |
+        Problem / goal:
+        Scope:
+        Target systems/services:
+        User impact (if any):
+    validations:
+      required: true
+
+  - type: dropdown
+    id: risk_level
+    attributes:
+      label: Risk Level
+      options:
+        - 🔴 High – Possible outage/data risk; complex rollback
+        - 🟠 Medium – Partial impact; known rollback path
+        - 🟢 Low – Minimal impact; trivial rollback
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact_scope
+    attributes:
+      label: Impacted Areas
+      description: Services, components, teams, and customer segments affected
+      placeholder: |
+        Services: api-gateway, user-service
+        Environments: prod, us-east-1
+        Customer scope: Enterprise only
+    validations:
+      required: true
+
+  - type: dropdown
+    id: downtime_expected
+    attributes:
+      label: Is downtime expected?
+      options:
+        - No
+        - Yes
+        - Unknown
+    validations:
+      required: true
+
+  - type: input
+    id: downtime_duration
+    attributes:
+      label: Estimated downtime (if any)
+      placeholder: "e.g., 2–5 minutes"
+    validations:
+      required: false
+
+  - type: input
+    id: change_window_start
+    attributes:
+      label: Planned start (UTC)
+      placeholder: "YYYY-MM-DD HH:MM UTC"
+    validations:
+      required: true
+
+  - type: input
+    id: change_window_end
+    attributes:
+      label: Planned end (UTC)
+      placeholder: "YYYY-MM-DD HH:MM UTC"
+    validations:
+      required: true
+
+  - type: textarea
+    id: pre_reqs
+    attributes:
+      label: Preconditions / Dependencies
+      description: Feature flags, infra readiness, approvals, sequencing with other changes
+      placeholder: |
+        - Flag `new_parser_enabled` must be OFF
+        - S3 bucket versioning enabled
+        - #1234 (DB index) must be deployed first
+    validations:
+      required: true
+
+  - type: textarea
+    id: implementation_plan
+    attributes:
+      label: Implementation Plan
+      description: Step-by-step commands and verification points
+      placeholder: |
+        1) Merge #4567 to main
+        2) Deploy `v2.3.0` via ArgoCD; watch rollout
+        3) Run migration `20250815_add_index.sql`
+        4) Flip flag `new_parser_enabled` to 5% for 10 mins
+        5) Validate KPI dashboards (see links)
+    validations:
+      required: true
+
+  - type: textarea
+    id: validation_plan
+    attributes:
+      label: Post-Deploy Validation
+      description: Health checks, synthetic tests, KPIs, dashboards
+      placeholder: |
+        - /healthz returns 200
+        - Error rate < 0.5% (Datadog dashboard link)
+        - Latency p95 < 200ms
+        - Synthetic checkout passes
+    validations:
+      required: true
+
+  - type: textarea
+    id: monitoring_plan
+    attributes:
+      label: Monitoring & Alerting
+      description: What alerts, logs, and dashboards will be watched?
+      placeholder: |
+        - Datadog monitors: API errors, 5xx, latency
+        - Log queries for "NullPointerException"
+        - SLO burn-rate alerts
+
+  - type: textarea
+    id: rollback_plan
+    attributes:
+      label: Rollback / Backout Plan
+      description: Exact steps to revert safely; data restore approach if needed
+      placeholder: |
+        - Rollback to tag `v2.2.9`
+        - Revert PR #4567
+        - Disable `new_parser_enabled`
+        - Restore data from snapshot `prod-rds-2025-08-20-21:15`
+    validations:
+      required: true
+
+  - type: textarea
+    id: security_privacy
+    attributes:
+      label: Security / Privacy Considerations
+      description: Keys/secrets, PII exposure, access changes, compliance checks
+      placeholder: |
+        - Rotates `PAYMENTS_API_KEY`; confirm vault policy updated
+        - No new PII collected; DPA unchanged
+        - Access change for @oncall-sre (temporary)
+
+  - type: textarea
+    id: communication_plan
+    attributes:
+      label: Communication Plan
+      description: Stakeholders, channels, and timelines (pre/during/post)
+      placeholder: |
+        - Pre: #eng, #support 24h prior
+        - During: live updates in #deploy-prod
+        - Post: status page note + release notes
+
+  - type: textarea
+    id: related_links
+    attributes:
+      label: Related Links
+      description: PRs, design docs, runbooks, dashboards, incident history
+      placeholder: |
+        - PR: https://github.com/org/repo/pull/4567
+        - Runbook: https://…
+        - Dashboard: https://…
+        - Prior incident: #INC-2024-0912
+
+  - type: checkboxes
+    id: readiness_checklist
+    attributes:
+      label: Readiness Checklist
+      options:
+        - label: Tested in staging or an equivalent environment
+          required: true
+        - label: Rollback procedure validated (dry run or simulation)
+          required: true
+        - label: Runbooks and docs updated (if applicable)
+          required: true
+        - label: Support/On-call notified and prepared
+          required: true
+        - label: All dependencies satisfied (flags, infra, approvals)
+          required: true
+
+  - type: checkboxes
+    id: approvals
+    attributes:
+      label: Approvals (check those already obtained)
+      options:
+        - label: Product / PM
+        - label: QA / Test
+        - label: Security
+        - label: Data / Analytics
+        - label: SRE / Platform
+        - label: Change Owner
+        - label: CAB Chair
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional Notes
+      description: Anything else reviewers should know
+      placeholder: Edge cases, follow-ups, phased rollouts, etc.
