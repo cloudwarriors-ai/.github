@@ -1,64 +1,64 @@
-# .github/ISSUE_TEMPLATE/bug_report.yml
-
-name: '🐛 Bug Report'
-description: 'File a bug report to help us improve.'
-title: 'Bug: [BRIEF, DESCRIPTIVE TITLE]'
-labels: ['bug', 'needs-triage']
+name: Bug Report
+description: File a bug report.
+title: "[Bug]: "
+labels: ["bug", "triage"]
+projects: ["octo-org/1", "octo-org/44"]
+assignees:
+  - octocat
 body:
   - type: markdown
     attributes:
-      value: "Thanks for taking the time to fill out this bug report! Please provide as much detail as possible."
+      value: |
+        Thanks for taking the time to fill out this bug report!
+  - type: input
+    id: contact
+    attributes:
+      label: Contact Details
+      description: How can we get in touch with you if we need more info?
+      placeholder: ex. email@example.com
+    validations:
+      required: false
   - type: textarea
     id: what-happened
     attributes:
-      label: Describe the Bug
-      description: "A clear and concise description of what the bug is. What is happening vs. what should be happening?"
-      placeholder: "When I click the 'Save' button, the page crashes."
+      label: What happened?
+      description: Also tell us, what did you expect to happen?
+      placeholder: Tell us what you see!
+      value: "A bug happened!"
     validations:
       required: true
-  - type: textarea
-    id: reproduction-steps
+  - type: dropdown
+    id: version
     attributes:
-      label: To Reproduce
-      description: "Provide clear, step-by-step instructions to reliably reproduce the behavior."
-      placeholder: |
-        1. Go to '...'
-        2. Click on '....'
-        3. Scroll down to '....'
-        4. See the error
+      label: Version
+      description: What version of our software are you running?
+      options:
+        - 1.0.2 (Default)
+        - 1.0.3 (Edge)
+      default: 0
     validations:
       required: true
-  - type: textarea
-    id: expected-behavior
+  - type: dropdown
+    id: browsers
     attributes:
-      label: Expected Behavior
-      description: "A clear and concise description of what you expected to happen."
-      placeholder: "The form should save and I should be redirected to the dashboard."
-    validations:
-      required: true
+      label: What browsers are you seeing the problem on?
+      multiple: true
+      options:
+        - Firefox
+        - Chrome
+        - Safari
+        - Microsoft Edge
   - type: textarea
-    id: screenshots
+    id: logs
     attributes:
-      label: Screenshots / Error Logs
-      description: "If applicable, add screenshots, GIFs, or videos to help explain the problem. Please also paste any relevant error messages from the browser console or application logs."
+      label: Relevant log output
+      description: Please copy and paste any relevant log output. This will be automatically formatted into code, so no need for backticks.
       render: shell
-  - type: input
-    id: device
+  - type: checkboxes
+    id: terms
     attributes:
-      label: Device
-      placeholder: "e.g., Desktop, iPhone 14, Android"
-  - type: input
-    id: os
-    attributes:
-      label: Operating System
-      placeholder: "e.g., Windows 11, macOS Sonoma"
-  - type: input
-    id: browser
-    attributes:
-      label: Browser
-      placeholder: "e.g., Chrome, Firefox, Safari"
-  - type: textarea
-    id: context
-    attributes:
-      label: Additional Context & Impact
-      description: "How severely does this bug impact users? Is there a workaround?"
+      label: Code of Conduct
+      description: By submitting this issue, you agree to follow our [Code of Conduct](https://example.com). 
+      options:
+        - label: I agree to follow this project's Code of Conduct
+          required: true
