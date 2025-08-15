@@ -1,14 +1,1 @@
 blank_issues_enabled: false
-
-contact_links:
-  - name: 💬 Ask a Question or Start a Discussion
-    url: https://github.com/cloudwarriors-ai/.github/discussions
-    about: For general questions, feedback, or non-bug/non-change topics.
-
-  - name: 📄 Documentation
-    url: https://github.com/cloudwarriors-ai/.github/wiki
-    about: Reference our documentation for setup, workflows, and best practices.
-
-  - name: 🚨 Incident Response
-    url: https://github.com/cloudwarriors-ai/.github/issues/new?labels=incident
-    about: For urgent production incidents that require immediate attention.
