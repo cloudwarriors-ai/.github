@@ -1,0 +1,64 @@
+# .github/ISSUE_TEMPLATE/bug_report.yml
+
+name: '🐛 Bug Report'
+description: 'File a bug report to help us improve.'
+title: 'Bug: [BRIEF, DESCRIPTIVE TITLE]'
+labels: ['bug', 'needs-triage']
+body:
+  - type: markdown
+    attributes:
+      value: "Thanks for taking the time to fill out this bug report! Please provide as much detail as possible."
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Describe the Bug
+      description: "A clear and concise description of what the bug is. What is happening vs. what should be happening?"
+      placeholder: "When I click the 'Save' button, the page crashes."
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction-steps
+    attributes:
+      label: To Reproduce
+      description: "Provide clear, step-by-step instructions to reliably reproduce the behavior."
+      placeholder: |
+        1. Go to '...'
+        2. Click on '....'
+        3. Scroll down to '....'
+        4. See the error
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected Behavior
+      description: "A clear and concise description of what you expected to happen."
+      placeholder: "The form should save and I should be redirected to the dashboard."
+    validations:
+      required: true
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots / Error Logs
+      description: "If applicable, add screenshots, GIFs, or videos to help explain the problem. Please also paste any relevant error messages from the browser console or application logs."
+      render: shell
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      placeholder: "e.g., Desktop, iPhone 14, Android"
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      placeholder: "e.g., Windows 11, macOS Sonoma"
+  - type: input
+    id: browser
+    attributes:
+      label: Browser
+      placeholder: "e.g., Chrome, Firefox, Safari"
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context & Impact
+      description: "How severely does this bug impact users? Is there a workaround?"
