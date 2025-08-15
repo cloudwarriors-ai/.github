@@ -17,7 +17,6 @@ Provide as much detail as possible for each section.
 <!-- 
 What is the primary goal of this release? 
 What business value does it deliver, or what problem does it solve? 
-(e.g., "Launch the new user dashboard to improve customer engagement," "Patch critical security vulnerability CVE-2025-12345.")
 -->
 
 ### 🗓️ Proposed Deployment Window
@@ -29,7 +28,6 @@ What business value does it deliver, or what problem does it solve?
 ### 📝 High-Level Summary of Changes
 <!-- 
 Provide a non-technical summary of the features, fixes, or changes included in this release. 
-This should be understandable by business stakeholders.
 -->
 
 ---
@@ -47,13 +45,11 @@ This provides a direct audit trail to the code changes.
 ### ⚙️ System & Service Impact
 <!-- 
 What applications, services, or infrastructure components are affected by this change? 
-(e.g., API server, web frontend, user database, payment gateway)
 -->
 
 ### 📦 Deployment Dependencies
 <!-- 
 Are there any prerequisites for this deployment? 
-(e.g., "Requires database migration script to be run first," "Depends on successful deployment of the Auth service v2.1")
 -->
 
 ---
@@ -73,10 +69,10 @@ Summarize the testing that has been completed.
 <!-- 
 What could go wrong, what is the likelihood, and what is the impact?
 -->
-- **Identified Risks:** (e.g., "High load on the database after release," "Third-party API may be unresponsive.")
+- **Identified Risks:** `(e.g., "High load on the database after release")`
 - **Likelihood:** `(Low / Medium / High)`
 - **Impact:** `(Low / Medium / High)`
-- **Mitigation Plan:** (e.g., "We will monitor database CPU closely. We have implemented retries with exponential backoff for the third-party API.")
+- **Mitigation Plan:** `(e.g., "Monitor database CPU closely")`
 
 ### ⏪ Rollback Plan
 <!-- 
@@ -84,20 +80,34 @@ Provide a step-by-step plan to revert the changes if the deployment fails.
 Be specific.
 -->
 1.  **Decision Point:** The deployment will be considered failed if `(e.g., critical error rate exceeds 5% for 10 minutes)`.
-2.  **Rollback Trigger:** The on-call engineer will initiate the rollback by `(e.g., redeploying the previous stable version via the CI/CD pipeline)`.
+2.  **Rollback Trigger:** The on-call engineer will initiate the rollback by `(e.g., redeploying the previous stable version)`.
 3.  **Estimated Rollback Time:** `(e.g., 15 minutes)`
 4.  **Communication:** The engineering lead will notify stakeholders in the `#releases` Slack channel.
 
 ---
 
-## 4. Post-Deployment Plan
+## 4. SOX Compliance & Internal Controls Assessment
+<!-- This section is mandatory for the audit trail. -->
+
+- **Does this release impact SOX-relevant systems (e.g., billing, financial reporting, user access controls)?**
+  `Answer: Yes/No`
+
+- **If yes, describe how internal controls were tested and verified:**
+  `Answer: (e.g., "Tested that only users with the 'Admin' role can access the new reporting page.")`
+
+- **Have all separation of duties requirements been met (i.e., PR approvers were different from authors)?**
+  `Answer: Yes/No`
+
+---
+
+## 5. Post-Deployment Plan
 
 ### 📈 Monitoring & Verification
 <!-- 
 How will we confirm the deployment was successful? 
 -->
-- **Key Metrics to Watch:** (e.g., "API latency, HTTP 5xx error rate, user signup conversion rate.")
-- **Verification Steps:** (e.g., "The on-call engineer will perform a smoke test by logging in as a test user and verifying the new dashboard loads correctly.")
+- **Key Metrics to Watch:** `(e.g., "API latency, HTTP 5xx error rate")`
+- **Verification Steps:** `(e.g., "On-call engineer will perform a smoke test.")`
 
 ### 👨‍👩‍👧 Key Personnel
 - **Deployment Lead:** `@github-username`
@@ -107,10 +117,11 @@ How will we confirm the deployment was successful?
 ---
 
 ## APPROVAL (To be filled out by CAB)
+<!-- This section is the official, auditable sign-off. -->
 
 - [ ] **Approved**
 - [ ] **Rejected**
 
-**Reviewer:**
-**Date:**
+**Reviewer(s):** `@cab-member-1`, `@cab-member-2`
+**Date:** `YYYY-MM-DD`
 **Comments:**
