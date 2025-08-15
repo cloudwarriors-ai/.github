@@ -31,10 +31,10 @@ body:
       label: Change Category
       description: CAB categories
       options:
-        - Standard – Pre-approved, low risk, runbook-driven
-        - Normal – Typical change, requires CAB review
-        - Emergency – Critical fix; expedited review
-        - Hotfix – Urgent production patch outside normal window
+        - "Standard – Pre-approved, low risk, runbook-driven"
+        - "Normal – Typical change, requires CAB review"
+        - "Emergency – Critical fix; expedited review"
+        - "Hotfix – Urgent production patch outside normal window"
     validations:
       required: true
 
@@ -148,4 +148,109 @@ body:
         4) Flip flag `new_parser_enabled` to 5% for 10 mins
         5) Validate KPI dashboards (see links)
     validations:
-      re
+      required: true
+
+  - type: textarea
+    id: validation_plan
+    attributes:
+      label: Post-Deploy Validation
+      description: Health checks, synthetic tests, KPIs, dashboards
+      placeholder: |
+        - /healthz returns 200
+        - Error rate < 0.5% (Datadog dashboard link)
+        - Latency p95 < 200ms
+        - Synthetic checkout passes
+    validations:
+      required: true
+
+  - type: textarea
+    id: monitoring_plan
+    attributes:
+      label: Monitoring & Alerting
+      description: What alerts, logs, and dashboards will be watched?
+      placeholder: |
+        - Datadog monitors: API errors, 5xx, latency
+        - Log queries for "NullPointerException"
+        - SLO burn-rate alerts
+
+  - type: textarea
+    id: rollback_plan
+    attributes:
+      label: Rollback / Backout Plan
+      description: Exact steps to revert safely; data restore approach if needed
+      placeholder: |
+        - Rollback to tag `v2.2.9`
+        - Revert PR #4567
+        - Disable `new_parser_enabled`
+        - Restore data from snapshot `prod-rds-2025-08-20-21:15`
+    validations:
+      required: true
+
+  - type: textarea
+    id: security_privacy
+    attributes:
+      label: Security / Privacy Considerations
+      description: Keys/secrets, PII exposure, access changes, compliance checks
+      placeholder: |
+        - Rotates `PAYMENTS_API_KEY`; confirm vault policy updated
+        - No new PII collected; DPA unchanged
+        - Access change for @oncall-sre (temporary)
+
+  - type: textarea
+    id: communication_plan
+    attributes:
+      label: Communication Plan
+      description: Stakeholders, channels, and timelines (pre/during/post)
+      placeholder: |
+        - Pre: #eng, #support 24h prior
+        - During: live updates in #deploy-prod
+        - Post: status page note + release notes
+
+  - type: textarea
+    id: related_links
+    attributes:
+      label: Related Links
+      description: PRs, design docs, runbooks, dashboards, incident history
+      placeholder: |
+        - PR: https://github.com/org/repo/pull/4567
+        - Runbook: https://…
+        - Dashboard: https://…
+        - Prior incident: #INC-2024-0912
+
+  - type: checkboxes
+    id: readiness_checklist
+    attributes:
+      label: Readiness Checklist
+      options:
+        - label: Tested in staging or an equivalent environment
+          required: true
+        - label: Rollback procedure validated (dry run or simulation)
+          required: true
+        - label: Runbooks and docs updated (if applicable)
+          required: true
+        - label: Support/On-call notified and prepared
+          required: true
+        - label: All dependencies satisfied (flags, infra, approvals)
+          required: true
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: approvals
+    attributes:
+      label: Approvals (check those already obtained)
+      options:
+        - label: Product / PM
+        - label: QA / Test
+        - label: Security
+        - label: Data / Analytics
+        - label: SRE / Platform
+        - label: Change Owner
+        - label: CAB Chair
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional Notes
+      description: Anything else reviewers should know
+      placeholder: Edge cases, follow-ups, phased rollouts, etc.
