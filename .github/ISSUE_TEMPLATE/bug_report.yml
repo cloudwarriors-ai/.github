@@ -1,0 +1,34 @@
+name: "🐛 Bug report"
+description: Report a reproducible problem
+title: "[BUG] <short summary>"
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Clear, concise description of the bug.
+      placeholder: e.g., App crashes when clicking Save
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Go to…\n2. Click…\n3. See error…"
+    validations:
+      required: true
+  - type: input
+    id: expected
+    attributes:
+      label: Expected behavior
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      placeholder: "OS, browser/node, app version/commit"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      render: shell
