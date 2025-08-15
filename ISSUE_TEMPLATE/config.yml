@@ -1,7 +1,0 @@
-# .github/ISSUE_TEMPLATE/config.yml
-
-blank_issues_enabled: true
-contact_links:
-  - name: 💬 Ask a Question or Get Help
-    url: https://github.com/orgs/cloudwarriors-ai/discussions # <-- You can change this to a Slack channel if you prefer
-    about: Please use GitHub Discussions for questions that are not a bug or a formal change request.
