@@ -25,6 +25,16 @@ body:
     validations:
       required: true
 
+  - type: textarea
+    id: implementers
+    attributes:
+      label: Implementers
+      description: List of engineers who will execute this change
+      placeholder: |
+        - @engineer1
+        - @engineer2
+        - @team-alias
+
   - type: dropdown
     id: change_category
     attributes:
@@ -65,6 +75,19 @@ body:
         Scope:
         Target systems/services:
         User impact (if any):
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_outcome
+    attributes:
+      label: Expected Outcome
+      description: What does success look like? How will you know the change worked?
+      placeholder: |
+        - Forms will save properly without data loss
+        - Order data cleanup will prevent inconsistent states
+        - Users will see clear notifications about data changes
+        - SOW generation will only include relevant product data
     validations:
       required: true
 
@@ -137,6 +160,17 @@ body:
       required: true
 
   - type: textarea
+    id: resource_requirements
+    attributes:
+      label: Resource Requirements
+      description: Personnel, tools, access, and infrastructure needed for implementation
+      placeholder: |
+        - Access to production Django environment
+        - Database admin privileges for migrations
+        - Deployment pipeline access
+        - On-call engineer availability
+
+  - type: textarea
     id: implementation_plan
     attributes:
       label: Implementation Plan
@@ -151,6 +185,17 @@ body:
       required: true
 
   - type: textarea
+    id: pre_implementation_tests
+    attributes:
+      label: Pre-Implementation Testing
+      description: Tests and validations performed before deployment
+      placeholder: |
+        - Staging environment testing completed
+        - Unit tests passing
+        - Integration tests verified
+        - Performance impact assessed
+
+  - type: textarea
     id: validation_plan
     attributes:
       label: Post-Deploy Validation
@@ -162,6 +207,17 @@ body:
         - Synthetic checkout passes
     validations:
       required: true
+
+  - type: textarea
+    id: success_criteria
+    attributes:
+      label: Success Criteria
+      description: Specific measurable outcomes that define successful implementation
+      placeholder: |
+        - All form toggles save and persist correctly
+        - No validation errors on form submissions
+        - Order data cleanup logs show successful operation
+        - Zero reports of data loss from users
 
   - type: textarea
     id: monitoring_plan
@@ -185,6 +241,34 @@ body:
         - Restore data from snapshot `prod-rds-2025-08-20-21:15`
     validations:
       required: true
+
+  - type: textarea
+    id: rollback_triggers
+    attributes:
+      label: Rollback Triggers
+      description: Specific conditions that would trigger a rollback decision
+      placeholder: |
+        - Error rate exceeds 1%
+        - Critical functionality broken (forms not saving)
+        - User complaints about data loss
+        - System performance degraded by >20%
+
+  - type: input
+    id: rollback_time_estimate
+    attributes:
+      label: Estimated Time to Rollback
+      description: How long will it take to complete rollback procedures?
+      placeholder: "e.g., 10-15 minutes"
+
+  - type: textarea
+    id: rollback_impact
+    attributes:
+      label: Potential Impacts of Rollback
+      description: What are the consequences of rolling back this change?
+      placeholder: |
+        - Users will continue experiencing form saving issues
+        - Order data inconsistencies will persist
+        - Additional downtime for rollback procedure
 
   - type: textarea
     id: security_privacy
