@@ -1,4 +1,4 @@
-name: Developer Tooling Request
+name: Support Team Request
 description: Request new tools, automation, or improvements to developer experience
 title: "[TOOL REQUEST]: "
 labels: ["tooling-request", "needs-triage"]
@@ -38,6 +38,26 @@ body:
       label: Proposed Solution (Optional)
       description: If you have ideas for how this could be solved
       placeholder: "A CLI tool that automates the deployment process, or a GitHub Action that..."
+
+  - type: textarea
+    id: related-issues
+    attributes:
+      label: Related GitHub Issues
+      description: Link any existing issues this relates to (bug reports, feature requests, etc.)
+      placeholder: |
+        - Closes #123
+        - Related to #456
+        - See also: owner/repo#789
+
+  - type: textarea
+    id: affected-repos
+    attributes:
+      label: Affected Repositories/Branches
+      description: Which repos, branches, or codebases are involved?
+      placeholder: |
+        - main-api (develop branch)
+        - frontend-app (feature/new-auth branch)
+        - shared-utils repository
 
   - type: dropdown
     id: impact
