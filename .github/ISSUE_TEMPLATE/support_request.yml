@@ -1,0 +1,71 @@
+name: Developer Tooling Request
+description: Request new tools, automation, or improvements to developer experience
+title: "[TOOL REQUEST]: "
+labels: ["tooling-request", "needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Description
+      description: What pain point or inefficiency are you experiencing?
+      placeholder: "Currently I have to manually deploy to staging every time I want to test a feature, which takes 15 minutes each time..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often do you encounter this problem?
+      options:
+        - Multiple times per day
+        - Daily
+        - Weekly
+        - Monthly
+        - One-time need
+    validations:
+      required: true
+
+  - type: textarea
+    id: current-workaround
+    attributes:
+      label: Current Workaround
+      description: How are you handling this today?
+      placeholder: "I'm manually running these 5 commands each time..."
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed Solution (Optional)
+      description: If you have ideas for how this could be solved
+      placeholder: "A CLI tool that automates the deployment process, or a GitHub Action that..."
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Who else is affected?
+      options:
+        - Just me
+        - My team (2-5 people)
+        - Multiple teams (6-15 people)
+        - Most/all developers (15+ people)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: urgency
+    attributes:
+      label: Urgency
+      options:
+        - Blocking current work
+        - Slowing down current work
+        - Would improve productivity
+        - Nice to have
+    validations:
+      required: true
+
+  - type: textarea
+    id: success-criteria
+    attributes:
+      label: Success Criteria
+      description: How would you know this tool is working well?
+      placeholder: "Deployment time reduced from 15 minutes to under 2 minutes"
