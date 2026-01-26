@@ -7,10 +7,6 @@ on:
         description: 'JSON array of branches to review PRs for (default: ["main", "master"])'
         type: string
         default: '["main", "master"]'
-      node_version:
-        description: 'Node.js version to use'
-        type: string
-        default: '22'
       max_iterations:
         description: 'Maximum fix iterations before circuit breaker'
         type: number
@@ -23,6 +19,37 @@ on:
         description: 'Timeout for the entire workflow'
         type: number
         default: 30
+      # Language-agnostic command inputs
+      setup_command:
+        description: 'Command to set up the environment (e.g., "pip install -r requirements.txt" or "npm install")'
+        type: string
+        default: ''
+      install_command:
+        description: 'Command to install dependencies (default: auto-detect npm/pip)'
+        type: string
+        default: ''
+      lint_command:
+        description: 'Command to run linting (e.g., "npm run lint" or "ruff check .")'
+        type: string
+        default: ''
+      test_command:
+        description: 'Command to run tests (e.g., "npm run test:unit" or "pytest")'
+        type: string
+        default: ''
+      build_command:
+        description: 'Command to build the project (e.g., "npm run build" or "python -m build")'
+        type: string
+        default: ''
+      # Node.js specific (optional)
+      node_version:
+        description: 'Node.js version (leave empty to skip Node setup)'
+        type: string
+        default: ''
+      # Python specific (optional)
+      python_version:
+        description: 'Python version (leave empty to skip Python setup)'
+        type: string
+        default: ''
     secrets:
       OPENROUTER_API_KEY:
         required: true
@@ -172,18 +199,39 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
-        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
+        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true' && inputs.node_version != ''
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
 
+      - name: Setup Python
+        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true' && inputs.python_version != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
       - name: Install Dependencies
         if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
         run: |
-          if [ -f package-lock.json ]; then
+          # Use custom install command if provided
+          if [ -n "${{ inputs.install_command }}" ]; then
+            ${{ inputs.install_command }}
+          # Auto-detect based on project files
+          elif [ -f package-lock.json ]; then
             npm ci
-          else
+          elif [ -f package.json ]; then
             npm install
+          elif [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          elif [ -f pyproject.toml ]; then
+            pip install -e .
+          elif [ -f Pipfile ]; then
+            pip install pipenv && pipenv install --dev
+          fi
+
+          # Run custom setup command if provided
+          if [ -n "${{ inputs.setup_command }}" ]; then
+            ${{ inputs.setup_command }}
           fi
 
       - name: Install Claude Code CLI
@@ -291,6 +339,11 @@ jobs:
             Include an 'Acceptance Criteria Verification' section in your review with ✅/❌ for each.`;
             }
 
+            // Build CI commands based on inputs or defaults
+            const lintCmd = process.env.LINT_CMD || 'npm run lint';
+            const testCmd = process.env.TEST_CMD || 'npm run test:unit';
+            const buildCmd = process.env.BUILD_CMD || 'npm run build';
+
             const prompt = `You are a senior developer reviewing PR #${process.env.PR_NUM}: "${process.env.PR_TITLE}"
 
             Author: ${process.env.PR_AUTHOR}
@@ -301,9 +354,9 @@ jobs:
 
             1. **Run CI checks** (use Bash tool):
                \`\`\`bash
-               npm run build   # TypeScript compilation
-               npm run lint    # Type checking
-               npm run test:unit  # Unit tests
+               ${buildCmd}   # Build/compile
+               ${lintCmd}    # Linting/type checking
+               ${testCmd}    # Unit tests
                \`\`\`
 
             2. **Review code changes** using project conventions from CLAUDE.md:
@@ -353,6 +406,9 @@ jobs:
           ISSUE_NUM: ${{ steps.linked_issue.outputs.number }}
           ISSUE_TITLE: ${{ steps.linked_issue.outputs.title }}
           CRITERIA: ${{ steps.linked_issue.outputs.criteria }}
+          LINT_CMD: ${{ inputs.lint_command }}
+          TEST_CMD: ${{ inputs.test_command }}
+          BUILD_CMD: ${{ inputs.build_command }}
 
       - name: Run Initial Review
         if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
@@ -505,12 +561,22 @@ jobs:
             echo "$CRITERIA" >> /tmp/fix-prompt.md
           fi
 
-          cat >> /tmp/fix-prompt.md << 'FIX_EOF'
+          # Build quality gate command
+          LINT_CMD="${{ inputs.lint_command }}"
+          TEST_CMD="${{ inputs.test_command }}"
+          BUILD_CMD="${{ inputs.build_command }}"
+
+          # Use defaults if not specified
+          [ -z "$LINT_CMD" ] && LINT_CMD="npm run lint"
+          [ -z "$TEST_CMD" ] && TEST_CMD="npm run test:unit"
+          [ -z "$BUILD_CMD" ] && BUILD_CMD="npm run build"
+
+          cat >> /tmp/fix-prompt.md << FIX_EOF
 
           ## Instructions
           1. Fix the specific issues identified above
           2. Add tests if needed
-          3. Run quality gates: npm run lint && npm run test:unit && npm run build
+          3. Run quality gates: $LINT_CMD && $TEST_CMD && $BUILD_CMD
           4. Keep changes minimal and focused
 
           Do NOT modify .github/workflows/ files.

@@ -48,8 +48,17 @@ jobs:
     uses: cloudwarriors-ai/.github/.github/workflows/reusable-claude-issue-handler.yml@main
     with:
       target_branch: main  # Change to your default branch (main, master, develop, etc.)
-      node_version: '22'
-      skip_browser_verification: true
+      # -- Node.js projects (uncomment and configure):
+      # node_version: '22'
+      # lint_command: 'npm run lint'
+      # test_command: 'npm run test:unit'
+      # build_command: 'npm run build'
+      # -- Python projects (uncomment and configure):
+      # python_version: '3.11'
+      # install_command: 'pip install -r requirements.txt'
+      # lint_command: 'ruff check . && mypy .'
+      # test_command: 'pytest'
+      # build_command: 'echo "No build step"'
     secrets: inherit
 
   # Review PRs when someone comments "@claude review"
@@ -61,8 +70,8 @@ jobs:
       contains(github.event.comment.body, 'review')
     uses: cloudwarriors-ai/.github/.github/workflows/reusable-claude-pr-review.yml@main
     with:
-      node_version: '22'
       max_iterations: 3
+      # Configure for your language - see handle-issue above
     secrets: inherit
 
   # Review PRs when "claude-review" label is added
@@ -73,8 +82,8 @@ jobs:
       github.event.label.name == 'claude-review'
     uses: cloudwarriors-ai/.github/.github/workflows/reusable-claude-pr-review.yml@main
     with:
-      node_version: '22'
       max_iterations: 3
+      # Configure for your language - see handle-issue above
     secrets: inherit
 
   # Manual PR review trigger
@@ -82,8 +91,8 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     uses: cloudwarriors-ai/.github/.github/workflows/reusable-claude-pr-review.yml@main
     with:
-      node_version: '22'
       max_iterations: 3
+      # Configure for your language - see handle-issue above
     secrets: inherit
 
   # Re-review after auto-fix
@@ -91,19 +100,46 @@ jobs:
     if: github.event_name == 'repository_dispatch' && github.event.action == 'pr-review'
     uses: cloudwarriors-ai/.github/.github/workflows/reusable-claude-pr-review.yml@main
     with:
-      node_version: '22'
       max_iterations: 3
+      # Configure for your language - see handle-issue above
     secrets: inherit
 ```
 
 ### Step 2: Customize for Your Repo
 
-Update these values in the workflow:
+Update these values in the workflow based on your project language:
+
+**For Node.js/TypeScript projects:**
+```yaml
+node_version: '22'
+lint_command: 'npm run lint'
+test_command: 'npm run test:unit'
+build_command: 'npm run build'
+```
+
+**For Python projects:**
+```yaml
+python_version: '3.11'
+install_command: 'pip install -r requirements.txt'
+lint_command: 'ruff check . && mypy .'
+test_command: 'pytest'
+build_command: 'echo "No build step"'  # or 'python -m build'
+```
+
+**For Django projects:**
+```yaml
+python_version: '3.11'
+install_command: 'pip install -r requirements.txt'
+lint_command: 'ruff check . && mypy .'
+test_command: 'python manage.py test'
+build_command: 'python manage.py check'
+```
+
+**Common settings:**
 
 | Setting | Default | Change To |
 |---------|---------|-----------|
 | `target_branch` | `main` | Your default branch (`master`, `develop`, etc.) |
-| `node_version` | `22` | Your Node.js version (if different) |
 | `max_iterations` | `3` | Max fix attempts before giving up |
 
 ### Step 3: Commit to Default Branch
@@ -266,20 +302,48 @@ Add these to your comment or commit message:
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
 | `target_branch` | string | `main` | Branch to base fixes on |
-| `node_version` | string | `22` | Node.js version |
 | `skip_browser_verification` | boolean | `true` | Skip browser tests |
 | `max_retries` | number | `3` | Claude retry attempts |
 | `timeout_minutes` | number | `15` | Claude execution timeout |
+| **Language Setup** | | | |
+| `node_version` | string | `""` | Node.js version (leave empty to skip) |
+| `python_version` | string | `""` | Python version (leave empty to skip) |
+| **Custom Commands** | | | |
+| `setup_command` | string | `""` | Additional setup after install |
+| `install_command` | string | auto | Install dependencies (auto-detects npm/pip) |
+| `lint_command` | string | auto | Lint command (e.g., `npm run lint` or `ruff check .`) |
+| `test_command` | string | auto | Test command (e.g., `npm run test:unit` or `pytest`) |
+| `build_command` | string | auto | Build command (e.g., `npm run build`) |
 
 ### PR Review (`reusable-claude-pr-review.yml`)
 
 | Input | Type | Default | Description |
 |-------|------|---------|-------------|
 | `target_branches` | string | `["main", "master"]` | Branches to review PRs for |
-| `node_version` | string | `22` | Node.js version |
 | `max_iterations` | number | `3` | Max review/fix cycles |
 | `auto_merge_branch` | string | `""` | Branch to auto-merge approved PRs |
 | `timeout_minutes` | number | `30` | Workflow timeout |
+| **Language Setup** | | | |
+| `node_version` | string | `""` | Node.js version (leave empty to skip) |
+| `python_version` | string | `""` | Python version (leave empty to skip) |
+| **Custom Commands** | | | |
+| `setup_command` | string | `""` | Additional setup after install |
+| `install_command` | string | auto | Install dependencies (auto-detects npm/pip) |
+| `lint_command` | string | auto | Lint command |
+| `test_command` | string | auto | Test command |
+| `build_command` | string | auto | Build command |
+
+### Auto-Detection Behavior
+
+When commands are not specified, the workflow auto-detects based on project files:
+
+| File Found | Install Command | Lint/Test/Build |
+|------------|----------------|-----------------|
+| `package-lock.json` | `npm ci` | `npm run lint/test:unit/build` |
+| `package.json` | `npm install` | `npm run lint/test:unit/build` |
+| `requirements.txt` | `pip install -r requirements.txt` | N/A (must specify) |
+| `pyproject.toml` | `pip install -e .` | N/A (must specify) |
+| `Pipfile` | `pipenv install --dev` | N/A (must specify) |
 
 ---
 
