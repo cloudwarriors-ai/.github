@@ -736,25 +736,28 @@ jobs:
               const test = fs.readFileSync('/tmp/test.txt', 'utf8').slice(-1500);
               const build = fs.readFileSync('/tmp/build.txt', 'utf8').slice(-1500);
 
-              if ('${{ steps.gates.outputs.lint_status }}' === 'failed') {
+              const lintStatus = '${{ steps.gates.outputs.lint_status }}';
+              const testStatus = '${{ steps.gates.outputs.test_status }}';
+              const buildStatus = '${{ steps.gates.outputs.build_status }}';
+
+              if (lintStatus === 'failed') {
                 details += `<details><summary>Lint Errors</summary>\n\n\`\`\`\n${lint}\n\`\`\`\n</details>\n\n`;
               }
-              if ('${{ steps.gates.outputs.test_status }}' === 'failed') {
+              if (testStatus === 'failed') {
                 details += `<details><summary>Test Failures</summary>\n\n\`\`\`\n${test}\n\`\`\`\n</details>\n\n`;
               }
-              if ('${{ steps.gates.outputs.build_status }}' === 'failed') {
+              if (buildStatus === 'failed') {
                 details += `<details><summary>Build Errors</summary>\n\n\`\`\`\n${build}\n\`\`\`\n</details>\n\n`;
               }
             } catch (e) {}
 
-            await github.rest.issues.updateComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              comment_id: ${{ steps.progress_comment.outputs.comment_id }},
-              body: `<!-- CLAUDE_PROGRESS -->
+            const branchName = '${{ steps.branch.outputs.branch }}' || 'unknown';
+            const progressCommentId = '${{ steps.progress_comment.outputs.comment_id }}';
+
+            const failureBody = `<!-- CLAUDE_PROGRESS -->
             ## ❌ Claude couldn't fix this issue automatically
 
-            **Branch:** \`${{ steps.branch.outputs.branch }}\`
+            **Branch:** \`${branchName}\`
 
             ${details}
 
@@ -763,8 +766,24 @@ jobs:
             2. Add more context: \`@claude [hint: focus on X]\`
             3. Fix manually and close the issue
 
-            _Failed: ${new Date().toISOString()}_`
-            });
+            _Failed: ${new Date().toISOString()}_`;
+
+            // Update existing comment if we have one, otherwise create new
+            if (progressCommentId) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: parseInt(progressCommentId),
+                body: failureBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: failureBody
+              });
+            }
 
       - name: Remove lock label
         if: always()
@@ -785,10 +804,12 @@ jobs:
       - name: Collect metrics
         if: always()
         run: |
+          ISSUE_NUM="${{ steps.issue.outputs.number }}"
+          ISSUE_NUM="${ISSUE_NUM:-0}"
           cat > /tmp/metrics.json << EOF
           {
             "workflow": "claude-issue-handler",
-            "issue_number": ${{ steps.issue.outputs.number }},
+            "issue_number": $ISSUE_NUM,
             "run_id": "${{ github.run_id }}",
             "outcome": "${{ job.status }}",
             "attempts": ${{ steps.fix.outputs.attempts || 0 }},
