@@ -199,13 +199,13 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
-        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true' && inputs.node_version != ''
+        if: ${{ steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true' && inputs.node_version != '' }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
 
       - name: Setup Python
-        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true' && inputs.python_version != ''
+        if: ${{ steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true' && inputs.python_version != '' }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python_version }}
