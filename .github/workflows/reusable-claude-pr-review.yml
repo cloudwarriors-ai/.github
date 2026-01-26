@@ -60,8 +60,14 @@ jobs:
               prNumber = parseInt('${{ github.event.inputs.pr_number }}');
             } else if (context.eventName === 'repository_dispatch') {
               prNumber = parseInt(context.payload.client_payload.pr_number);
-            } else {
+            } else if (context.eventName === 'issue_comment') {
+              // For comments on PRs, the PR number is in issue.number
+              prNumber = context.payload.issue.number;
+            } else if (context.payload.pull_request) {
               prNumber = context.payload.pull_request.number;
+            } else {
+              core.setFailed('Could not determine PR number from event context');
+              return;
             }
 
             const pr = await github.rest.pulls.get({
