@@ -176,7 +176,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
-          cache: 'npm'
 
       - name: Install Dependencies
         if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
