@@ -565,6 +565,32 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Re-trigger for Next Iteration
+        if: |
+          steps.pr_info.outputs.is_draft != 'true' &&
+          steps.options.outputs.skip != 'true' &&
+          steps.iteration.outputs.circuit_break != 'true' &&
+          steps.autofix.outputs.fixes_applied == 'true' &&
+          steps.review.outputs.approval != 'approve'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const iteration = parseInt('${{ steps.iteration.outputs.count }}') || 0;
+            const maxIter = parseInt('${{ steps.iteration.outputs.max }}');
+            const prNumber = parseInt('${{ steps.pr_info.outputs.number }}');
+
+            console.log(`Triggering iteration ${iteration + 2} of ${maxIter}...`);
+
+            // Add small delay to avoid race conditions
+            await new Promise(resolve => setTimeout(resolve, 5000));
+
+            await github.rest.repos.createDispatchEvent({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              event_type: 'pr-review',
+              client_payload: { pr_number: prNumber }
+            });
+
       - name: Add Labels
         if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
         uses: actions/github-script@v7
