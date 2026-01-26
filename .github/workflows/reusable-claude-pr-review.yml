@@ -179,7 +179,12 @@ jobs:
 
       - name: Install Dependencies
         if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
-        run: npm ci
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
 
       - name: Install Claude Code CLI
         if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
