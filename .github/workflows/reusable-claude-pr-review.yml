@@ -1,0 +1,654 @@
+name: Claude PR Review (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      target_branches:
+        description: 'JSON array of branches to review PRs for (default: ["main", "master"])'
+        type: string
+        default: '["main", "master"]'
+      node_version:
+        description: 'Node.js version to use'
+        type: string
+        default: '22'
+      max_iterations:
+        description: 'Maximum fix iterations before circuit breaker'
+        type: number
+        default: 3
+      auto_merge_branch:
+        description: 'Branch to auto-merge approved PRs to (empty to disable)'
+        type: string
+        default: ''
+      timeout_minutes:
+        description: 'Timeout for the entire workflow'
+        type: number
+        default: 30
+    secrets:
+      OPENROUTER_API_KEY:
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+
+    env:
+      ANTHROPIC_API_KEY: ""
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.OPENROUTER_API_KEY }}
+      ANTHROPIC_BASE_URL: https://openrouter.ai/api
+      DEFAULT_MAX_ITERATIONS: ${{ inputs.max_iterations }}
+
+    outputs:
+      pr_number: ${{ steps.pr_info.outputs.number }}
+      approval: ${{ steps.review.outputs.approval }}
+      needs_fix: ${{ steps.needs_fix.outputs.needs_fix }}
+
+    steps:
+      - name: Get PR Details
+        id: pr_info
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let prNumber;
+            if (context.eventName === 'workflow_dispatch') {
+              prNumber = parseInt('${{ github.event.inputs.pr_number }}');
+            } else if (context.eventName === 'repository_dispatch') {
+              prNumber = parseInt(context.payload.client_payload.pr_number);
+            } else {
+              prNumber = context.payload.pull_request.number;
+            }
+
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+
+            // Check if PR is draft
+            if (pr.data.draft) {
+              core.notice('Skipping review for draft PR');
+              core.setOutput('is_draft', 'true');
+            } else {
+              core.setOutput('is_draft', 'false');
+            }
+
+            // Check if base branch is in target branches
+            const targetBranches = JSON.parse('${{ inputs.target_branches }}');
+            const isTargetBranch = targetBranches.includes(pr.data.base.ref);
+            core.setOutput('is_target_branch', isTargetBranch.toString());
+
+            core.setOutput('number', pr.data.number);
+            core.setOutput('head_ref', pr.data.head.ref);
+            core.setOutput('base_ref', pr.data.base.ref);
+            core.setOutput('title', pr.data.title);
+            core.setOutput('body', pr.data.body || '');
+            core.setOutput('author', pr.data.user.login);
+
+            console.log(`PR #${prNumber}: ${pr.data.title}`);
+            console.log(`Head: ${pr.data.head.ref} -> Base: ${pr.data.base.ref}`);
+
+      - name: Check for review options
+        id: options
+        if: steps.pr_info.outputs.is_draft != 'true'
+        run: |
+          # Get latest commit message
+          COMMIT_MSG=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ steps.pr_info.outputs.number }}/commits" \
+            | jq -r '.[-1].commit.message // ""')
+
+          echo "Latest commit: $COMMIT_MSG"
+
+          # Parse options from commit message
+          if echo "$COMMIT_MSG" | grep -qE "\[iterations:[0-9]+\]"; then
+            MAX_ITER=$(echo "$COMMIT_MSG" | grep -oE "\[iterations:[0-9]+\]" | grep -oE "[0-9]+")
+            echo "max_iterations=$MAX_ITER" >> "$GITHUB_OUTPUT"
+          else
+            echo "max_iterations=$DEFAULT_MAX_ITERATIONS" >> "$GITHUB_OUTPUT"
+          fi
+
+          if echo "$COMMIT_MSG" | grep -q "\[skip automated review\]"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "review_only=false" >> "$GITHUB_OUTPUT"
+          elif echo "$COMMIT_MSG" | grep -q "\[review only\]"; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "review_only=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "review_only=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check Iteration Count (Circuit Breaker)
+        id: iteration
+        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Count workflow runs for this PR
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'claude-ci.yml',
+              head_sha: context.sha
+            });
+
+            // Filter to only completed runs for this specific PR
+            const prRuns = runs.data.workflow_runs.filter(r =>
+              r.conclusion !== null &&
+              r.head_sha === context.sha
+            );
+
+            const iterationCount = prRuns.length;
+            const maxIterations = parseInt('${{ steps.options.outputs.max_iterations }}');
+
+            core.setOutput('count', iterationCount);
+            core.setOutput('max', maxIterations);
+
+            if (iterationCount >= maxIterations) {
+              core.setOutput('circuit_break', 'true');
+              core.warning(`Circuit breaker: ${iterationCount} iterations (max: ${maxIterations})`);
+            } else {
+              core.setOutput('circuit_break', 'false');
+              console.log(`Iteration ${iterationCount + 1} of ${maxIterations}`);
+            }
+
+      - name: Checkout PR
+        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr_info.outputs.head_ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: 'npm'
+
+      - name: Install Dependencies
+        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
+        run: npm ci
+
+      - name: Install Claude Code CLI
+        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Verify API Key
+        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
+        run: |
+          if [ -z "$ANTHROPIC_AUTH_TOKEN" ]; then
+            echo "::error::OPENROUTER_API_KEY secret is not set"
+            exit 1
+          fi
+          echo "✅ API key configured"
+
+      - name: Get Linked Issue
+        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
+        id: linked_issue
+        uses: actions/github-script@v7
+        env:
+          PR_TITLE: ${{ steps.pr_info.outputs.title }}
+          PR_BODY: ${{ steps.pr_info.outputs.body }}
+        with:
+          script: |
+            const prTitle = process.env.PR_TITLE || '';
+            const prBody = process.env.PR_BODY || '';
+
+            // Find issue number in title or body
+            const issueMatch = (prTitle + ' ' + prBody).match(/#(\d+)/);
+            if (!issueMatch) {
+              core.setOutput('found', 'false');
+              core.setOutput('criteria', '[]');
+              return;
+            }
+
+            const issueNumber = parseInt(issueMatch[1]);
+            core.setOutput('number', issueNumber);
+
+            try {
+              const issue = await github.rest.issues.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber
+              });
+
+              const body = issue.data.body || '';
+
+              // Extract acceptance criteria
+              const criteriaMatch = body.match(/##\s*Acceptance Criteria\s*([\s\S]*?)(?=##|$)/i);
+              const criteria = [];
+
+              if (criteriaMatch) {
+                const lines = criteriaMatch[1].split('\n');
+                for (const line of lines) {
+                  const match = line.match(/^[-*]\s*\[[ xX]\]\s*(.+)/);
+                  if (match) {
+                    criteria.push(match[1].trim());
+                  }
+                }
+              }
+
+              // Fallback to any checkboxes
+              if (criteria.length === 0) {
+                const lines = body.split('\n');
+                for (const line of lines) {
+                  const match = line.match(/^[-*]\s*\[[ xX]\]\s*(.+)/);
+                  if (match) {
+                    criteria.push(match[1].trim());
+                  }
+                }
+              }
+
+              core.setOutput('found', 'true');
+              core.setOutput('title', issue.data.title);
+              core.setOutput('criteria', JSON.stringify(criteria));
+              console.log(`Found issue #${issueNumber} with ${criteria.length} acceptance criteria`);
+            } catch (e) {
+              console.log(`Could not fetch issue #${issueNumber}: ${e.message}`);
+              core.setOutput('found', 'false');
+              core.setOutput('criteria', '[]');
+            }
+
+      - name: Build Review Prompt
+        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
+        id: prompt
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            const criteria = JSON.parse(process.env.CRITERIA || '[]');
+            const issueNum = process.env.ISSUE_NUM || '';
+            const issueTitle = process.env.ISSUE_TITLE || '';
+
+            let criteriaSection = '';
+            if (issueNum && criteria.length > 0) {
+              criteriaSection = `
+            ## Linked Issue
+            This PR fixes Issue #${issueNum}: ${issueTitle}
+
+            ## Acceptance Criteria to Verify
+            ${criteria.map((c, i) => `${i + 1}. ${c}`).join('\n')}
+
+            IMPORTANT: For each acceptance criterion above, verify whether the implementation addresses it.
+            Include an 'Acceptance Criteria Verification' section in your review with ✅/❌ for each.`;
+            }
+
+            const prompt = `You are a senior developer reviewing PR #${process.env.PR_NUM}: "${process.env.PR_TITLE}"
+
+            Author: ${process.env.PR_AUTHOR}
+            Branch: ${process.env.HEAD_REF} -> ${process.env.BASE_REF}
+            ${criteriaSection}
+
+            ## Instructions
+
+            1. **Run CI checks** (use Bash tool):
+               \`\`\`bash
+               npm run build   # TypeScript compilation
+               npm run lint    # Type checking
+               npm run test:unit  # Unit tests
+               \`\`\`
+
+            2. **Review code changes** using project conventions from CLAUDE.md:
+               - Security vulnerabilities (OWASP top 10)
+               - Code quality and architecture
+               - Missing tests for new functionality
+               - Hardcoded values that should be configurable
+
+            3. **Write a detailed review as markdown**, adapting depth to PR complexity:
+
+               For SMALL PRs (1-3 files, bug fixes, minor changes):
+               - Brief summary
+               - Any issues found
+               - Recommendation
+
+               For LARGE PRs (new features, many files, architectural changes):
+               - Overall Assessment with APPROVE/REQUEST_CHANGES recommendation
+               - Feature Overview (what the PR does)
+               - Code Quality Assessment
+               - Acceptance Criteria Verification (if linked issue has criteria)
+               - Verification Results (build/test status)
+
+            4. **End with JSON block** for automation (REQUIRED):
+
+            \`\`\`json
+            {
+              "approval": "approve" | "request_changes",
+              "build_passed": true | false,
+              "tests_passed": true | false,
+              "issues_count": <number>,
+              "criteria_met": <number of acceptance criteria met>,
+              "criteria_total": <total acceptance criteria>,
+              "summary": "One sentence summary"
+            }
+            \`\`\`
+
+            IMPORTANT: Write the full markdown review FIRST, then end with the JSON block.`;
+
+            fs.writeFileSync('/tmp/review-prompt.md', prompt);
+            core.setOutput('file', '/tmp/review-prompt.md');
+        env:
+          PR_NUM: ${{ steps.pr_info.outputs.number }}
+          PR_TITLE: ${{ steps.pr_info.outputs.title }}
+          PR_AUTHOR: ${{ steps.pr_info.outputs.author }}
+          HEAD_REF: ${{ steps.pr_info.outputs.head_ref }}
+          BASE_REF: ${{ steps.pr_info.outputs.base_ref }}
+          ISSUE_NUM: ${{ steps.linked_issue.outputs.number }}
+          ISSUE_TITLE: ${{ steps.linked_issue.outputs.title }}
+          CRITERIA: ${{ steps.linked_issue.outputs.criteria }}
+
+      - name: Run Initial Review
+        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
+        id: review
+        run: |
+          set +e
+          claude --print --output-format json --permission-mode bypassPermissions \
+            "$(cat /tmp/review-prompt.md)" 2>&1 | tee /tmp/review-output.txt
+          CLAUDE_EXIT=$?
+          set -e
+
+          if [ $CLAUDE_EXIT -ne 0 ]; then
+            echo "::warning::Claude CLI exited with code $CLAUDE_EXIT"
+          fi
+
+          # Parse review output
+          python3 << 'PYTHON_EOF'
+          import json, re, sys, os
+
+          def make_fallback(summary):
+              return {
+                  'approval': 'comment',
+                  'build_passed': False,
+                  'tests_passed': False,
+                  'issues_count': 0,
+                  'summary': summary
+              }
+
+          try:
+              text = open('/tmp/review-output.txt').read()
+          except:
+              json.dump(make_fallback('Could not read Claude output'), open('/tmp/review.json', 'w'))
+              open('/tmp/review-markdown.md', 'w').write('Error: Could not read Claude output')
+              sys.exit(0)
+
+          # Handle JSON envelope
+          try:
+              envelope = json.loads(text)
+              if envelope.get('type') == 'result' and 'result' in envelope:
+                  inner_text = envelope['result']
+              else:
+                  inner_text = text
+          except json.JSONDecodeError:
+              inner_text = text
+
+          # Extract JSON block
+          json_match = re.search(r'```json\s*(\{.*?\})\s*```\s*$', inner_text, re.DOTALL)
+          if json_match:
+              json_str = json_match.group(1)
+              markdown = inner_text[:json_match.start()].strip()
+          else:
+              json_match = re.search(r'```json\s*(\{.*?\})\s*```', inner_text, re.DOTALL)
+              if json_match:
+                  json_str = json_match.group(1)
+                  markdown = inner_text[:json_match.start()].strip()
+              else:
+                  json_str = None
+                  markdown = inner_text
+
+          # Parse JSON
+          if json_str:
+              try:
+                  data = json.loads(json_str)
+                  if 'approval' not in data:
+                      data = make_fallback('JSON missing approval field')
+              except:
+                  data = make_fallback('JSON parse error')
+          else:
+              data = make_fallback('No JSON block found')
+
+          # Write outputs
+          json.dump(data, open('/tmp/review.json', 'w'))
+          open('/tmp/review-markdown.md', 'w').write(markdown if markdown else data.get('summary', 'No review content'))
+
+          # Set outputs
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"approval={data.get('approval', 'comment')}\n")
+              f.write(f"criteria_met={data.get('criteria_met', 0)}\n")
+              f.write(f"criteria_total={data.get('criteria_total', 0)}\n")
+          PYTHON_EOF
+
+          echo "review=$(cat /tmp/review.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Post Review Comment
+        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
+        run: |
+          echo "" >> /tmp/review-markdown.md
+          echo "---" >> /tmp/review-markdown.md
+          echo "*🤖 Automated review by Claude Code (iteration ${{ steps.iteration.outputs.count || 1 }}/${{ steps.iteration.outputs.max || 3 }})*" >> /tmp/review-markdown.md
+          gh pr comment ${{ steps.pr_info.outputs.number }} --body-file /tmp/review-markdown.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if fixes needed
+        id: needs_fix
+        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
+        run: |
+          APPROVAL="${{ steps.review.outputs.approval }}"
+          CRITERIA_MET="${{ steps.review.outputs.criteria_met }}"
+          CRITERIA_TOTAL="${{ steps.review.outputs.criteria_total }}"
+
+          CODE_ISSUES="false"
+          CRITERIA_ISSUES="false"
+
+          if [ "$APPROVAL" = "request_changes" ]; then
+            CODE_ISSUES="true"
+          fi
+
+          if [ "$CRITERIA_TOTAL" != "0" ] && [ "$CRITERIA_MET" != "$CRITERIA_TOTAL" ]; then
+            CRITERIA_ISSUES="true"
+          fi
+
+          if [ "$CODE_ISSUES" = "true" ] && [ "$CRITERIA_ISSUES" = "true" ]; then
+            echo "needs_fix=true" >> "$GITHUB_OUTPUT"
+            echo "reason=both" >> "$GITHUB_OUTPUT"
+          elif [ "$CODE_ISSUES" = "true" ]; then
+            echo "needs_fix=true" >> "$GITHUB_OUTPUT"
+            echo "reason=code_review" >> "$GITHUB_OUTPUT"
+          elif [ "$CRITERIA_ISSUES" = "true" ]; then
+            echo "needs_fix=true" >> "$GITHUB_OUTPUT"
+            echo "reason=acceptance_criteria" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_fix=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Auto-Fix Issues
+        id: autofix
+        if: |
+          steps.pr_info.outputs.is_draft != 'true' &&
+          steps.options.outputs.skip != 'true' &&
+          steps.options.outputs.review_only != 'true' &&
+          steps.iteration.outputs.circuit_break != 'true' &&
+          steps.needs_fix.outputs.needs_fix == 'true'
+        run: |
+          REASON="${{ steps.needs_fix.outputs.reason }}"
+          CRITERIA='${{ steps.linked_issue.outputs.criteria }}'
+          REVIEW=$(cat /tmp/review.json)
+
+          # Build fix prompt based on reason
+          cat > /tmp/fix-prompt.md << 'FIX_EOF'
+          ## Fix Required: $REASON
+
+          ### Review Feedback:
+          $REVIEW
+
+          FIX_EOF
+
+          if [ "$REASON" = "both" ] || [ "$REASON" = "acceptance_criteria" ]; then
+            echo "### Acceptance Criteria:" >> /tmp/fix-prompt.md
+            echo "$CRITERIA" >> /tmp/fix-prompt.md
+          fi
+
+          cat >> /tmp/fix-prompt.md << 'FIX_EOF'
+
+          ## Instructions
+          1. Fix the specific issues identified above
+          2. Add tests if needed
+          3. Run quality gates: npm run lint && npm run test:unit && npm run build
+          4. Keep changes minimal and focused
+
+          Do NOT modify .github/workflows/ files.
+          FIX_EOF
+
+          # Replace variables
+          sed -i "s|\$REASON|$REASON|g" /tmp/fix-prompt.md
+          sed -i "s|\$REVIEW|$REVIEW|g" /tmp/fix-prompt.md
+
+          claude --permission-mode bypassPermissions "$(cat /tmp/fix-prompt.md)"
+
+          # Check for changes
+          git checkout -- .github/ 2>/dev/null || true
+          git checkout -- .env* 2>/dev/null || true
+
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "Claude Code Bot"
+            git config user.email "claude-bot@anthropic.com"
+            git add -A
+            git commit -m "fix: address code review feedback
+
+          Co-Authored-By: Claude Code <claude-bot@anthropic.com>"
+
+            FIX_SHA=$(git rev-parse HEAD)
+            echo "fix_sha=$FIX_SHA" >> "$GITHUB_OUTPUT"
+            git push
+            echo "fixes_applied=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "fixes_applied=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post Fix Comment
+        if: steps.autofix.outputs.fixes_applied == 'true'
+        run: |
+          FIX_SHA="${{ steps.autofix.outputs.fix_sha }}"
+          cat > /tmp/fix-comment.md << EOF
+          ## 🔄 Automated Fixes Applied
+
+          Commit: \`$FIX_SHA\`
+
+          ### Undo Changes
+          If you want to revert:
+          \`\`\`bash
+          git revert $FIX_SHA
+          \`\`\`
+
+          ---
+          *🤖 Automated fix by Claude Code*
+          EOF
+
+          gh pr comment ${{ steps.pr_info.outputs.number }} --body-file /tmp/fix-comment.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add Labels
+        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const approval = '${{ steps.review.outputs.approval }}';
+            const labels = ['claude-reviewed'];
+
+            if (approval === 'approve') {
+              labels.push('claude-approved');
+            } else if (approval === 'request_changes') {
+              labels.push('needs-changes');
+            }
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: parseInt('${{ steps.pr_info.outputs.number }}'),
+              labels: labels
+            });
+
+      - name: Auto-Merge
+        if: |
+          steps.pr_info.outputs.is_draft != 'true' &&
+          steps.options.outputs.skip != 'true' &&
+          steps.pr_info.outputs.base_ref == inputs.auto_merge_branch &&
+          inputs.auto_merge_branch != '' &&
+          steps.needs_fix.outputs.needs_fix != 'true' &&
+          steps.review.outputs.approval == 'approve'
+        run: |
+          echo "✅ All checks passed. Merging..."
+
+          if ! gh pr merge ${{ steps.pr_info.outputs.number }} --squash --auto --delete-branch 2>/dev/null; then
+            echo "Auto-merge not available, attempting direct merge..."
+            gh pr merge ${{ steps.pr_info.outputs.number }} --squash --delete-branch || {
+              echo "::warning::Could not merge PR"
+              exit 0
+            }
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Circuit Breaker Notification
+        if: steps.iteration.outputs.circuit_break == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = parseInt('${{ steps.pr_info.outputs.number }}');
+            const maxIterations = parseInt('${{ steps.iteration.outputs.max }}');
+
+            // Comment on PR
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: `## ⚠️ Circuit Breaker Triggered\n\n**${maxIterations} fix iterations** reached without resolving all issues.\n\n**Manual intervention required.**\n\n---\n🤖 Automated by Claude Code`
+            });
+
+            // Add label
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              labels: ['needs-human-review']
+            });
+
+      - name: Collect Metrics
+        if: always()
+        run: |
+          cat > /tmp/metrics.json << EOF
+          {
+            "workflow": "claude-pr-review",
+            "pr_number": ${{ steps.pr_info.outputs.number }},
+            "run_id": "${{ github.run_id }}",
+            "outcome": "${{ job.status }}",
+            "iteration": ${{ steps.iteration.outputs.count || 0 }},
+            "max_iterations": ${{ steps.iteration.outputs.max || 3 }},
+            "circuit_breaker": ${{ steps.iteration.outputs.circuit_break || false }},
+            "approval": "${{ steps.review.outputs.approval || 'unknown' }}",
+            "fixes_applied": ${{ steps.autofix.outputs.fixes_applied || false }},
+            "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          }
+          EOF
+          cat /tmp/metrics.json
+
+      - name: Upload Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-review-${{ steps.pr_info.outputs.number }}-${{ github.run_id }}
+          path: |
+            /tmp/review-output.txt
+            /tmp/review.json
+            /tmp/review-markdown.md
+            /tmp/metrics.json
+          if-no-files-found: ignore
+          retention-days: 7

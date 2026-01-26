@@ -1,0 +1,68 @@
+name: Claude CI
+
+on:
+  # Issue fixes - triggers when someone comments "@claude" on an issue
+  issue_comment:
+    types: [created]
+
+  # PR review - triggers when:
+  # 1. Someone comments "@claude review" on a PR
+  # 2. The "claude-review" label is added to a PR
+  pull_request:
+    types: [labeled]
+
+  # Manual trigger for PR review
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review'
+        required: true
+        type: number
+
+jobs:
+  # Handle @claude comments on issues
+  handle-issue:
+    if: |
+      github.event_name == 'issue_comment' &&
+      !github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@claude')
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-claude-issue-handler.yml@main
+    with:
+      target_branch: $default-branch
+      node_version: '22'
+      skip_browser_verification: true
+    secrets: inherit
+
+  # Handle @claude review comments on PRs
+  review-pr-on-comment:
+    if: |
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@claude') &&
+      contains(github.event.comment.body, 'review')
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-claude-pr-review.yml@main
+    with:
+      node_version: '22'
+      max_iterations: 3
+    secrets: inherit
+
+  # Handle claude-review label on PRs
+  review-pr-on-label:
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.action == 'labeled' &&
+      github.event.label.name == 'claude-review'
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-claude-pr-review.yml@main
+    with:
+      node_version: '22'
+      max_iterations: 3
+    secrets: inherit
+
+  # Manual PR review trigger
+  review-pr-manual:
+    if: github.event_name == 'workflow_dispatch'
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-claude-pr-review.yml@main
+    with:
+      node_version: '22'
+      max_iterations: 3
+    secrets: inherit

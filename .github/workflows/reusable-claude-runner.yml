@@ -1,0 +1,221 @@
+name: Claude Runner
+
+on:
+  workflow_call:
+    inputs:
+      prompt_file:
+        description: 'Path to prompt file'
+        type: string
+        required: true
+      output_format:
+        description: 'Output format (text, json)'
+        type: string
+        default: 'json'
+      max_retries:
+        description: 'Maximum retry attempts'
+        type: number
+        default: 3
+      retry_delay_seconds:
+        description: 'Delay between retries'
+        type: number
+        default: 30
+      timeout_minutes:
+        description: 'Timeout for Claude execution'
+        type: number
+        default: 15
+      permission_mode:
+        description: 'Permission mode (default, bypassPermissions)'
+        type: string
+        default: 'bypassPermissions'
+      mcp_config:
+        description: 'Path to MCP config file (optional)'
+        type: string
+        default: ''
+      working_directory:
+        description: 'Working directory'
+        type: string
+        default: '.'
+      node_version:
+        description: 'Node.js version to use'
+        type: string
+        default: '22'
+    outputs:
+      output:
+        description: 'Claude output'
+        value: ${{ jobs.run.outputs.output }}
+      output_file:
+        description: 'Path to output file'
+        value: ${{ jobs.run.outputs.output_file }}
+      success:
+        description: 'Whether execution succeeded'
+        value: ${{ jobs.run.outputs.success }}
+      attempts:
+        description: 'Number of attempts made'
+        value: ${{ jobs.run.outputs.attempts }}
+      token_usage:
+        description: 'Token usage JSON'
+        value: ${{ jobs.run.outputs.token_usage }}
+    secrets:
+      OPENROUTER_API_KEY:
+        required: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    outputs:
+      output: ${{ steps.claude.outputs.output }}
+      output_file: ${{ steps.claude.outputs.output_file }}
+      success: ${{ steps.claude.outputs.success }}
+      attempts: ${{ steps.claude.outputs.attempts }}
+      token_usage: ${{ steps.claude.outputs.token_usage }}
+
+    env:
+      ANTHROPIC_API_KEY: ""
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.OPENROUTER_API_KEY }}
+      ANTHROPIC_BASE_URL: https://openrouter.ai/api
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Verify API Key
+        run: |
+          if [ -z "$ANTHROPIC_AUTH_TOKEN" ]; then
+            echo "::error::OPENROUTER_API_KEY secret is not set"
+            exit 1
+          fi
+          echo "✅ API key configured"
+
+      - name: Run Claude with Retry
+        id: claude
+        run: |
+          MAX_RETRIES=${{ inputs.max_retries }}
+          RETRY_DELAY=${{ inputs.retry_delay_seconds }}
+          TIMEOUT=${{ inputs.timeout_minutes }}
+          OUTPUT_FORMAT="${{ inputs.output_format }}"
+          PERMISSION_MODE="${{ inputs.permission_mode }}"
+          MCP_CONFIG="${{ inputs.mcp_config }}"
+          PROMPT_FILE="${{ inputs.prompt_file }}"
+
+          OUTPUT_FILE="/tmp/claude-output-$(date +%s).txt"
+          echo "output_file=$OUTPUT_FILE" >> "$GITHUB_OUTPUT"
+
+          # Build command
+          CMD="claude --print"
+
+          if [ "$OUTPUT_FORMAT" = "json" ]; then
+            CMD="$CMD --output-format json"
+          fi
+
+          CMD="$CMD --permission-mode $PERMISSION_MODE"
+
+          if [ -n "$MCP_CONFIG" ] && [ -f "$MCP_CONFIG" ]; then
+            CMD="$CMD --mcp-config $MCP_CONFIG"
+          fi
+
+          # Retry loop
+          ATTEMPT=0
+          SUCCESS=false
+
+          while [ $ATTEMPT -lt $MAX_RETRIES ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "🔄 Attempt $ATTEMPT of $MAX_RETRIES..."
+
+            set +e
+            timeout ${TIMEOUT}m $CMD "$(cat "$PROMPT_FILE")" 2>&1 | tee "$OUTPUT_FILE"
+            EXIT_CODE=$?
+            set -e
+
+            if [ $EXIT_CODE -eq 0 ]; then
+              echo "✅ Claude completed successfully"
+              SUCCESS=true
+              break
+            elif [ $EXIT_CODE -eq 124 ]; then
+              echo "⏱️ Claude timed out after ${TIMEOUT} minutes"
+            else
+              echo "❌ Claude failed with exit code $EXIT_CODE"
+            fi
+
+            # Check for rate limit errors
+            if grep -qi "rate.limit\|429\|too.many.requests" "$OUTPUT_FILE"; then
+              echo "⏳ Rate limited, waiting longer..."
+              sleep $((RETRY_DELAY * 2))
+            elif [ $ATTEMPT -lt $MAX_RETRIES ]; then
+              echo "⏳ Waiting ${RETRY_DELAY}s before retry..."
+              sleep $RETRY_DELAY
+            fi
+          done
+
+          echo "attempts=$ATTEMPT" >> "$GITHUB_OUTPUT"
+          echo "success=$SUCCESS" >> "$GITHUB_OUTPUT"
+
+          # Parse token usage from output
+          if [ -f "$OUTPUT_FILE" ]; then
+            python3 << 'PYTHON_EOF'
+          import json
+          import re
+          import os
+
+          try:
+              with open(os.environ.get('OUTPUT_FILE', '/tmp/claude-output.txt'), 'r') as f:
+                  text = f.read()
+
+              # Try to parse as JSON envelope
+              try:
+                  data = json.loads(text)
+                  if 'usage' in data:
+                      usage = data['usage']
+                      with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                          f.write(f"token_usage={json.dumps(usage)}\n")
+                      print(f"📊 Token usage: {usage.get('input_tokens', 0)} in, {usage.get('output_tokens', 0)} out")
+              except json.JSONDecodeError:
+                  # No JSON envelope, that's fine
+                  pass
+
+          except Exception as e:
+              print(f"Could not parse token usage: {e}")
+          PYTHON_EOF
+          fi
+
+          # Truncate output for GITHUB_OUTPUT (max 1MB)
+          if [ -f "$OUTPUT_FILE" ]; then
+            OUTPUT=$(head -c 65000 "$OUTPUT_FILE")
+            # Use heredoc for multi-line output
+            {
+              echo "output<<EOF_OUTPUT"
+              echo "$OUTPUT"
+              echo "EOF_OUTPUT"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ "$SUCCESS" = "false" ]; then
+            echo "::error::Claude failed after $ATTEMPT attempts"
+            exit 1
+          fi
+        env:
+          OUTPUT_FILE: /tmp/claude-output.txt
+
+      - name: Upload Output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-output-${{ github.run_id }}
+          path: ${{ steps.claude.outputs.output_file }}
+          retention-days: 7
+          if-no-files-found: ignore

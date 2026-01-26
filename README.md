@@ -38,6 +38,100 @@ To ensure code quality and a smooth deployment process, all code changes must fo
 
 ---
 
+## 🤖 Claude CI - Automated Development Assistant
+
+This repository provides reusable GitHub Actions workflows for AI-powered issue fixing and PR reviews using Claude Code.
+
+### Available Workflows
+
+| Workflow | Description | Trigger |
+|----------|-------------|---------|
+| `reusable-claude-issue-handler.yml` | Automatically fixes issues | `@claude` comment on issue |
+| `reusable-claude-pr-review.yml` | Reviews PRs and suggests fixes | `@claude review` comment or `claude-review` label |
+| `reusable-quality-gates.yml` | Runs lint, test, build checks | Called by other workflows |
+| `reusable-secret-scan.yml` | Scans for leaked secrets | Called by other workflows |
+| `reusable-claude-runner.yml` | Generic Claude CLI wrapper | Called by other workflows |
+
+### Quick Start
+
+Add this workflow file to your repo at `.github/workflows/claude-ci.yml`:
+
+```yaml
+name: Claude CI
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review'
+        required: true
+        type: number
+
+jobs:
+  # Fix issues when someone comments "@claude"
+  handle-issue:
+    if: |
+      github.event_name == 'issue_comment' &&
+      !github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@claude')
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-claude-issue-handler.yml@main
+    with:
+      target_branch: main
+    secrets: inherit
+
+  # Review PRs when someone comments "@claude review"
+  review-pr-on-comment:
+    if: |
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@claude') &&
+      contains(github.event.comment.body, 'review')
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-claude-pr-review.yml@main
+    secrets: inherit
+
+  # Review PRs when "claude-review" label is added
+  review-pr-on-label:
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.action == 'labeled' &&
+      github.event.label.name == 'claude-review'
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-claude-pr-review.yml@main
+    secrets: inherit
+```
+
+### Usage
+
+**Fix an Issue:**
+1. Create an issue with clear description and acceptance criteria
+2. Comment `@claude` on the issue
+3. Claude will create a PR with the fix
+
+**Review a PR:**
+- Comment `@claude review` on the PR, OR
+- Add the `claude-review` label to the PR
+
+**Command Options (in comments):**
+- `@claude [target:develop]` - Target a specific branch
+- `@claude [hint: focus on auth logic]` - Provide guidance
+- `@claude [iterations:5]` - Max fix attempts
+- `@claude review [review only]` - Review without auto-fix
+
+### Required Secrets (Org-Level)
+
+Set these at `github.com/organizations/cloudwarriors-ai/settings/secrets/actions`:
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `OPENROUTER_API_KEY` | Yes | API key for Claude via OpenRouter |
+| `BROWSERBASE_API_KEY` | No | For cloud browser verification |
+| `BROWSERBASE_PROJECT_ID` | No | Browserbase project ID |
+
+---
+
 ## 📝 Using Our Templates
 
 This repository provides default templates to streamline our processes. When you create a new Pull Request or Issue in any of our repositories, you will see options to use them.

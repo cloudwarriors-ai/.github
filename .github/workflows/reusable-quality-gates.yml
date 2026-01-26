@@ -1,0 +1,225 @@
+name: Quality Gates
+
+on:
+  workflow_call:
+    inputs:
+      skip_tests:
+        description: 'Skip running tests'
+        type: boolean
+        default: false
+      skip_lint:
+        description: 'Skip running lint'
+        type: boolean
+        default: false
+      skip_build:
+        description: 'Skip running build'
+        type: boolean
+        default: false
+      node_version:
+        description: 'Node.js version to use'
+        type: string
+        default: '22'
+      working_directory:
+        description: 'Working directory'
+        type: string
+        default: '.'
+    outputs:
+      passed:
+        description: 'Whether all gates passed'
+        value: ${{ jobs.gates.outputs.passed }}
+      lint_status:
+        description: 'Lint status (passed/failed/skipped)'
+        value: ${{ jobs.gates.outputs.lint_status }}
+      test_status:
+        description: 'Test status (passed/failed/skipped)'
+        value: ${{ jobs.gates.outputs.test_status }}
+      build_status:
+        description: 'Build status (passed/failed/skipped)'
+        value: ${{ jobs.gates.outputs.build_status }}
+      test_summary:
+        description: 'Test summary JSON'
+        value: ${{ jobs.gates.outputs.test_summary }}
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    outputs:
+      passed: ${{ steps.result.outputs.passed }}
+      lint_status: ${{ steps.lint.outputs.status }}
+      test_status: ${{ steps.test.outputs.status }}
+      build_status: ${{ steps.build.outputs.status }}
+      test_summary: ${{ steps.test.outputs.summary }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: 'npm'
+          cache-dependency-path: ${{ inputs.working_directory }}/package-lock.json
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Lint
+        id: lint
+        if: ${{ !inputs.skip_lint }}
+        run: |
+          set +e
+          npm run lint 2>&1 | tee /tmp/lint-output.txt
+          EXIT_CODE=$?
+          set -e
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "status=passed" >> "$GITHUB_OUTPUT"
+            echo "✅ Lint passed"
+          else
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "❌ Lint failed"
+
+            # Extract error count
+            ERROR_COUNT=$(grep -c "error TS" /tmp/lint-output.txt || echo "0")
+            echo "errors=$ERROR_COUNT" >> "$GITHUB_OUTPUT"
+          fi
+
+          exit $EXIT_CODE
+        continue-on-error: true
+
+      - name: Run Tests
+        id: test
+        if: ${{ !inputs.skip_tests }}
+        run: |
+          set +e
+          npm run test:unit 2>&1 | tee /tmp/test-output.txt
+          EXIT_CODE=$?
+          set -e
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "status=passed" >> "$GITHUB_OUTPUT"
+            echo "✅ Tests passed"
+          else
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "❌ Tests failed"
+          fi
+
+          # Parse test summary
+          python3 << 'PYTHON_EOF'
+          import re
+          import json
+          import os
+
+          try:
+              with open('/tmp/test-output.txt', 'r') as f:
+                  output = f.read()
+
+              # Parse vitest output
+              test_match = re.search(r'Tests\s+(\d+)\s+passed\s*\((\d+)\)', output)
+              fail_match = re.search(r'(\d+)\s+failed', output)
+              duration_match = re.search(r'Duration\s+([\d.]+)s', output)
+
+              summary = {
+                  'total': int(test_match.group(2)) if test_match else 0,
+                  'passed': int(test_match.group(1)) if test_match else 0,
+                  'failed': int(fail_match.group(1)) if fail_match else 0,
+                  'duration': duration_match.group(1) + 's' if duration_match else 'N/A'
+              }
+
+              # Write to GITHUB_OUTPUT
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"summary={json.dumps(summary)}\n")
+
+              print(f"📊 Tests: {summary['passed']}/{summary['total']} passed in {summary['duration']}")
+
+          except Exception as e:
+              print(f"Could not parse test output: {e}")
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"summary={json.dumps({'total': 0, 'passed': 0, 'failed': 0, 'duration': 'N/A'})}\n")
+          PYTHON_EOF
+
+          exit $EXIT_CODE
+        continue-on-error: true
+
+      - name: Run Build
+        id: build
+        if: ${{ !inputs.skip_build }}
+        run: |
+          set +e
+          npm run build 2>&1 | tee /tmp/build-output.txt
+          EXIT_CODE=$?
+          set -e
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "status=passed" >> "$GITHUB_OUTPUT"
+            echo "✅ Build passed"
+          else
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "❌ Build failed"
+          fi
+
+          exit $EXIT_CODE
+        continue-on-error: true
+
+      - name: Set Skipped Status
+        id: skipped
+        run: |
+          if [ "${{ inputs.skip_lint }}" = "true" ]; then
+            echo "lint_status=skipped" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "${{ inputs.skip_tests }}" = "true" ]; then
+            echo "test_status=skipped" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "${{ inputs.skip_build }}" = "true" ]; then
+            echo "build_status=skipped" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Calculate Result
+        id: result
+        run: |
+          LINT_STATUS="${{ steps.lint.outputs.status || steps.skipped.outputs.lint_status || 'skipped' }}"
+          TEST_STATUS="${{ steps.test.outputs.status || steps.skipped.outputs.test_status || 'skipped' }}"
+          BUILD_STATUS="${{ steps.build.outputs.status || steps.skipped.outputs.build_status || 'skipped' }}"
+
+          echo "📋 Quality Gates Summary:"
+          echo "  Lint:  $LINT_STATUS"
+          echo "  Tests: $TEST_STATUS"
+          echo "  Build: $BUILD_STATUS"
+
+          # Check if all non-skipped gates passed
+          PASSED=true
+
+          if [ "$LINT_STATUS" = "failed" ]; then
+            PASSED=false
+          fi
+          if [ "$TEST_STATUS" = "failed" ]; then
+            PASSED=false
+          fi
+          if [ "$BUILD_STATUS" = "failed" ]; then
+            PASSED=false
+          fi
+
+          echo "passed=$PASSED" >> "$GITHUB_OUTPUT"
+
+          if [ "$PASSED" = "true" ]; then
+            echo "✅ All quality gates passed"
+          else
+            echo "❌ Some quality gates failed"
+          fi
+
+      - name: Upload Logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-gate-logs
+          path: |
+            /tmp/lint-output.txt
+            /tmp/test-output.txt
+            /tmp/build-output.txt
+          if-no-files-found: ignore
+          retention-days: 7

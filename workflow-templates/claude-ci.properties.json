@@ -1,0 +1,6 @@
+{
+  "name": "Claude CI",
+  "description": "Opt-in automated issue fixes (@claude) and PR reviews (@claude review or claude-review label) with Claude Code",
+  "iconName": "robot",
+  "categories": ["Automation", "CI"]
+}
