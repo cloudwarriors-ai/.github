@@ -212,10 +212,13 @@ jobs:
 
       - name: Install Dependencies
         if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
+        env:
+          INSTALL_CMD: ${{ inputs.install_command }}
+          SETUP_CMD: ${{ inputs.setup_command }}
         run: |
           # Use custom install command if provided
-          if [ -n "${{ inputs.install_command }}" ]; then
-            ${{ inputs.install_command }}
+          if [ -n "$INSTALL_CMD" ]; then
+            eval "$INSTALL_CMD"
           # Auto-detect based on project files
           elif [ -f package-lock.json ]; then
             npm ci
@@ -230,8 +233,8 @@ jobs:
           fi
 
           # Run custom setup command if provided
-          if [ -n "${{ inputs.setup_command }}" ]; then
-            ${{ inputs.setup_command }}
+          if [ -n "$SETUP_CMD" ]; then
+            eval "$SETUP_CMD"
           fi
 
       - name: Install Claude Code CLI
