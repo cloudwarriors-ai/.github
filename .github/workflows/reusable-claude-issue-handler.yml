@@ -517,11 +517,15 @@ jobs:
       - name: Run Quality Gates
         if: steps.fix.outputs.has_changes == 'true'
         id: gates
+        env:
+          INPUT_LINT_CMD: ${{ inputs.lint_command }}
+          INPUT_TEST_CMD: ${{ inputs.test_command }}
+          INPUT_BUILD_CMD: ${{ inputs.build_command }}
         run: |
           # Use custom commands if provided, otherwise use defaults
-          LINT_CMD="${{ inputs.lint_command }}"
-          TEST_CMD="${{ inputs.test_command }}"
-          BUILD_CMD="${{ inputs.build_command }}"
+          LINT_CMD="$INPUT_LINT_CMD"
+          TEST_CMD="$INPUT_TEST_CMD"
+          BUILD_CMD="$INPUT_BUILD_CMD"
 
           # Set defaults if not specified
           [ -z "$LINT_CMD" ] && LINT_CMD="npm run lint"
