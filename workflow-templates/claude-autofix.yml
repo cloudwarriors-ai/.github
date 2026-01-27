@@ -1,0 +1,20 @@
+name: Claude Auto-Fix
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  trigger-autofix:
+    # Only run on issue comments (not PR comments) that contain @claude
+    if: |
+      !github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@claude')
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-claude-autofix-rlm.yml@main
+    with:
+      issue_number: ${{ github.event.issue.number }}
+      # Optional: Customize these if needed
+      # max_rlm_cost: 5
+      # max_claude_turns: 30
+      # claude_model: 'claude-opus-4-5-20251101'
+    secrets: inherit

@@ -38,21 +38,43 @@ To ensure code quality and a smooth deployment process, all code changes must fo
 
 ---
 
-## 🤖 Claude CI - Automated Development Assistant
+## 🤖 Claude Auto-Fix - Adversarial Quality Assurance
 
-This repository provides reusable GitHub Actions workflows for AI-powered issue fixing and PR reviews using Claude Code.
+### ⚡ NEW: Adversarial Auto-Fix with RLM (Recommended)
+
+Zero tolerance for mediocrity. Adversarial agents ensure only excellent code passes.
+
+**✅ 30-Second Setup:** [QUICK_SETUP.md](./QUICK_SETUP.md)
+
+Just add 9 lines to `.github/workflows/claude-autofix.yml` and comment `@claude` on any issue!
+
+**Features:**
+- 🔍 **RLM Analysis** - Full codebase intelligence (10M+ tokens)
+- 🎯 **Adversarial Agents** - Planner, Supervisor, Builder, Validator
+- 📋 **Clean Code Enforcement** - SRP, DRY, separation of concerns, modularity
+- 🔄 **Auto-Retry** - Up to 3 attempts to get it right
+- 🚀 **Question Escalation** - Agent → Supervisor → Orchestrator → Human
+
+**[Read Full Documentation →](./ADVERSARIAL_WORKFLOW_SETUP.md)**
+
+---
+
+## 🤖 Claude CI - Legacy Workflows
+
+This repository also provides the original Claude CI workflows:
 
 ### Available Workflows
 
-| Workflow | Description | Trigger |
-|----------|-------------|---------|
-| `reusable-claude-issue-handler.yml` | Automatically fixes issues | `@claude` comment on issue |
-| `reusable-claude-pr-review.yml` | Reviews PRs and suggests fixes | `@claude review` comment or `claude-review` label |
-| `reusable-quality-gates.yml` | Runs lint, test, build checks | Called by other workflows |
-| `reusable-secret-scan.yml` | Scans for leaked secrets | Called by other workflows |
-| `reusable-claude-runner.yml` | Generic Claude CLI wrapper | Called by other workflows |
+| Workflow | Description | Trigger | Status |
+|----------|-------------|---------|--------|
+| `reusable-claude-autofix-rlm.yml` | **NEW** Adversarial auto-fix with RLM | See [Quick Setup](./QUICK_SETUP.md) | ✅ Recommended |
+| `reusable-claude-issue-handler.yml` | Basic issue fixing | `@claude` comment on issue | Legacy |
+| `reusable-claude-pr-review.yml` | PR reviews | `@claude review` comment or label | Legacy |
+| `reusable-quality-gates.yml` | Lint, test, build checks | Called by other workflows | Active |
+| `reusable-secret-scan.yml` | Secret scanning | Called by other workflows | Active |
+| `reusable-claude-runner.yml` | Generic Claude wrapper | Called by other workflows | Active |
 
-### Quick Start
+### Quick Start (Legacy)
 
 Add this workflow file to your repo at `.github/workflows/claude-ci.yml`:
 

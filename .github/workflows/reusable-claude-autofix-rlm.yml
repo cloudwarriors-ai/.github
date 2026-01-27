@@ -1,0 +1,298 @@
+name: Reusable Claude Auto-Fix with RLM
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        description: 'Issue number to fix'
+        required: true
+        type: number
+      max_rlm_cost:
+        description: 'Maximum cost for RLM analysis in USD'
+        required: false
+        type: number
+        default: 5
+      max_claude_turns:
+        description: 'Maximum Claude turns for fix attempts'
+        required: false
+        type: number
+        default: 30
+      claude_model:
+        description: 'Claude model to use'
+        required: false
+        type: string
+        default: 'claude-opus-4-5-20251101'
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      OPENROUTER_API_KEY:
+        required: true
+
+# Prevent concurrent runs on the same issue
+concurrency:
+  group: claude-autofix-${{ inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  # Step 1: Run RLM codebase analysis
+  rlm-analysis:
+    name: RLM Codebase Analysis
+    runs-on: ubuntu-latest
+    outputs:
+      analysis_path: ${{ steps.run-rlm.outputs.analysis_path }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for RLM
+
+      - name: Check for lock label
+        id: check-lock
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const labels = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }}
+            });
+
+            const isLocked = labels.data.some(l => l.name === 'claude-working');
+            if (isLocked) {
+              core.setFailed('Another Claude workflow is already processing this issue');
+            }
+
+      - name: Add lock label
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+              labels: ['claude-working']
+            });
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install RLM
+        run: npm install -g @cloudwarriors-ai/rlm
+
+      - name: Run RLM Codebase Analysis
+        id: run-rlm
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          RLM_MAX_COST_USD: ${{ inputs.max_rlm_cost }}
+        run: |
+          # Create RLM analysis script
+          cat > analyze.js << 'EOF'
+          const { createRLM } = require('@cloudwarriors-ai/rlm');
+          const { readdir, readFile, writeFile } = require('node:fs/promises');
+          const { join } = require('node:path');
+
+          async function analyzeCodebase() {
+            // Gather all source files
+            const files = await readdir('.', { recursive: true });
+            const sourceFiles = files.filter(f =>
+              (f.endsWith('.ts') || f.endsWith('.js') || f.endsWith('.py') ||
+               f.endsWith('.java') || f.endsWith('.go') || f.endsWith('.rs')) &&
+              !f.includes('node_modules') &&
+              !f.includes('.git') &&
+              !f.includes('dist') &&
+              !f.includes('build')
+            );
+
+            console.log(`Found ${sourceFiles.length} source files`);
+
+            // Build context with file contents
+            let context = '# Codebase Structure and Content\n\n';
+            for (const file of sourceFiles.slice(0, 100)) {  // Limit to 100 files
+              try {
+                const content = await readFile(file, 'utf-8');
+                context += `\n## File: ${file}\n\`\`\`\n${content}\n\`\`\`\n`;
+              } catch (err) {
+                console.error(`Error reading ${file}:`, err.message);
+              }
+            }
+
+            // Create RLM instance
+            const rlm = createRLM({
+              apiKey: process.env.OPENROUTER_API_KEY,
+            });
+
+            // Analyze with RLM
+            console.log('Starting RLM analysis...');
+            const result = await rlm.query(
+              context,
+              `Analyze this codebase and provide:
+              1. Architecture overview (layers, modules, patterns)
+              2. Key components and their responsibilities
+              3. Common patterns and conventions used
+              4. Dependency relationships
+              5. Code quality hotspots (complex or problematic areas)
+              6. Testing patterns and coverage areas
+              7. Security patterns used
+              8. Recommended practices for new code
+
+              Format as structured JSON with these keys:
+              - architecture: { layers: [], modules: [], mainPatterns: [] }
+              - components: [{ name, path, responsibility, dependencies }]
+              - conventions: { naming, errorHandling, testing, logging }
+              - qualityHotspots: [{ file, reason, complexity }]
+              - securityPatterns: []
+              - recommendations: []`
+            );
+
+            if (result.success) {
+              console.log(`RLM analysis complete. Cost: $${result.usage.costUsd.toFixed(4)}`);
+
+              await writeFile('.rlm-analysis.json', JSON.stringify({
+                analysis: result.answer,
+                metadata: {
+                  timestamp: new Date().toISOString(),
+                  filesAnalyzed: sourceFiles.length,
+                  costUsd: result.usage.costUsd,
+                  model: result.usage.model
+                }
+              }, null, 2));
+
+              console.log('Analysis saved to .rlm-analysis.json');
+              return '.rlm-analysis.json';
+            } else {
+              throw new Error(`RLM analysis failed: ${result.error}`);
+            }
+          }
+
+          analyzeCodebase().catch(err => {
+            console.error('Analysis failed:', err);
+            process.exit(1);
+          });
+          EOF
+
+          # Run analysis
+          node analyze.js
+
+          # Output path
+          echo "analysis_path=.rlm-analysis.json" >> $GITHUB_OUTPUT
+
+      - name: Upload RLM Analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: rlm-analysis
+          path: .rlm-analysis.json
+          retention-days: 7
+
+      - name: Comment analysis complete
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+              body: '🔍 RLM codebase analysis complete. Starting adversarial fix workflow...'
+            });
+
+  # Step 2: Claude Auto-Fix with Adversarial Workflow
+  claude-autofix:
+    name: Claude Adversarial Auto-Fix
+    needs: rlm-analysis
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download RLM Analysis
+        uses: actions/download-artifact@v4
+        with:
+          name: rlm-analysis
+
+      - name: Copy skills from org repo
+        run: |
+          # Clone org .github repo to get skills
+          git clone https://github.com/cloudwarriors-ai/.github.git /tmp/org-github
+
+          # Copy skills if they don't exist in this repo
+          if [ ! -d ".claude/skills" ]; then
+            mkdir -p .claude/skills
+            cp -r /tmp/org-github/.claude/skills/* .claude/skills/
+          fi
+
+          # Copy CLAUDE.md if it doesn't exist
+          if [ ! -f "CLAUDE.md" ]; then
+            cp /tmp/org-github/CLAUDE.md ./
+          fi
+
+      - name: Run Claude with Adversarial Workflow
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Fix issue #${{ inputs.issue_number }} using the adversarial workflow.
+
+            Use the /fix-issue skill to orchestrate the full workflow:
+            - Planner will create a bulletproof plan
+            - Adversarial Supervisor will challenge it
+            - Builder will implement with excellence
+            - Adversarial Supervisor will review ruthlessly
+            - Validator will run all quality gates
+
+            RLM codebase analysis is available at .rlm-analysis.json
+
+            Follow all standards in CLAUDE.md (no compromises).
+
+            If you have questions, follow escalation policy:
+            1. Check CLAUDE.md and RLM analysis first
+            2. Escalate to supervisor if needed
+            3. Post comment on issue only if supervisor can't resolve
+
+            Maximum 3 iterations. If unsuccessful after 3 attempts, document findings and add needs-human-review label.
+
+          claude_args: |
+            --max-turns ${{ inputs.max_claude_turns }}
+            --model ${{ inputs.claude_model }}
+            --append-system-prompt "You are part of an adversarial quality assurance system. Mediocrity is unacceptable. Follow CLAUDE.md standards ruthlessly."
+
+      - name: Remove lock label
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: ${{ inputs.issue_number }},
+                name: 'claude-working'
+              });
+            } catch (error) {
+              console.log('Lock label already removed or does not exist');
+            }
+
+      - name: Comment on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+              body: `❌ Auto-fix workflow failed. Check the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`
+            });
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+              labels: ['needs-human-review', 'auto-fix-failed']
+            });

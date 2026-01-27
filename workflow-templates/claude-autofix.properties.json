@@ -1,0 +1,7 @@
+{
+  "name": "Claude Auto-Fix with RLM",
+  "description": "Adversarial Claude auto-fix workflow with RLM codebase analysis. Just comment @claude on any issue.",
+  "iconName": "code",
+  "categories": ["Automation", "Code Review"],
+  "filePatterns": ["package\\.json$", "requirements\\.txt$", "go\\.mod$", "Cargo\\.toml$"]
+}
