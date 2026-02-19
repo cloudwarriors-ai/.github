@@ -418,7 +418,7 @@ jobs:
         id: review
         run: |
           set +e
-          claude --print --output-format json --permission-mode bypassPermissions \
+          claude --print --permission-mode bypassPermissions \
             "$(cat /tmp/review-prompt.md)" 2>&1 | tee /tmp/review-output.txt
           CLAUDE_EXIT=$?
           set -e
