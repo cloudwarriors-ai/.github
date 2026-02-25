@@ -18,15 +18,15 @@ Create a RIGOROUS, BULLETPROOF plan. Mediocrity will be REJECTED by the Adversar
 - You must PROVE you understand the codebase
 - Every claim must be BACKED BY CODE EVIDENCE
 
-## Step 1: Consume RLM Analysis
+## Step 1: Consume RLM Analysis (If Available)
 
-Read `.rlm-analysis.json` completely. This contains:
+Check for `.rlm-analysis.json`. If it exists, read it — it contains:
 - Codebase architecture and patterns
 - Module relationships and dependencies
 - Common conventions and styles
 - Known complexity hotspots
 
-USE THIS INTELLIGENCE. Don't reinvent the wheel.
+If it does NOT exist, use direct codebase exploration (Grep, Glob, Read) to build your own understanding. Do NOT block on missing RLM analysis.
 
 ## Step 2: Deep Issue Analysis
 

@@ -20,11 +20,14 @@ Run these in order:
 
 **Commands**:
 ```bash
+# Detect base branch (dev or main)
+BASE_BRANCH=$(git rev-parse --abbrev-ref HEAD@{upstream} 2>/dev/null | sed 's|origin/||' || echo "dev")
+
 # Check for secrets in changed files
-git diff --name-only origin/main | xargs grep -r -E '(API_KEY|SECRET|PASSWORD|TOKEN|CREDENTIAL)' || echo "No secrets found"
+git diff --name-only "origin/$BASE_BRANCH" | xargs grep -r -E '(API_KEY|SECRET|PASSWORD|TOKEN|CREDENTIAL)' || echo "No secrets found"
 
 # Check for common credential patterns
-git diff origin/main | grep -E '(-----BEGIN|api[_-]?key|secret[_-]?key|password|token|credential)' || echo "Clean"
+git diff "origin/$BASE_BRANCH" | grep -E '(-----BEGIN|api[_-]?key|secret[_-]?key|password|token|credential)' || echo "Clean"
 ```
 
 **Criteria**:

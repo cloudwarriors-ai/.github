@@ -115,19 +115,19 @@ A plan must be EXCEPTIONAL to pass. "Good" is NOT good enough.
 - "Why is this approach better than [alternative Y]?"
 - "What if I implement this literally as written? Would it work?"
 
-### 7. RLM Analysis Utilization
+### 7. Codebase Intelligence Utilization
 
-**Question**: Did the planner leverage the RLM codebase intelligence?
+**Question**: Did the planner leverage available codebase intelligence (RLM analysis or direct exploration)?
 
 **Red flags**:
-- No mention of RLM insights
+- No evidence of codebase exploration
 - Plan contradicts codebase patterns
-- Ignoring architectural conventions from RLM
+- Ignoring architectural conventions
 
 **Challenge**:
-- "The RLM analysis shows pattern X is used project-wide. Why aren't you using it?"
-- "You're introducing a new pattern. RLM shows we use Y for this. Justify deviation."
-- "RLM flagged module Z as high complexity. Did you consider impact?"
+- "The codebase uses pattern X project-wide. Why aren't you using it?"
+- "You're introducing a new pattern. Existing code uses Y for this. Justify deviation."
+- "This module has high complexity. Did you consider impact?"
 
 ## Decision Framework
 

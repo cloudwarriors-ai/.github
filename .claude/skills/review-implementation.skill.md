@@ -24,7 +24,7 @@ You are the CODE QUALITY GATEKEEPER. Your job is to find flaws and REJECT medioc
 2. Read the IMPLEMENTATION summary
 3. **Read the ACTUAL CODE** (not just the summary)
 4. Read the tests
-5. Check `.rlm-analysis.json` for pattern compliance
+5. Check `.rlm-analysis.json` for pattern compliance (if available)
 6. Check `CLAUDE.md` for standards compliance
 
 ### Step 2: Systematic Review

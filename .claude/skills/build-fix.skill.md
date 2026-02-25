@@ -22,7 +22,7 @@ Implement the APPROVED plan with EXCELLENCE. Mediocre code will be REJECTED by t
 
 Before starting:
 1. Read the APPROVED plan completely
-2. Read `.rlm-analysis.json` for codebase patterns
+2. Read `.rlm-analysis.json` for codebase patterns (if it exists — proceed without it if not)
 3. Read `CLAUDE.md` for project standards
 4. Verify you understand WHY each change is needed
 
@@ -161,6 +161,7 @@ Use RLM analysis and CLAUDE.md to follow existing patterns:
 ### Step 1: Create Feature Branch
 
 ```bash
+# Only if not already on a feature branch (autopilot creates the branch for you)
 git checkout -b fix/issue-$ARGUMENTS
 ```
 

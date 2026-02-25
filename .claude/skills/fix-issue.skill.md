@@ -6,15 +6,15 @@ disable-model-invocation: false
 
 You are the ORCHESTRATOR for fixing GitHub issue #$ARGUMENTS.
 
-## Pre-requisite: RLM Analysis
+## Pre-requisite: RLM Analysis (Optional)
 
-Before starting, verify that RLM codebase analysis is available at `.rlm-analysis.json`. This file contains:
+Check if RLM codebase analysis is available at `.rlm-analysis.json`. If found, it contains:
 - Full codebase structure and relationships
 - Semantic code understanding
 - Dependency graphs
 - Common patterns and conventions
 
-If not found, REQUEST it by commenting on the issue: "RLM analysis required before fixing."
+If not found, **proceed without it** — use Grep, Glob, and file reading to understand the codebase directly. Do NOT block on missing RLM analysis.
 
 ## Workflow Overview
 
@@ -115,7 +115,7 @@ Run all quality gates:
 
 ## PR Creation (Only on Success)
 
-Branch: `fix/issue-$ARGUMENTS`
+Branch: `fix/issue-$ARGUMENTS` (or `autofix/issue-$ARGUMENTS` if created by the autopilot pipeline)
 
 Title: `[Auto-Fix] Fix #$ARGUMENTS: [concise description]`
 

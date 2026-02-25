@@ -6,6 +6,39 @@ This document defines the quality standards, conventions, and requirements for a
 
 ---
 
+## CI / Automation Mode
+
+When Claude is running **non-interactively** (GitHub Actions, autopilot pipelines, `claude --print`), these rules take precedence:
+
+### What You MUST Do
+- **Fix the actual issue** described in the prompt — not validation tooling, not CI config
+- **Create/update an integration test** that proves the fix works
+- **Run the test** before committing to verify it passes
+- **Commit with the message format** specified in the prompt
+- **Follow the repo's CLAUDE.md** for code style and conventions
+
+### What You MUST NOT Do
+- **Do NOT modify** `.github/workflows/` files, `scripts/issues/` files, or CI configuration
+- **Do NOT modify** validation scripts, test contracts, or preflight checks
+- **Do NOT invoke skills** (`/plan-fix`, `/review-plan`, etc.) — they are not available in CI
+- **Do NOT wait for** `.rlm-analysis.json` — if it doesn't exist, proceed without it
+- **Do NOT create branches** — the workflow has already set up the branch
+- **Do NOT push** — the workflow handles git push
+
+### Branch Conventions
+- Autopilot branches: `autofix/issue-<number>` (created by the workflow)
+- Manual fix branches: `fix/issue-<number>` (created by developer or skill)
+- Base branch: `dev` (not `main`, unless the prompt says otherwise)
+
+### If Blocked in CI
+If you cannot complete the fix:
+1. Apply whatever partial progress you have
+2. Add a code comment `// TODO(autopilot): <description of what's blocking>`
+3. Commit what you have — the validation pipeline will catch incomplete fixes
+4. Do NOT comment on the GitHub issue (the workflow handles status reporting)
+
+---
+
 ## Philosophy
 
 ### Excellence Over Expediency
@@ -18,9 +51,9 @@ We prioritize **code quality** over **shipping fast**. Mediocre code is worse th
 - Security is paramount
 - Tests prove correctness
 
-### Adversarial Quality Assurance
+### Adversarial Quality Assurance (Interactive Mode)
 
-Our Claude workflow uses **adversarial agents**:
+When running interactively with skills available, our workflow uses **adversarial agents**:
 - **Planner** creates detailed fix plans
 - **Adversarial Supervisor** challenges plans ruthlessly
 - **Builder** implements with high standards
@@ -29,16 +62,20 @@ Our Claude workflow uses **adversarial agents**:
 
 Plans and implementations must be **bulletproof** to pass.
 
+**Note**: This multi-agent workflow requires interactive skill invocation. In CI/automation mode, Claude operates as a single agent with the quality standards below applied inline.
+
 ---
 
 ## Question Escalation Policy
 
-When agents have questions or uncertainties, follow this STRICT escalation path:
+When agents have questions or uncertainties, follow this STRICT escalation path.
 
-### Level 1: Self-Resolution
+**In CI/automation mode**: Only Level 1 is available. If you cannot self-resolve, apply your best judgment, document your assumption in a code comment, and proceed. The validation pipeline and human reviewers will catch incorrect assumptions.
+
+### Level 1: Self-Resolution (All Modes)
 First, attempt to answer the question yourself:
 1. Check this CLAUDE.md document
-2. Check RLM analysis for codebase patterns
+2. Check `.rlm-analysis.json` for codebase patterns (if it exists — proceed without it if not)
 3. Read existing code for examples
 4. Review issue description and comments
 
