@@ -1,0 +1,6 @@
+{
+  "name": "Autopilot Pipeline",
+  "description": "Issue-to-fix autopilot pipeline using RLM + Claude. Labels trigger intake → fix → validate → preview → merge.",
+  "iconName": "octicon-rocket",
+  "categories": ["automation", "ci"]
+}

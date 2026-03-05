@@ -1,0 +1,13 @@
+{
+  "name": "@cloudwarriors/autopilot-scripts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Shared autopilot pipeline scripts for the cloudwarriors-ai org",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "tsx": "^4.7.0"
+  }
+}

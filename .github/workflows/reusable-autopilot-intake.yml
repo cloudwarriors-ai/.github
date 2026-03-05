@@ -1,0 +1,342 @@
+name: "Reusable Autopilot: Intake"
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        description: 'Issue number to process'
+        required: true
+        type: number
+      runner_workflow_ref:
+        description: 'Git ref for runner workflow (defaults to caller ref)'
+        required: false
+        type: string
+        default: ''
+      linked_pr_override:
+        description: 'Optional linked PR override'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      WORKFLOW_PAT:
+        required: true
+
+concurrency:
+  group: autopilot-intake-${{ inputs.issue_number }}-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+  actions: read
+
+jobs:
+  intake:
+    name: Autopilot Intake
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@v4
+
+      # --- Kill switch (check for AUTOPILOT: Disabled label) ---
+      - name: Check kill switch
+        id: killswitch
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumber = ${{ inputs.issue_number }};
+
+            // Global kill switch
+            try {
+              const issues = await github.rest.issues.listForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: 'AUTOPILOT: Disabled',
+                state: 'open',
+                per_page: 5,
+              });
+              if (issues.data.length > 0) {
+                core.setOutput('disabled', 'true');
+                core.setOutput('reason', `Global kill switch active on issue #${issues.data[0].number}`);
+                return;
+              }
+            } catch (err) {
+              core.warning(`Kill switch check failed: ${err.message}`);
+            }
+
+            // Per-issue skip
+            try {
+              const issue = await github.rest.issues.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+              });
+              const labels = issue.data.labels.map(l => typeof l === 'string' ? l : l.name);
+              if (labels.includes('AUTOPILOT: Skip')) {
+                core.setOutput('disabled', 'true');
+                core.setOutput('reason', `Issue #${issueNumber} has AUTOPILOT: Skip label`);
+                return;
+              }
+            } catch (err) {
+              core.warning(`Issue label check failed: ${err.message}`);
+            }
+
+            // Rate limit: max 5 concurrent autopilot runs
+            try {
+              const runs = await github.rest.actions.listWorkflowRunsForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                status: 'in_progress',
+                per_page: 100,
+              });
+              const autopilotRuns = runs.data.workflow_runs.filter(r =>
+                r.name && r.name.toLowerCase().includes('autopilot')
+              );
+              if (autopilotRuns.length >= 5) {
+                core.setOutput('disabled', 'true');
+                core.setOutput('reason', `Rate limit: ${autopilotRuns.length} concurrent runs (max 5)`);
+                return;
+              }
+            } catch (err) {
+              core.warning(`Rate limit check failed: ${err.message}`);
+            }
+
+            core.setOutput('disabled', 'false');
+            core.setOutput('reason', '');
+
+      - name: Exit if disabled
+        if: steps.killswitch.outputs.disabled == 'true'
+        uses: actions/github-script@v7
+        env:
+          KILLSWITCH_REASON: ${{ steps.killswitch.outputs.reason }}
+        with:
+          script: |
+            const marker = '<!-- AUTOPILOT_DISABLED -->';
+            const issueNumber = ${{ inputs.issue_number }};
+            const reason = process.env.KILLSWITCH_REASON || 'Unknown reason';
+
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              per_page: 20,
+            });
+
+            if (!comments.data.some(c => c.body.includes(marker))) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: `${marker}\n**Autopilot skipped:** ${reason}\n\nRemove the blocking label and re-apply \`AUTOFIX: Ready\` to retry.`,
+              });
+            }
+            core.setFailed(`Autopilot disabled: ${reason}`);
+
+      # --- Validate issue is open ---
+      - name: Validate issue state
+        if: steps.killswitch.outputs.disabled != 'true'
+        id: validate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+            });
+
+            if (issue.data.state !== 'open') {
+              core.setFailed(`Issue #${{ inputs.issue_number }} is ${issue.data.state}, not open`);
+              return;
+            }
+
+            core.setOutput('title', issue.data.title);
+            const labels = issue.data.labels.map(l => typeof l === 'string' ? l : l.name);
+            core.setOutput('labels', JSON.stringify(labels));
+
+      # --- Resolve context using shared scripts ---
+      - name: Setup Node.js
+        if: steps.killswitch.outputs.disabled != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Fetch shared scripts
+        if: steps.killswitch.outputs.disabled != 'true'
+        run: |
+          git clone --depth 1 https://x-access-token:${{ secrets.WORKFLOW_PAT }}@github.com/cloudwarriors-ai/.github.git /tmp/org-github
+          ls /tmp/org-github/scripts/autopilot/
+
+      - name: Resolve issue context
+        if: steps.killswitch.outputs.disabled != 'true'
+        id: context
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          CONTEXT_JSON=$(npx tsx /tmp/org-github/scripts/autopilot/resolve-issue-context.ts \
+            --issue ${{ inputs.issue_number }} \
+            --owner "${{ github.repository_owner }}" \
+            --repo "$(echo '${{ github.repository }}' | cut -d/ -f2)")
+          CONTEXT_EXIT=$?
+          set -e
+
+          if [ -z "$CONTEXT_JSON" ]; then
+            echo "resolve-issue-context produced no output (exit $CONTEXT_EXIT)" >&2
+            exit 1
+          fi
+
+          echo "$CONTEXT_JSON"
+          printf '%s' "$CONTEXT_JSON" > /tmp/issue-context.json
+
+          TRACK=$(node -e "const d=JSON.parse(require('fs').readFileSync('/tmp/issue-context.json','utf8'));console.log(d.track||'')")
+          BASE=$(node -e "const d=JSON.parse(require('fs').readFileSync('/tmp/issue-context.json','utf8'));console.log(d.base||'')")
+          HEAD=$(node -e "const d=JSON.parse(require('fs').readFileSync('/tmp/issue-context.json','utf8'));console.log(d.head||'')")
+          STATUS=$(node -e "const d=JSON.parse(require('fs').readFileSync('/tmp/issue-context.json','utf8'));console.log(d.status||'')")
+
+          echo "track=$TRACK" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "head=$HEAD" >> "$GITHUB_OUTPUT"
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+
+      # --- Fail with comment if track unresolvable ---
+      - name: Handle unresolvable track
+        if: steps.killswitch.outputs.disabled != 'true' && steps.context.outputs.status == 'error'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+              body: [
+                '**Autopilot cannot determine the issue track.**',
+                '',
+                'Please add one of these labels:',
+                '- `TRACK: Bug` — for bug fixes',
+                '- `TRACK: Feature` — for new features',
+                '',
+                'Or prefix the title with `Bug:` or `Feature:`.',
+                '',
+                'Then re-apply the `AUTOFIX: Ready` label to retry.',
+              ].join('\n'),
+            });
+            core.setFailed('Track unresolvable');
+
+      # --- Dispatch runner workflow ---
+      - name: Dispatch runner
+        if: |
+          steps.killswitch.outputs.disabled != 'true' &&
+          steps.context.outputs.status == 'resolved'
+        uses: actions/github-script@v7
+        env:
+          ISSUE_TITLE: ${{ steps.validate.outputs.title }}
+          RUNNER_REF: ${{ inputs.runner_workflow_ref || github.ref_name }}
+          ISSUE_TRACK: ${{ steps.context.outputs.track }}
+          ISSUE_BASE: ${{ steps.context.outputs.base }}
+          ISSUE_HEAD: ${{ steps.context.outputs.head }}
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'autopilot-runner.yml',
+              ref: process.env.RUNNER_REF,
+              inputs: {
+                issue_number: String(${{ inputs.issue_number }}),
+                issue_title: (process.env.ISSUE_TITLE || '').slice(0, 200),
+                track: process.env.ISSUE_TRACK,
+                base: process.env.ISSUE_BASE,
+                head: process.env.ISSUE_HEAD,
+              },
+            });
+
+      # --- Set STATUS: In Progress label ---
+      - name: Set STATUS label
+        if: |
+          steps.killswitch.outputs.disabled != 'true' &&
+          steps.context.outputs.status == 'resolved'
+        uses: actions/github-script@v7
+        env:
+          LABELS_JSON: ${{ steps.validate.outputs.labels }}
+        with:
+          script: |
+            const labels = JSON.parse(process.env.LABELS_JSON || '[]');
+            const statusLabels = labels.filter(l => l.startsWith('STATUS:'));
+            for (const label of statusLabels) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: ${{ inputs.issue_number }},
+                  name: label,
+                });
+              } catch {}
+            }
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+              labels: ['STATUS: In Progress'],
+            });
+
+      # --- Post progress comment ---
+      - name: Post progress comment
+        if: |
+          steps.killswitch.outputs.disabled != 'true' &&
+          steps.context.outputs.status == 'resolved'
+        uses: actions/github-script@v7
+        env:
+          ISSUE_TRACK: ${{ steps.context.outputs.track }}
+          ISSUE_BASE: ${{ steps.context.outputs.base }}
+          ISSUE_HEAD: ${{ steps.context.outputs.head }}
+        with:
+          script: |
+            const marker = '<!-- AUTOPILOT_V2 -->';
+            const issueNumber = ${{ inputs.issue_number }};
+            const track = process.env.ISSUE_TRACK;
+            const base = process.env.ISSUE_BASE;
+            const head = process.env.ISSUE_HEAD;
+
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              per_page: 50,
+            });
+
+            const existing = comments.data.find(c => c.body.includes(marker));
+
+            const body = [
+              marker,
+              '### Autopilot — Processing',
+              '',
+              `| Field | Value |`,
+              `|-------|-------|`,
+              `| Track | \`${track}\` |`,
+              `| Base | \`${base}\` |`,
+              `| Head | \`${head}\` |`,
+              `| Run | [Workflow](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) |`,
+              '',
+              'The autopilot runner has been dispatched.',
+            ].join('\n');
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body,
+              });
+            }
