@@ -230,22 +230,26 @@ jobs:
           steps.killswitch.outputs.disabled != 'true' &&
           steps.context.outputs.status == 'resolved'
         uses: actions/github-script@v7
+        env:
+          ISSUE_TITLE: ${{ steps.validate.outputs.title }}
+          RUNNER_REF: ${{ inputs.runner_workflow_ref || github.ref_name }}
+          ISSUE_TRACK: ${{ steps.context.outputs.track }}
+          ISSUE_BASE: ${{ steps.context.outputs.base }}
+          ISSUE_HEAD: ${{ steps.context.outputs.head }}
         with:
           github-token: ${{ secrets.WORKFLOW_PAT }}
           script: |
-            const ref = '${{ inputs.runner_workflow_ref }}' || '${{ github.ref_name }}';
-
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: 'autopilot-runner.yml',
-              ref,
+              ref: process.env.RUNNER_REF,
               inputs: {
                 issue_number: String(${{ inputs.issue_number }}),
-                issue_title: `${{ steps.validate.outputs.title }}`.slice(0, 200),
-                track: '${{ steps.context.outputs.track }}',
-                base: '${{ steps.context.outputs.base }}',
-                head: '${{ steps.context.outputs.head }}',
+                issue_title: (process.env.ISSUE_TITLE || '').slice(0, 200),
+                track: process.env.ISSUE_TRACK,
+                base: process.env.ISSUE_BASE,
+                head: process.env.ISSUE_HEAD,
               },
             });
 
@@ -255,9 +259,11 @@ jobs:
           steps.killswitch.outputs.disabled != 'true' &&
           steps.context.outputs.status == 'resolved'
         uses: actions/github-script@v7
+        env:
+          LABELS_JSON: ${{ steps.validate.outputs.labels }}
         with:
           script: |
-            const labels = JSON.parse('${{ steps.validate.outputs.labels }}');
+            const labels = JSON.parse(process.env.LABELS_JSON || '[]');
             const statusLabels = labels.filter(l => l.startsWith('STATUS:'));
             for (const label of statusLabels) {
               try {

@@ -145,12 +145,17 @@ jobs:
       - name: Validate issue bundle
         id: validate
         continue-on-error: true
+        env:
+          ISSUE_NUM: ${{ inputs.issue_number }}
+          ISSUE_BASE: ${{ inputs.base }}
+          ISSUE_TRACK: ${{ inputs.track }}
+          ISSUE_HEAD: ${{ inputs.head }}
         run: |
           npx tsx /tmp/org-github/scripts/autopilot/validate-issue-bundle.ts \
-            --issue ${{ inputs.issue_number }} \
-            --base ${{ inputs.base }} \
-            --track ${{ inputs.track }} \
-            --head ${{ inputs.head }}
+            --issue "$ISSUE_NUM" \
+            --base "$ISSUE_BASE" \
+            --track "$ISSUE_TRACK" \
+            --head "$ISSUE_HEAD"
 
           if [ $? -eq 0 ]; then
             echo "passed=true" >> "$GITHUB_OUTPUT"
@@ -225,16 +230,21 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 15m
+          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH
           script: |
-            export GITHUB_TOKEN="${{ secrets.WORKFLOW_PAT }}"
-            "${{ vars.VPS_REPO_PATH }}/scripts/preview-deploy.sh" \
-              "${{ inputs.head }}" "${{ inputs.issue_number }}"
+            "$VPS_PATH/scripts/preview-deploy.sh" "$DEPLOY_HEAD" "$DEPLOY_ISSUE"
+        env:
+          GITHUB_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          DEPLOY_HEAD: ${{ inputs.head }}
+          DEPLOY_ISSUE: ${{ inputs.issue_number }}
+          VPS_PATH: ${{ vars.VPS_REPO_PATH }}
 
       - name: Set preview URL output
         id: set-url
+        env:
+          ISSUE_NUM: ${{ inputs.issue_number }}
         run: |
-          # Read preview domain from config or use default
-          PREVIEW_URL="https://preview-${{ inputs.issue_number }}.pscx.ai"
+          PREVIEW_URL="https://preview-${ISSUE_NUM}.pscx.ai"
           echo "preview_url=$PREVIEW_URL" >> "$GITHUB_OUTPUT"
 
       - name: Verify preview is reachable
@@ -310,8 +320,12 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: DEPLOY_ISSUE,VPS_PATH
           script: |
-            "${{ vars.VPS_REPO_PATH }}/scripts/preview-teardown.sh" "${{ inputs.issue_number }}"
+            "$VPS_PATH/scripts/preview-teardown.sh" "$DEPLOY_ISSUE"
+        env:
+          DEPLOY_ISSUE: ${{ inputs.issue_number }}
+          VPS_PATH: ${{ vars.VPS_REPO_PATH }}
 
   # ── Job 8: Upsert PR and update labels ─────────────────────────────
   finalize:
@@ -343,16 +357,17 @@ jobs:
       - name: Build matrix
         if: always()
         id: matrix
+        env:
+          VALIDATION: ${{ needs.validate.outputs.validation_passed }}
+          PREFLIGHT: ${{ needs.preflight.outputs.preflight_passed }}
+          TESTS: ${{ needs.test.outputs.tests_passed || 'skip' }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
         run: |
-          VALIDATION="${{ needs.validate.outputs.validation_passed }}"
-          PREFLIGHT="${{ needs.preflight.outputs.preflight_passed }}"
-          TESTS="${{ needs.test.outputs.tests_passed || 'skip' }}"
-
           CONTRACT=$( [ "$VALIDATION" = "true" ] && echo "pass" || echo "fail" )
           INTEGRATION=$( [ "$PREFLIGHT" = "true" ] && echo "pass" || echo "fail" )
 
           npx tsx /tmp/org-github/scripts/autopilot/matrix.ts \
-            --issue ${{ inputs.issue_number }} \
+            --issue "$ISSUE_NUM" \
             --contract-result "$CONTRACT" \
             --integration-result "$INTEGRATION" \
             --e2e-result "$TESTS" \
@@ -365,30 +380,32 @@ jobs:
         id: pr
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
+          ISSUE_HEAD: ${{ inputs.head }}
+          ISSUE_BASE: ${{ inputs.base }}
+          ISSUE_TRACK: ${{ inputs.track }}
+          TESTS_RESULT: ${{ needs.test.outputs.tests_passed || 'skipped' }}
+          PREFLIGHT_RESULT: ${{ needs.preflight.outputs.preflight_passed || 'skipped' }}
+          VALIDATION_RESULT: ${{ needs.validate.outputs.validation_passed || 'skipped' }}
         run: |
-          ISSUE="${{ inputs.issue_number }}"
-          HEAD="${{ inputs.head }}"
-          BASE="${{ inputs.base }}"
-          TESTS="${{ needs.test.outputs.tests_passed || 'skipped' }}"
-
-          EXISTING_PR=$(gh pr list --head "$HEAD" --base "$BASE" --json number --jq '.[0].number' 2>/dev/null || echo "")
+          EXISTING_PR=$(gh pr list --head "$ISSUE_HEAD" --base "$ISSUE_BASE" --json number --jq '.[0].number' 2>/dev/null || echo "")
 
           PR_BODY="$(cat <<PRBODY
-          ## Autopilot Fix for Issue #${ISSUE}
+          ## Autopilot Fix for Issue #${ISSUE_NUM}
 
-          **Track:** ${{ inputs.track }} | **Base:** ${BASE}
+          **Track:** ${ISSUE_TRACK} | **Base:** ${ISSUE_BASE}
 
           ### Linked Issue
-          Closes #${ISSUE}
+          Closes #${ISSUE_NUM}
 
           ### How was this fixed?
           This fix was generated by the Autopilot pipeline using RLM (codebase analysis + Claude).
           - [View workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})
 
           ### Testing
-          - Preflight: ${{ needs.preflight.outputs.preflight_passed || 'skipped' }}
-          - Validation: ${{ needs.validate.outputs.validation_passed || 'skipped' }}
-          - Tests: ${TESTS}
+          - Preflight: ${PREFLIGHT_RESULT}
+          - Validation: ${VALIDATION_RESULT}
+          - Tests: ${TESTS_RESULT}
           - [ ] Human review complete
           PRBODY
           )"
@@ -398,9 +415,9 @@ jobs:
             echo "pr_number=$EXISTING_PR" >> "$GITHUB_OUTPUT"
           else
             PR_URL=$(gh pr create \
-              --head "$HEAD" \
-              --base "$BASE" \
-              --title "fix: resolve issue #${ISSUE}" \
+              --head "$ISSUE_HEAD" \
+              --base "$ISSUE_BASE" \
+              --title "fix: resolve issue #${ISSUE_NUM}" \
               --body "$PR_BODY" \
               --label "autopilot") || true
             PR_NUM=$(echo "$PR_URL" | grep -oE '[0-9]+$' || echo "")
