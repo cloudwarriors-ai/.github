@@ -1,6 +1,180 @@
-This repository serves as the central resource for all developers at our organization. It contains the default guidelines, templates, and documentation that govern our development processes across all projects.
+# cloudwarriors-ai/.github
 
-Our goal is to create a consistent, high-quality, and efficient workflow that empowers everyone to do their best work.
+Central resource for organization-wide development workflows, templates, and automation.
+
+---
+
+## Autopilot Pipeline
+
+Fully automated issue-to-PR pipeline. Label an issue, get a tested fix with preview deployment.
+
+### How It Works
+
+```
+Label issue "AUTOFIX: Ready"
+    |
+    v
+[Intake] -- resolve track, base/head branches, kill switch checks
+    |
+    v
+[RLM Fix] -- codebase analysis (10M+ tokens) --> Claude generates fix --> lint/build gates
+    |
+    v
+[Validate] -- verify fix includes tests, no placeholders, has assertions
+    |
+    v
+[Preflight] -- run project-specific preflight (migrations, deps, build)
+    |
+    v
+[Deploy Preview] -- SSH to VPS, spin up isolated Docker containers per issue
+    |
+    v
+[Test] -- run project test suite against preview
+    |
+    v
+[Finalize] -- create/update PR, set labels, optional auto-merge
+```
+
+### Reusable Workflows
+
+| Workflow | Purpose |
+|----------|---------|
+| `reusable-autopilot-intake.yml` | Kill switch, rate limiting, context resolution, dispatches runner |
+| `reusable-autopilot-runner.yml` | Full pipeline: RLM fix, validate, preflight, preview deploy, test, finalize PR |
+| `reusable-autopilot-cleanup.yml` | Cron: delete stale autopilot branches and orphaned preview containers |
+| `reusable-autopilot-report.yml` | Weekly metrics: success rate, PRs merged, pipeline health |
+
+### Shared Scripts (`scripts/autopilot/`)
+
+| Script | Purpose |
+|--------|---------|
+| `resolve-issue-context.ts` | Detect track (bug/feature), resolve base branch, build head branch name |
+| `validate-issue-bundle.ts` | Config-driven test file validation with assertion and placeholder checks |
+| `preflight-ci.ts` | DB migration, health endpoint, and env var checks |
+| `matrix.ts` | Collects step results into structured JSON for artifacts and PR comments |
+| `smoke-suite.ts` | Resolves which smoke specs are safe for local CI execution |
+
+### Adopting the Autopilot (New Repo Setup)
+
+**1. Add project config** — `.autopilot/config.json`:
+
+```json
+{
+  "name": "my-project",
+  "runtime": "node",
+  "buildCommand": "npm run build",
+  "lintCommand": "npm run lint",
+  "testCommand": "npm test",
+  "dbMigrateCommand": "npx prisma migrate deploy",
+  "testPatterns": ["tests/**/*.spec.ts"],
+  "assertionPatterns": ["expect("],
+  "healthEndpoint": "/api/health",
+  "previewDeploy": true,
+  "mergeRequirements": {
+    "requireE2EPass": true,
+    "requirePreviewDeploy": true,
+    "autoMerge": false
+  }
+}
+```
+
+**2. Add thin caller workflows** — `.github/workflows/autopilot-intake.yml`:
+
+```yaml
+name: "Autopilot: Intake"
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number to process'
+        required: true
+        type: number
+
+jobs:
+  intake:
+    if: |
+      (github.event_name == 'issues' &&
+       github.event.action == 'labeled' &&
+       github.event.label.name == 'AUTOFIX: Ready') ||
+      (github.event_name == 'issue_comment' &&
+       !github.event.issue.pull_request &&
+       contains(github.event.comment.body, '/autofix')) ||
+      github.event_name == 'workflow_dispatch'
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-autopilot-intake.yml@main
+    with:
+      issue_number: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.issue_number || github.event.issue.number }}
+    secrets: inherit
+```
+
+A workflow template is also available at `workflow-templates/autopilot-caller.yml`.
+
+**3. Add runner workflow** — `.github/workflows/autopilot-runner.yml`:
+
+```yaml
+name: "Autopilot: Runner"
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number: { required: true, type: string }
+      issue_title: { required: false, type: string, default: '' }
+      base: { required: true, type: string }
+      head: { required: true, type: string }
+      track: { required: true, type: string }
+
+jobs:
+  run:
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-autopilot-runner.yml@main
+    with:
+      issue_number: ${{ inputs.issue_number }}
+      issue_title: ${{ inputs.issue_title }}
+      base: ${{ inputs.base }}
+      head: ${{ inputs.head }}
+      track: ${{ inputs.track }}
+    secrets: inherit
+```
+
+**4. (Optional) Add preview infrastructure:**
+
+| File | Purpose |
+|------|---------|
+| `scripts/preview-deploy.sh` | Deploy isolated Docker containers per issue |
+| `scripts/preview-teardown.sh` | Clean up containers and worktrees |
+| `docker-compose.preview.yml` | Preview-specific compose with Traefik labels |
+| `.autopilot/preflight.sh` | Project-specific preflight (migrations, deps) |
+| `.autopilot/seed-preview.sh` | Preview DB seeding |
+| `.autopilot/claude-prompt.md` | Project-specific Claude instructions (fed to RLM) |
+
+**5. Set up GitHub Environments** (`dev` and `production`):
+
+| Name | Type | Description |
+|------|------|-------------|
+| `DEPLOY_ENABLED` | Variable | Kill switch per environment (`true`/`false`) |
+| `VPS_REPO_PATH` | Variable | Repo path on VPS (e.g. `/root/web/my-project`) |
+| `SSH_HOST` | Secret | VPS IP address |
+| `SSH_USER` | Secret | VPS SSH user |
+| `SSH_PRIVATE_KEY` | Secret | VPS SSH private key |
+| `TEST_USER_EMAIL` | Secret | Test credentials for E2E |
+| `TEST_USER_PASSWORD` | Secret | Test credentials for E2E |
+
+### Safety Controls
+
+- **Kill switches** — `AUTOPILOT: Disabled` label (global), `AUTOPILOT: Skip` label (per-issue), `DEPLOY_ENABLED=false` (per-environment)
+- **Rate limiting** — Max 5 concurrent autopilot runs per repo
+- **Concurrency groups** — One intake and one runner per issue, no overlapping runs
+- **Auto-merge off by default** — `mergeRequirements.autoMerge: false` in config
+- **Script injection hardened** — All user-controlled inputs (issue titles, labels) routed through `env:` vars, never interpolated in shell or JS
+
+### Triggering
+
+| Method | How |
+|--------|-----|
+| Label | Add `AUTOFIX: Ready` to any issue |
+| Comment | Type `/autofix` on any issue |
+| Manual | Dispatch `autopilot-intake.yml` with an issue number |
 
 ---
 
@@ -67,7 +241,11 @@ This repository also provides the original Claude CI workflows:
 
 | Workflow | Description | Trigger | Status |
 |----------|-------------|---------|--------|
-| `reusable-claude-autofix-rlm.yml` | **NEW** Adversarial auto-fix with RLM | See [Quick Setup](./QUICK_SETUP.md) | ✅ Recommended |
+| `reusable-autopilot-intake.yml` | Autopilot intake: kill switch, context resolution, dispatch | `AUTOFIX: Ready` label / `/autofix` comment | Active |
+| `reusable-autopilot-runner.yml` | Autopilot runner: RLM fix, validate, preview, test, PR | Dispatched by intake | Active |
+| `reusable-autopilot-cleanup.yml` | Cleanup stale branches and orphaned preview containers | Cron / manual | Active |
+| `reusable-autopilot-report.yml` | Weekly autopilot metrics report | Cron / manual | Active |
+| `reusable-claude-autofix-rlm.yml` | Adversarial auto-fix with RLM (fix engine for autopilot) | See [Quick Setup](./QUICK_SETUP.md) | Active |
 | `reusable-claude-issue-handler.yml` | Basic issue fixing | `@claude` comment on issue | Legacy |
 | `reusable-claude-pr-review.yml` | PR reviews | `@claude review` comment or label | Legacy |
 | `reusable-quality-gates.yml` | Lint, test, build checks | Called by other workflows | Active |
@@ -146,11 +324,13 @@ jobs:
 
 Set these at `github.com/organizations/cloudwarriors-ai/settings/secrets/actions`:
 
-| Secret | Required | Description |
-|--------|----------|-------------|
-| `OPENROUTER_API_KEY` | Yes | API key for Claude via OpenRouter |
-| `BROWSERBASE_API_KEY` | No | For cloud browser verification |
-| `BROWSERBASE_PROJECT_ID` | No | Browserbase project ID |
+| Secret | Used By | Description |
+|--------|---------|-------------|
+| `ANTHROPIC_API_KEY` | RLM, Autopilot | Claude API key |
+| `OPENROUTER_API_KEY` | RLM, Autopilot | Codebase analysis via OpenRouter |
+| `WORKFLOW_PAT` | Autopilot | GitHub PAT for cross-repo dispatch and branch operations |
+| `BROWSERBASE_API_KEY` | E2E tests | Cloud browser testing (optional) |
+| `BROWSERBASE_PROJECT_ID` | E2E tests | Browserbase project (optional) |
 
 ---
 
