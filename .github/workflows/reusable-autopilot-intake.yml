@@ -110,11 +110,13 @@ jobs:
       - name: Exit if disabled
         if: steps.killswitch.outputs.disabled == 'true'
         uses: actions/github-script@v7
+        env:
+          KILLSWITCH_REASON: ${{ steps.killswitch.outputs.reason }}
         with:
           script: |
             const marker = '<!-- AUTOPILOT_DISABLED -->';
             const issueNumber = ${{ inputs.issue_number }};
-            const reason = `${{ steps.killswitch.outputs.reason }}`;
+            const reason = process.env.KILLSWITCH_REASON || 'Unknown reason';
 
             const comments = await github.rest.issues.listComments({
               owner: context.repo.owner,
@@ -288,13 +290,17 @@ jobs:
           steps.killswitch.outputs.disabled != 'true' &&
           steps.context.outputs.status == 'resolved'
         uses: actions/github-script@v7
+        env:
+          ISSUE_TRACK: ${{ steps.context.outputs.track }}
+          ISSUE_BASE: ${{ steps.context.outputs.base }}
+          ISSUE_HEAD: ${{ steps.context.outputs.head }}
         with:
           script: |
             const marker = '<!-- AUTOPILOT_V2 -->';
             const issueNumber = ${{ inputs.issue_number }};
-            const track = '${{ steps.context.outputs.track }}';
-            const base = '${{ steps.context.outputs.base }}';
-            const head = '${{ steps.context.outputs.head }}';
+            const track = process.env.ISSUE_TRACK;
+            const base = process.env.ISSUE_BASE;
+            const head = process.env.ISSUE_HEAD;
 
             const comments = await github.rest.issues.listComments({
               owner: context.repo.owner,

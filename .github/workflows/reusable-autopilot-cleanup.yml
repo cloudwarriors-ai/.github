@@ -191,17 +191,15 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: DRY_RUN,REPO_DIR
           script: |
             echo "=== Orphaned preview container cleanup ==="
-            DRY_RUN="${{ inputs.dry_run }}"
-            REPO_DIR="${{ vars.VPS_REPO_PATH }}"
 
             if [ ! -f "${REPO_DIR}/scripts/preview-teardown.sh" ]; then
-              echo "No teardown script found at ${REPO_DIR}/scripts/preview-teardown.sh"
+              echo "No teardown script at ${REPO_DIR}/scripts/preview-teardown.sh"
               exit 0
             fi
 
-            # Find preview containers older than 4 hours
             STALE=$(docker ps -a --format '{{.CreatedAt}}\t{{.Names}}' \
               | grep 'preview-' | grep -v '\-db' \
               | awk -v cutoff="$(date -d '4 hours ago' '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -v-4H '+%Y-%m-%d %H:%M:%S')" \
@@ -219,3 +217,6 @@ jobs:
                 "${REPO_DIR}/scripts/preview-teardown.sh" "$ISSUE_ID" || true
               fi
             done
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          REPO_DIR: ${{ vars.VPS_REPO_PATH }}
