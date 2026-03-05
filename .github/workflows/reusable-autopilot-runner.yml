@@ -1,0 +1,473 @@
+name: "Reusable Autopilot: Runner"
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        description: 'Issue number to fix'
+        required: true
+        type: string
+      issue_title:
+        description: 'Issue title (for context)'
+        required: false
+        type: string
+        default: ''
+      track:
+        description: 'Track: bugs or features'
+        required: true
+        type: string
+      base:
+        description: 'Base branch'
+        required: true
+        type: string
+      head:
+        description: 'Head branch (autofix/issue-<id>)'
+        required: true
+        type: string
+      max_claude_turns:
+        description: 'Max turns for Claude in RLM'
+        required: false
+        type: number
+        default: 10
+      max_rlm_cost:
+        description: 'Max cost for RLM codebase analysis ($)'
+        required: false
+        type: number
+        default: 2
+    secrets:
+      WORKFLOW_PAT:
+        required: true
+      ANTHROPIC_API_KEY:
+        required: true
+      OPENROUTER_API_KEY:
+        required: true
+
+concurrency:
+  group: autopilot-runner-${{ inputs.issue_number }}-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+
+jobs:
+  # ── Job 1: Call RLM fix engine ──────────────────────────────────────
+  rlm-fix:
+    name: "RLM Fix (#${{ inputs.issue_number }})"
+    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@main
+    with:
+      issue_number: ${{ inputs.issue_number }}
+    secrets: inherit
+
+  # ── Job 2: Read project config ──────────────────────────────────────
+  read-config:
+    name: "Read Config"
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      config_json: ${{ steps.config.outputs.config_json }}
+      build_command: ${{ steps.config.outputs.build_command }}
+      lint_command: ${{ steps.config.outputs.lint_command }}
+      test_command: ${{ steps.config.outputs.test_command }}
+      db_migrate_command: ${{ steps.config.outputs.db_migrate_command }}
+      health_endpoint: ${{ steps.config.outputs.health_endpoint }}
+      preview_deploy: ${{ steps.config.outputs.preview_deploy }}
+      auto_merge: ${{ steps.config.outputs.auto_merge }}
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@v4
+
+      - name: Read .autopilot/config.json
+        id: config
+        run: |
+          if [ -f .autopilot/config.json ]; then
+            CONFIG=$(cat .autopilot/config.json)
+            echo "config_json<<EOF" >> "$GITHUB_OUTPUT"
+            echo "$CONFIG" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+
+            echo "build_command=$(echo "$CONFIG" | jq -r '.buildCommand // ""')" >> "$GITHUB_OUTPUT"
+            echo "lint_command=$(echo "$CONFIG" | jq -r '.lintCommand // ""')" >> "$GITHUB_OUTPUT"
+            echo "test_command=$(echo "$CONFIG" | jq -r '.testCommand // ""')" >> "$GITHUB_OUTPUT"
+            echo "db_migrate_command=$(echo "$CONFIG" | jq -r '.dbMigrateCommand // ""')" >> "$GITHUB_OUTPUT"
+            echo "health_endpoint=$(echo "$CONFIG" | jq -r '.healthEndpoint // "/api/v1/health"')" >> "$GITHUB_OUTPUT"
+            echo "preview_deploy=$(echo "$CONFIG" | jq -r '.previewDeploy // false')" >> "$GITHUB_OUTPUT"
+            echo "auto_merge=$(echo "$CONFIG" | jq -r '.mergeRequirements.autoMerge // false')" >> "$GITHUB_OUTPUT"
+          else
+            echo "No .autopilot/config.json found — using defaults" >&2
+            echo "config_json={}" >> "$GITHUB_OUTPUT"
+            echo "build_command=" >> "$GITHUB_OUTPUT"
+            echo "lint_command=" >> "$GITHUB_OUTPUT"
+            echo "test_command=" >> "$GITHUB_OUTPUT"
+            echo "db_migrate_command=" >> "$GITHUB_OUTPUT"
+            echo "health_endpoint=/api/v1/health" >> "$GITHUB_OUTPUT"
+            echo "preview_deploy=false" >> "$GITHUB_OUTPUT"
+            echo "auto_merge=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Job 3: Validate fix bundle ─────────────────────────────────────
+  validate:
+    name: "Validate (#${{ inputs.issue_number }})"
+    needs: [rlm-fix, read-config]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    outputs:
+      validation_passed: ${{ steps.validate.outputs.passed }}
+
+    steps:
+      - name: Checkout fix branch
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.head }}
+          token: ${{ secrets.WORKFLOW_PAT }}
+
+      - name: Fallback to base if head not found
+        if: steps.checkout.outcome != 'success'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Fetch shared scripts
+        run: |
+          git clone --depth 1 https://x-access-token:${{ secrets.WORKFLOW_PAT }}@github.com/cloudwarriors-ai/.github.git /tmp/org-github
+
+      - name: Validate issue bundle
+        id: validate
+        continue-on-error: true
+        run: |
+          npx tsx /tmp/org-github/scripts/autopilot/validate-issue-bundle.ts \
+            --issue ${{ inputs.issue_number }} \
+            --base ${{ inputs.base }} \
+            --track ${{ inputs.track }} \
+            --head ${{ inputs.head }}
+
+          if [ $? -eq 0 ]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Job 4: Preflight CI ────────────────────────────────────────────
+  preflight:
+    name: "Preflight (#${{ inputs.issue_number }})"
+    needs: [rlm-fix, read-config]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    outputs:
+      preflight_passed: ${{ steps.preflight.outputs.passed }}
+
+    steps:
+      - name: Checkout fix branch
+        continue-on-error: true
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.head }}
+          token: ${{ secrets.WORKFLOW_PAT }}
+
+      - name: Fallback to base
+        if: steps.checkout.outcome != 'success'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base }}
+
+      - name: Run project preflight
+        id: preflight
+        continue-on-error: true
+        run: |
+          if [ -f .autopilot/preflight.sh ]; then
+            chmod +x .autopilot/preflight.sh
+            ./.autopilot/preflight.sh
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No .autopilot/preflight.sh — skipping"
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Job 5: Deploy preview container ────────────────────────────────
+  deploy-preview:
+    name: "Deploy Preview (#${{ inputs.issue_number }})"
+    needs: [rlm-fix, read-config, preflight]
+    if: |
+      needs.read-config.outputs.preview_deploy == 'true' &&
+      needs.preflight.outputs.preflight_passed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.base == 'main' && 'production' || 'dev' }}
+
+    outputs:
+      preview_url: ${{ steps.set-url.outputs.preview_url }}
+
+    steps:
+      - name: Check kill switch
+        if: vars.DEPLOY_ENABLED == 'false'
+        run: |
+          echo "Deploy disabled for this environment"
+          exit 1
+
+      - name: Deploy preview to VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          command_timeout: 15m
+          script: |
+            export GITHUB_TOKEN="${{ secrets.WORKFLOW_PAT }}"
+            "${{ vars.VPS_REPO_PATH }}/scripts/preview-deploy.sh" \
+              "${{ inputs.head }}" "${{ inputs.issue_number }}"
+
+      - name: Set preview URL output
+        id: set-url
+        run: |
+          # Read preview domain from config or use default
+          PREVIEW_URL="https://preview-${{ inputs.issue_number }}.pscx.ai"
+          echo "preview_url=$PREVIEW_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Verify preview is reachable
+        run: |
+          HEALTH="${{ needs.read-config.outputs.health_endpoint }}"
+          URL="${{ steps.set-url.outputs.preview_url }}${HEALTH}"
+          for i in $(seq 1 30); do
+            if curl -sf --max-time 5 "$URL" > /dev/null 2>&1; then
+              echo "Preview reachable at $URL"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "WARNING: Preview not reachable at $URL"
+
+  # ── Job 6: Run tests ───────────────────────────────────────────────
+  test:
+    name: "Test (#${{ inputs.issue_number }})"
+    needs: [read-config, deploy-preview]
+    if: always() && !cancelled() && needs.read-config.outputs.test_command != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    outputs:
+      tests_passed: ${{ steps.result.outputs.tests_passed }}
+
+    steps:
+      - name: Checkout fix branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.head }}
+          token: ${{ secrets.WORKFLOW_PAT }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: |
+          if [ -f package.json ]; then npm ci; fi
+
+      - name: Run test command
+        id: test
+        continue-on-error: true
+        env:
+          TEST_BASE_URL: ${{ needs.deploy-preview.outputs.preview_url || '' }}
+        run: ${{ needs.read-config.outputs.test_command }}
+
+      - name: Determine result
+        id: result
+        if: always()
+        run: |
+          if [ "${{ steps.test.outcome }}" = "success" ]; then
+            echo "tests_passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tests_passed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Job 7: Teardown preview ────────────────────────────────────────
+  teardown-preview:
+    name: "Teardown Preview (#${{ inputs.issue_number }})"
+    needs: [read-config, deploy-preview, test]
+    if: always() && needs.deploy-preview.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: ${{ inputs.base == 'main' && 'production' || 'dev' }}
+
+    steps:
+      - name: Teardown preview on VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            "${{ vars.VPS_REPO_PATH }}/scripts/preview-teardown.sh" "${{ inputs.issue_number }}"
+
+  # ── Job 8: Upsert PR and update labels ─────────────────────────────
+  finalize:
+    name: "Finalize (#${{ inputs.issue_number }})"
+    needs: [rlm-fix, read-config, validate, preflight, test]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout fix branch
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.head }}
+          token: ${{ secrets.WORKFLOW_PAT }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Fetch shared scripts
+        run: |
+          git clone --depth 1 https://x-access-token:${{ secrets.WORKFLOW_PAT }}@github.com/cloudwarriors-ai/.github.git /tmp/org-github
+
+      - name: Build matrix
+        if: always()
+        id: matrix
+        run: |
+          VALIDATION="${{ needs.validate.outputs.validation_passed }}"
+          PREFLIGHT="${{ needs.preflight.outputs.preflight_passed }}"
+          TESTS="${{ needs.test.outputs.tests_passed || 'skip' }}"
+
+          CONTRACT=$( [ "$VALIDATION" = "true" ] && echo "pass" || echo "fail" )
+          INTEGRATION=$( [ "$PREFLIGHT" = "true" ] && echo "pass" || echo "fail" )
+
+          npx tsx /tmp/org-github/scripts/autopilot/matrix.ts \
+            --issue ${{ inputs.issue_number }} \
+            --contract-result "$CONTRACT" \
+            --integration-result "$INTEGRATION" \
+            --e2e-result "$TESTS" \
+            --smoke-result "skip" \
+            --attempt 1 \
+            --model "rlm"
+
+      - name: Upsert PR
+        if: steps.checkout.outcome == 'success'
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+        run: |
+          ISSUE="${{ inputs.issue_number }}"
+          HEAD="${{ inputs.head }}"
+          BASE="${{ inputs.base }}"
+          TESTS="${{ needs.test.outputs.tests_passed || 'skipped' }}"
+
+          EXISTING_PR=$(gh pr list --head "$HEAD" --base "$BASE" --json number --jq '.[0].number' 2>/dev/null || echo "")
+
+          PR_BODY="$(cat <<PRBODY
+          ## Autopilot Fix for Issue #${ISSUE}
+
+          **Track:** ${{ inputs.track }} | **Base:** ${BASE}
+
+          ### Linked Issue
+          Closes #${ISSUE}
+
+          ### How was this fixed?
+          This fix was generated by the Autopilot pipeline using RLM (codebase analysis + Claude).
+          - [View workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})
+
+          ### Testing
+          - Preflight: ${{ needs.preflight.outputs.preflight_passed || 'skipped' }}
+          - Validation: ${{ needs.validate.outputs.validation_passed || 'skipped' }}
+          - Tests: ${TESTS}
+          - [ ] Human review complete
+          PRBODY
+          )"
+
+          if [ -n "$EXISTING_PR" ]; then
+            gh pr edit "$EXISTING_PR" --body "$PR_BODY"
+            echo "pr_number=$EXISTING_PR" >> "$GITHUB_OUTPUT"
+          else
+            PR_URL=$(gh pr create \
+              --head "$HEAD" \
+              --base "$BASE" \
+              --title "fix: resolve issue #${ISSUE}" \
+              --body "$PR_BODY" \
+              --label "autopilot") || true
+            PR_NUM=$(echo "$PR_URL" | grep -oE '[0-9]+$' || echo "")
+            echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
+          fi
+
+      # --- Auto-merge if configured and all checks pass ---
+      - name: Auto-merge
+        if: |
+          needs.read-config.outputs.auto_merge == 'true' &&
+          needs.validate.outputs.validation_passed == 'true' &&
+          needs.preflight.outputs.preflight_passed == 'true' &&
+          (needs.test.outputs.tests_passed == 'true' || needs.test.outputs.tests_passed == '')
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+        run: |
+          PR="${{ steps.pr.outputs.pr_number }}"
+          if [ -n "$PR" ]; then
+            gh pr merge "$PR" --squash --auto || echo "Auto-merge failed — PR may need reviews"
+          fi
+
+      # --- Update issue labels ---
+      - name: "On success: label In QA"
+        if: |
+          needs.validate.outputs.validation_passed == 'true' &&
+          needs.preflight.outputs.preflight_passed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: ${{ inputs.issue_number }}, name: 'STATUS: In Progress',
+              });
+            } catch {}
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+              labels: ['STATUS: In QA'],
+            });
+
+      - name: "On failure: label Follow-Up Required"
+        if: |
+          needs.validate.outputs.validation_passed != 'true' ||
+          needs.preflight.outputs.preflight_passed != 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: ${{ inputs.issue_number }}, name: 'STATUS: In Progress',
+              });
+            } catch {}
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+              labels: ['STATUS: Follow-Up Required'],
+            });
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: ${{ inputs.issue_number }},
+              body: [
+                '### Autopilot — Follow-Up Required',
+                '',
+                `**Run:** [Workflow](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+                '',
+                'This issue needs human attention. Check the workflow logs for details.',
+              ].join('\n'),
+            });

@@ -1,0 +1,221 @@
+name: "Reusable Autopilot: Cleanup"
+
+on:
+  workflow_call:
+    inputs:
+      dry_run:
+        description: 'Dry run — log without executing'
+        required: false
+        type: boolean
+        default: true
+      max_age_days:
+        description: 'Max branch age (days) before cleanup'
+        required: false
+        type: number
+        default: 14
+      branch_prefix:
+        description: 'Branch prefix to clean (default: autofix/issue-)'
+        required: false
+        type: string
+        default: 'autofix/issue-'
+    secrets:
+      WORKFLOW_PAT:
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: read
+
+jobs:
+  cleanup-branches:
+    name: Cleanup Stale Autopilot Branches
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.WORKFLOW_PAT }}
+          fetch-depth: 0
+
+      - name: Cleanup stale branches and PRs
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT }}
+          script: |
+            const DRY_RUN = '${{ inputs.dry_run }}' === 'true';
+            const MAX_AGE_DAYS = ${{ inputs.max_age_days }};
+            const BRANCH_PREFIX = '${{ inputs.branch_prefix }}';
+            const MERGED_PR_GRACE_DAYS = 1;
+            const CLOSED_PR_GRACE_DAYS = 7;
+
+            const now = new Date();
+            const msPerDay = 86400000;
+            const log = [];
+            const actions = { branchesDeleted: 0, prsClosedStale: 0, skipped: 0 };
+
+            function daysAgo(dateStr) {
+              return Math.floor((now - new Date(dateStr)) / msPerDay);
+            }
+
+            // List all matching branches
+            const branches = [];
+            let page = 1;
+            while (true) {
+              const { data } = await github.rest.repos.listBranches({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100,
+                page,
+              });
+              branches.push(...data.filter(b => b.name.startsWith(BRANCH_PREFIX)));
+              if (data.length < 100) break;
+              page++;
+            }
+
+            log.push(`Found ${branches.length} ${BRANCH_PREFIX}* branches`);
+
+            for (const branch of branches) {
+              const branchName = branch.name;
+              const { data: branchDetail } = await github.rest.repos.getBranch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                branch: branchName,
+              });
+              const age = daysAgo(branchDetail.commit.commit.committer.date);
+
+              const { data: prs } = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                head: `${context.repo.owner}:${branchName}`,
+                state: 'all',
+                per_page: 10,
+              });
+
+              const openPRs = prs.filter(p => p.state === 'open' && !p.draft);
+
+              if (openPRs.length > 0) {
+                log.push(`SKIP ${branchName}: has open PR(s)`);
+                actions.skipped++;
+                continue;
+              }
+
+              if (age < 7) {
+                log.push(`SKIP ${branchName}: too recent (${age}d)`);
+                actions.skipped++;
+                continue;
+              }
+
+              const mergedPRs = prs.filter(p => p.merged_at);
+              const closedPRs = prs.filter(p => p.state === 'closed' && !p.merged_at);
+              let shouldDelete = false;
+              let reason = '';
+
+              if (mergedPRs.length > 0) {
+                const newest = mergedPRs.sort((a, b) => new Date(b.merged_at) - new Date(a.merged_at))[0];
+                if (daysAgo(newest.merged_at) >= MERGED_PR_GRACE_DAYS) {
+                  shouldDelete = true;
+                  reason = `PR #${newest.number} merged ${daysAgo(newest.merged_at)}d ago`;
+                }
+              }
+
+              if (!shouldDelete && closedPRs.length > 0 && openPRs.length === 0) {
+                const newest = closedPRs.sort((a, b) => new Date(b.closed_at) - new Date(a.closed_at))[0];
+                if (daysAgo(newest.closed_at) >= CLOSED_PR_GRACE_DAYS) {
+                  shouldDelete = true;
+                  reason = `PR #${newest.number} closed ${daysAgo(newest.closed_at)}d ago`;
+                }
+              }
+
+              if (!shouldDelete && prs.length === 0 && age >= MAX_AGE_DAYS) {
+                shouldDelete = true;
+                reason = `No PRs, ${age}d old`;
+              }
+
+              if (shouldDelete) {
+                log.push(`${DRY_RUN ? 'DRY-RUN DELETE' : 'DELETE'} ${branchName}: ${reason}`);
+                if (!DRY_RUN) {
+                  try {
+                    await github.rest.git.deleteRef({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      ref: `heads/${branchName}`,
+                    });
+                    actions.branchesDeleted++;
+                  } catch (e) {
+                    log.push(`ERROR deleting ${branchName}: ${e.message}`);
+                  }
+                } else {
+                  actions.branchesDeleted++;
+                }
+              }
+            }
+
+            const summary = [
+              `### Autopilot Cleanup Report`,
+              '',
+              `**Mode:** ${DRY_RUN ? 'DRY RUN' : 'LIVE'}`,
+              `**Repo:** ${context.repo.owner}/${context.repo.repo}`,
+              `**Max age:** ${MAX_AGE_DAYS} days`,
+              '',
+              `| Metric | Count |`,
+              `|--------|-------|`,
+              `| Branches scanned | ${branches.length} |`,
+              `| Branches deleted | ${actions.branchesDeleted} |`,
+              `| Skipped | ${actions.skipped} |`,
+              '',
+              '```',
+              ...log,
+              '```',
+            ].join('\n');
+
+            core.summary.addRaw(summary);
+            await core.summary.write();
+            console.log(summary);
+
+  cleanup-vps-previews:
+    name: Cleanup Orphaned Preview Containers
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: dev
+
+    steps:
+      - name: Cleanup stale previews
+        if: vars.DEPLOY_ENABLED != 'false'
+        uses: appleboy/ssh-action@v1
+        continue-on-error: true
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            echo "=== Orphaned preview container cleanup ==="
+            DRY_RUN="${{ inputs.dry_run }}"
+            REPO_DIR="${{ vars.VPS_REPO_PATH }}"
+
+            if [ ! -f "${REPO_DIR}/scripts/preview-teardown.sh" ]; then
+              echo "No teardown script found at ${REPO_DIR}/scripts/preview-teardown.sh"
+              exit 0
+            fi
+
+            # Find preview containers older than 4 hours
+            STALE=$(docker ps -a --format '{{.CreatedAt}}\t{{.Names}}' \
+              | grep 'preview-' | grep -v '\-db' \
+              | awk -v cutoff="$(date -d '4 hours ago' '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -v-4H '+%Y-%m-%d %H:%M:%S')" \
+              '$1" "$2 < cutoff {print $NF}' 2>/dev/null || true)
+
+            if [ -z "$STALE" ]; then
+              echo "No stale preview containers found"
+              exit 0
+            fi
+
+            for CONTAINER in $STALE; do
+              ISSUE_ID=$(echo "$CONTAINER" | grep -oE '[0-9]+$')
+              echo "${DRY_RUN:+DRY-RUN }Tearing down: $CONTAINER (issue #$ISSUE_ID)"
+              if [ "$DRY_RUN" != "true" ]; then
+                "${REPO_DIR}/scripts/preview-teardown.sh" "$ISSUE_ID" || true
+              fi
+            done

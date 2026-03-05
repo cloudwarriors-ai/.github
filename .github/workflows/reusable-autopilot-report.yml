@@ -1,0 +1,192 @@
+name: "Reusable Autopilot: Weekly Report"
+
+on:
+  workflow_call:
+    inputs:
+      lookback_days:
+        description: 'Days to look back for metrics'
+        required: false
+        type: number
+        default: 7
+      intake_workflow_id:
+        description: 'Intake workflow filename'
+        required: false
+        type: string
+        default: 'autopilot-intake.yml'
+      runner_workflow_id:
+        description: 'Runner workflow filename'
+        required: false
+        type: string
+        default: 'autopilot-runner.yml'
+      branch_prefix:
+        description: 'Autopilot branch prefix'
+        required: false
+        type: string
+        default: 'autofix/issue-'
+    secrets:
+      WORKFLOW_PAT:
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: read
+  issues: write
+  actions: read
+
+jobs:
+  report:
+    name: Generate Weekly Metrics
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.WORKFLOW_PAT }}
+          fetch-depth: 1
+
+      - name: Collect metrics and publish report
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT }}
+          script: |
+            const LOOKBACK_DAYS = ${{ inputs.lookback_days }};
+            const INTAKE_WF = '${{ inputs.intake_workflow_id }}';
+            const RUNNER_WF = '${{ inputs.runner_workflow_id }}';
+            const BRANCH_PREFIX = '${{ inputs.branch_prefix }}';
+
+            const now = new Date();
+            const since = new Date(now - LOOKBACK_DAYS * 86400000);
+            const sinceISO = since.toISOString();
+
+            // Collect runner runs
+            const runnerWorkflows = [];
+            let page = 1;
+            while (true) {
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: RUNNER_WF,
+                created: `>=${sinceISO.split('T')[0]}`,
+                per_page: 100,
+                page,
+              });
+              runnerWorkflows.push(...data.workflow_runs);
+              if (data.workflow_runs.length < 100) break;
+              page++;
+            }
+
+            // Collect intake runs
+            const intakeWorkflows = [];
+            page = 1;
+            while (true) {
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: INTAKE_WF,
+                created: `>=${sinceISO.split('T')[0]}`,
+                per_page: 100,
+                page,
+              });
+              intakeWorkflows.push(...data.workflow_runs);
+              if (data.workflow_runs.length < 100) break;
+              page++;
+            }
+
+            // Collect autopilot PRs
+            const autofixPRs = [];
+            page = 1;
+            while (true) {
+              const { data } = await github.rest.pulls.list({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'all',
+                sort: 'updated',
+                direction: 'desc',
+                per_page: 100,
+                page,
+              });
+              const filtered = data.filter(pr =>
+                pr.head.ref.startsWith(BRANCH_PREFIX) &&
+                new Date(pr.updated_at) >= since
+              );
+              autofixPRs.push(...filtered);
+              if (data.length === 0 || new Date(data[data.length - 1].updated_at) < since) break;
+              page++;
+            }
+
+            // Compute metrics
+            const total = runnerWorkflows.length;
+            const success = runnerWorkflows.filter(r => r.conclusion === 'success');
+            const failed = runnerWorkflows.filter(r => r.conclusion === 'failure');
+            const rate = total > 0 ? ((success.length / total) * 100).toFixed(1) : 'N/A';
+            const merged = autofixPRs.filter(p => p.merged_at);
+            const open = autofixPRs.filter(p => p.state === 'open');
+
+            const weekStart = since.toISOString().split('T')[0];
+            const weekEnd = now.toISOString().split('T')[0];
+
+            const report = [
+              `### Autopilot Weekly Report`,
+              `**Repo:** ${context.repo.owner}/${context.repo.repo}`,
+              `**Week:** ${weekStart} — ${weekEnd}`,
+              '',
+              '| Metric | Value |',
+              '|--------|-------|',
+              `| Intake triggers | ${intakeWorkflows.length} |`,
+              `| Runner executions | ${total} |`,
+              `| Successful | ${success.length} |`,
+              `| Failed | ${failed.length} |`,
+              `| **Success rate** | **${rate}%** |`,
+              '',
+              '| PR Metric | Value |',
+              '|-----------|-------|',
+              `| Total PRs | ${autofixPRs.length} |`,
+              `| Merged | ${merged.length} |`,
+              `| Open | ${open.length} |`,
+            ].join('\n');
+
+            // Upsert report issue
+            const marker = '<!-- AUTOPILOT_WEEKLY_REPORT -->';
+            const title = `Autopilot Weekly Report — Week of ${weekStart}`;
+
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'autopilot-report',
+              per_page: 5,
+            });
+
+            const existingReport = existing.find(i => i.body && i.body.includes(marker));
+
+            if (existingReport) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existingReport.number,
+                title,
+                body: `${marker}\n\n${report}`,
+              });
+            } else {
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: 'autopilot-report',
+                  color: '5319e7',
+                });
+              } catch {}
+
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body: `${marker}\n\n${report}`,
+                labels: ['autopilot-report'],
+              });
+            }
+
+            core.summary.addRaw(report);
+            await core.summary.write();
