@@ -58,7 +58,9 @@ jobs:
     name: "RLM Fix (#${{ inputs.issue_number }})"
     uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@main
     with:
-      issue_number: ${{ inputs.issue_number }}
+      issue_number: ${{ fromJSON(inputs.issue_number) }}
+      max_claude_turns: ${{ inputs.max_claude_turns }}
+      max_rlm_cost: ${{ inputs.max_rlm_cost }}
     secrets: inherit
 
   # ── Job 2: Read project config ──────────────────────────────────────
