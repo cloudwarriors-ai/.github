@@ -113,44 +113,17 @@ Run all quality gates:
 
 **Success**: Create PR with full documentation
 
-## PR Creation (Only on Success)
+## On Success: Commit and Push
 
-Branch: `fix/issue-$ARGUMENTS`
+When the fix is complete and all quality gates pass:
 
-Title: `[Auto-Fix] Fix #$ARGUMENTS: [concise description]`
-
-Body must include:
-```markdown
-## Issue Summary
-[Link to #$ARGUMENTS and brief description]
-
-## Root Cause Analysis
-[Deep dive into WHY this bug existed]
-
-## Implementation Approach
-[What was changed and WHY]
-
-## Supervisor Challenges Addressed
-- Challenge 1: [How we addressed it]
-- Challenge 2: [How we addressed it]
-
-## Test Coverage
-- New tests added: [list]
-- Modified tests: [list]
-- Test verification: [results]
-
-## Validation Results
-- ✅ Linting: Passed
-- ✅ Tests: X/X passed
-- ✅ Build: Success
-- ✅ Issue verified: [how we confirmed fix]
-
-## Iteration Count
-Completed in [1/2/3] iterations
-
-## Risk Assessment
-[Any risks or side effects to monitor]
-```
+1. **Use the branch provided in the workflow prompt** — do NOT hardcode a branch name
+   - The branch name is passed via `BRANCH INSTRUCTIONS` in the prompt (e.g. `autofix/issue-$ARGUMENTS`)
+   - If no branch instructions exist, use `autofix/issue-$ARGUMENTS`
+2. Commit all changes with a descriptive message
+3. Push the branch: `git push -u origin <branch-name> --force-with-lease`
+4. **Do NOT create a PR** — the autopilot pipeline handles PR creation automatically
+5. Comment on issue #$ARGUMENTS with a summary of what was fixed
 
 ## Failure Protocol (After 3 Attempts)
 

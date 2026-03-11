@@ -59,6 +59,8 @@ jobs:
     uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@main
     with:
       issue_number: ${{ fromJSON(inputs.issue_number) }}
+      head: ${{ inputs.head }}
+      base: ${{ inputs.base }}
       max_claude_turns: ${{ inputs.max_claude_turns }}
       max_rlm_cost: ${{ inputs.max_rlm_cost }}
     secrets: inherit
@@ -275,10 +277,18 @@ jobs:
 
     steps:
       - name: Checkout fix branch
+        id: checkout
+        continue-on-error: true
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.head }}
           token: ${{ secrets.WORKFLOW_PAT }}
+
+      - name: Fallback to base
+        if: steps.checkout.outcome != 'success'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
