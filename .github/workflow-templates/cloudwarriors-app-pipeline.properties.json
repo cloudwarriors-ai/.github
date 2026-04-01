@@ -1,0 +1,7 @@
+{
+  "name": "CloudWarriors App Pipeline",
+  "description": "Full CI/CD loop: Claude auto-fixes tagged issues, builds Docker image on merge, deploys with automatic rollback.",
+  "iconName": "rocket",
+  "categories": ["Deployment", "Automation"],
+  "filePatterns": ["Dockerfile"]
+}
