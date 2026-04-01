@@ -1,0 +1,303 @@
+name: Deploy with Rollback (Reusable)
+
+# Deploys a canary image, runs health checks, promotes to stable or rolls back.
+#
+# Tag lifecycle:
+#   sha-<commit>  → immutable, every build
+#   canary        → currently deploying
+#   stable        → last known good
+#   rollback      → previous stable (instant restore target)
+#
+# Before deploy:  stable → rollback
+# Deploy:         canary (= sha-<commit>)
+# If healthy:     canary → stable
+# If unhealthy:   redeploy rollback → alert
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: 'Full image ref to deploy (ghcr.io/org/name:sha-xxxx)'
+        type: string
+        required: true
+      image_base:
+        description: 'Image base without tag (ghcr.io/org/name)'
+        type: string
+        required: true
+      health_url:
+        description: 'Health check URL (e.g. https://myapp.com/health)'
+        type: string
+        required: true
+      health_retries:
+        description: 'Number of health check attempts before declaring failure'
+        type: number
+        default: 12
+      health_interval_seconds:
+        description: 'Seconds between health check attempts'
+        type: number
+        default: 10
+      deploy_type:
+        description: 'Deployment mechanism: ssh-compose | docker-service | kubectl'
+        type: string
+        default: 'ssh-compose'
+      deploy_host:
+        description: 'SSH host for ssh-compose deploys'
+        type: string
+        default: ''
+      deploy_user:
+        description: 'SSH user for ssh-compose deploys'
+        type: string
+        default: 'deploy'
+      compose_file:
+        description: 'Path to docker-compose file on remote host'
+        type: string
+        default: '~/app/docker-compose.yml'
+      service_name:
+        description: 'Service name in compose file or k8s deployment name'
+        type: string
+        default: 'app'
+      issue_number:
+        description: 'Issue number to notify on completion (optional)'
+        type: string
+        default: ''
+      notify_repo:
+        description: 'Repo to post issue comment (owner/repo)'
+        type: string
+        default: ''
+    secrets:
+      DEPLOY_SSH_KEY:
+        required: false
+      GITHUB_TOKEN:
+        required: false
+      KUBECONFIG:
+        required: false
+    outputs:
+      deployed_image:
+        description: 'Image that is now running (either new or rollback)'
+        value: ${{ jobs.deploy.outputs.deployed_image }}
+      outcome:
+        description: 'deployed | rolled_back | failed'
+        value: ${{ jobs.deploy.outputs.outcome }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      issues: write
+
+    outputs:
+      deployed_image: ${{ steps.result.outputs.deployed_image }}
+      outcome: ${{ steps.result.outputs.outcome }}
+
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Preserve stable as rollback
+        id: preserve
+        run: |
+          IMAGE_BASE="${{ inputs.image_base }}"
+
+          # Pull current stable (may not exist on first deploy)
+          if docker pull "${IMAGE_BASE}:stable" 2>/dev/null; then
+            STABLE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE_BASE}:stable" 2>/dev/null || echo "")
+            docker tag "${IMAGE_BASE}:stable" "${IMAGE_BASE}:rollback"
+            docker push "${IMAGE_BASE}:rollback"
+            echo "rollback_available=true" >> $GITHUB_OUTPUT
+            echo "previous_stable=${STABLE_DIGEST}" >> $GITHUB_OUTPUT
+            echo "Preserved stable as rollback: ${STABLE_DIGEST}"
+          else
+            echo "rollback_available=false" >> $GITHUB_OUTPUT
+            echo "No previous stable — first deploy, rollback unavailable"
+          fi
+
+      - name: Deploy canary
+        id: deploy
+        run: |
+          IMAGE="${{ inputs.image }}"
+          echo "Deploying: $IMAGE"
+
+          case "${{ inputs.deploy_type }}" in
+
+            ssh-compose)
+              echo "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
+              chmod 600 /tmp/deploy_key
+
+              ssh -i /tmp/deploy_key \
+                  -o StrictHostKeyChecking=no \
+                  -o ConnectTimeout=15 \
+                  "${{ inputs.deploy_user }}@${{ inputs.deploy_host }}" \
+                  "
+                    export IMAGE='${IMAGE}' &&
+                    export SERVICE='${{ inputs.service_name }}' &&
+                    docker pull \$IMAGE &&
+                    sed -i \"s|image: .*\${SERVICE}.*|image: \${IMAGE}|g\" '${{ inputs.compose_file }}' 2>/dev/null || true &&
+                    docker compose -f '${{ inputs.compose_file }}' up -d --no-deps --force-recreate \$SERVICE &&
+                    echo 'Deploy complete'
+                  "
+              rm -f /tmp/deploy_key
+              ;;
+
+            docker-service)
+              echo "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
+              chmod 600 /tmp/deploy_key
+
+              ssh -i /tmp/deploy_key \
+                  -o StrictHostKeyChecking=no \
+                  "${{ inputs.deploy_user }}@${{ inputs.deploy_host }}" \
+                  "docker service update --image '${IMAGE}' '${{ inputs.service_name }}'"
+              rm -f /tmp/deploy_key
+              ;;
+
+            kubectl)
+              echo "${{ secrets.KUBECONFIG }}" > /tmp/kubeconfig
+              KUBECONFIG=/tmp/kubeconfig kubectl set image \
+                deployment/${{ inputs.service_name }} \
+                ${{ inputs.service_name }}="${IMAGE}"
+              KUBECONFIG=/tmp/kubeconfig kubectl rollout status \
+                deployment/${{ inputs.service_name }} --timeout=120s
+              rm -f /tmp/kubeconfig
+              ;;
+
+            *)
+              echo "::error::Unknown deploy_type: ${{ inputs.deploy_type }}"
+              exit 1
+              ;;
+          esac
+
+          echo "status=deployed" >> $GITHUB_OUTPUT
+
+      - name: Health check loop
+        id: health
+        run: |
+          URL="${{ inputs.health_url }}"
+          RETRIES=${{ inputs.health_retries }}
+          INTERVAL=${{ inputs.health_interval_seconds }}
+          ATTEMPT=0
+          HEALTHY=false
+
+          echo "Health checking $URL ($RETRIES attempts, ${INTERVAL}s interval)..."
+
+          while [ $ATTEMPT -lt $RETRIES ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" --max-time 10 "$URL" 2>/dev/null || echo "000")
+
+            if [[ "$HTTP_CODE" =~ ^2[0-9][0-9]$ ]]; then
+              echo "✅ Healthy (attempt $ATTEMPT/$RETRIES, HTTP $HTTP_CODE)"
+              HEALTHY=true
+              break
+            else
+              echo "⏳ Attempt $ATTEMPT/$RETRIES — HTTP $HTTP_CODE, waiting ${INTERVAL}s..."
+              sleep $INTERVAL
+            fi
+          done
+
+          echo "healthy=$HEALTHY" >> $GITHUB_OUTPUT
+
+      - name: Promote canary to stable
+        if: steps.health.outputs.healthy == 'true'
+        run: |
+          IMAGE="${{ inputs.image }}"
+          IMAGE_BASE="${{ inputs.image_base }}"
+
+          docker tag "$IMAGE" "${IMAGE_BASE}:stable"
+          docker push "${IMAGE_BASE}:stable"
+          echo "✅ Promoted $IMAGE to stable"
+
+      - name: Rollback to previous stable
+        id: rollback
+        if: steps.health.outputs.healthy != 'true' && steps.preserve.outputs.rollback_available == 'true'
+        run: |
+          IMAGE_BASE="${{ inputs.image_base }}"
+          echo "::error::Health check failed — rolling back to previous stable"
+
+          case "${{ inputs.deploy_type }}" in
+
+            ssh-compose)
+              echo "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
+              chmod 600 /tmp/deploy_key
+
+              ssh -i /tmp/deploy_key \
+                  -o StrictHostKeyChecking=no \
+                  "${{ inputs.deploy_user }}@${{ inputs.deploy_host }}" \
+                  "
+                    docker pull '${IMAGE_BASE}:rollback' &&
+                    export SERVICE='${{ inputs.service_name }}' &&
+                    sed -i \"s|image: .*\${SERVICE}.*|image: ${IMAGE_BASE}:rollback|g\" '${{ inputs.compose_file }}' 2>/dev/null || true &&
+                    docker compose -f '${{ inputs.compose_file }}' up -d --no-deps --force-recreate \$SERVICE
+                  "
+              rm -f /tmp/deploy_key
+              ;;
+
+            docker-service)
+              echo "${{ secrets.DEPLOY_SSH_KEY }}" > /tmp/deploy_key
+              chmod 600 /tmp/deploy_key
+
+              ssh -i /tmp/deploy_key \
+                  -o StrictHostKeyChecking=no \
+                  "${{ inputs.deploy_user }}@${{ inputs.deploy_host }}" \
+                  "docker service update --image '${IMAGE_BASE}:rollback' '${{ inputs.service_name }}'"
+              rm -f /tmp/deploy_key
+              ;;
+
+            kubectl)
+              echo "${{ secrets.KUBECONFIG }}" > /tmp/kubeconfig
+              KUBECONFIG=/tmp/kubeconfig kubectl rollout undo \
+                deployment/${{ inputs.service_name }}
+              rm -f /tmp/kubeconfig
+              ;;
+          esac
+
+          echo "rolled_back=true" >> $GITHUB_OUTPUT
+
+      - name: Compute result
+        id: result
+        run: |
+          if [ "${{ steps.health.outputs.healthy }}" = "true" ]; then
+            echo "deployed_image=${{ inputs.image }}" >> $GITHUB_OUTPUT
+            echo "outcome=deployed" >> $GITHUB_OUTPUT
+          elif [ "${{ steps.preserve.outputs.rollback_available }}" = "true" ]; then
+            echo "deployed_image=${{ inputs.image_base }}:rollback" >> $GITHUB_OUTPUT
+            echo "outcome=rolled_back" >> $GITHUB_OUTPUT
+          else
+            echo "deployed_image=unknown" >> $GITHUB_OUTPUT
+            echo "outcome=failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Notify issue
+        if: inputs.issue_number != '' && inputs.notify_repo != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const outcome = '${{ steps.result.outputs.outcome }}';
+            const image = '${{ steps.result.outputs.deployed_image }}';
+            const healthUrl = '${{ inputs.health_url }}';
+
+            const icons = { deployed: '✅', rolled_back: '⚠️', failed: '❌' };
+            const msgs = {
+              deployed: `Deployed successfully.\n\n**Image:** \`${image}\`\n**Health:** ${healthUrl}`,
+              rolled_back: `Deployment failed health checks — automatically rolled back to previous stable.\n\n**Failed image:** \`${{ inputs.image }}\`\n**Restored:** \`${image}\``,
+              failed: `Deployment failed and no rollback image was available.\n\n**Attempted:** \`${{ inputs.image }}\``
+            };
+
+            const [owner, repo] = '${{ inputs.notify_repo }}'.split('/');
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: parseInt('${{ inputs.issue_number }}'),
+              body: `## ${icons[outcome]} Deploy ${outcome.replace('_', ' ')}\n\n${msgs[outcome]}\n\n---\n*Automated deployment*`
+            });
+
+      - name: Summary
+        run: |
+          OUTCOME="${{ steps.result.outputs.outcome }}"
+          IMAGE="${{ steps.result.outputs.deployed_image }}"
+          echo "### Deploy: $OUTCOME" >> $GITHUB_STEP_SUMMARY
+          echo "**Running image:** \`$IMAGE\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Health URL:** ${{ inputs.health_url }}" >> $GITHUB_STEP_SUMMARY
