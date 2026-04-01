@@ -30,6 +30,9 @@ Global CLAUDE.md owns git safety, branch naming, destructive-command bans, and o
 - Identify the exact failure signal (test name, assertion, error message)
 
 ### 4. Plan the minimal fix
+
+**Simple is best.** The simplest fix that fully resolves the issue is the right fix. Do not extend scope, improve adjacent code, or add abstractions beyond what the bug requires. If a one-line change fixes it, ship the one-line change.
+
 Define before writing any code:
 - repro path
 - likely root cause (specific file and line, not vague area)
@@ -64,3 +67,4 @@ Prepare:
 - residual risks or blockers (if any)
 
 Use the current global git policy for branch/commit work. Do not use destructive rollback commands.
+
