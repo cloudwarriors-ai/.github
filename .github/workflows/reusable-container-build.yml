@@ -1,0 +1,113 @@
+name: Container Build & Push (Reusable)
+
+# Builds a Docker image, tags it immutably by commit SHA, and pushes to GHCR.
+# Called after a merge to main. The deploy workflow handles actual deployment.
+
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        description: 'Image name (e.g. my-service). Full path: ghcr.io/<org>/<image_name>'
+        type: string
+        required: true
+      dockerfile:
+        description: 'Path to Dockerfile'
+        type: string
+        default: 'Dockerfile'
+      context:
+        description: 'Docker build context path'
+        type: string
+        default: '.'
+      build_args:
+        description: 'Newline-separated build args (KEY=VALUE)'
+        type: string
+        default: ''
+      ref:
+        description: 'Git ref to build (default: triggering SHA)'
+        type: string
+        default: ''
+    secrets:
+      GITHUB_TOKEN:
+        required: false  # auto-provided, listed for clarity
+    outputs:
+      image:
+        description: 'Full image ref with SHA tag (ghcr.io/org/name:sha-xxxx)'
+        value: ${{ jobs.build.outputs.image }}
+      sha_tag:
+        description: 'Short SHA tag (sha-xxxxxxxx)'
+        value: ${{ jobs.build.outputs.sha_tag }}
+      digest:
+        description: 'Image digest for provenance'
+        value: ${{ jobs.build.outputs.digest }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      sha_tag: ${{ steps.meta.outputs.sha_tag }}
+      digest: ${{ steps.push.outputs.digest }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 1
+
+      - name: Compute image metadata
+        id: meta
+        run: |
+          ORG=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          NAME=$(echo "${{ inputs.image_name }}" | tr '[:upper:]' '[:lower:]')
+          REGISTRY="ghcr.io"
+          SHORT_SHA="${GITHUB_SHA:0:8}"
+          SHA_TAG="sha-${SHORT_SHA}"
+          FULL_IMAGE="${REGISTRY}/${ORG}/${NAME}"
+
+          echo "image=${FULL_IMAGE}:${SHA_TAG}" >> $GITHUB_OUTPUT
+          echo "sha_tag=${SHA_TAG}" >> $GITHUB_OUTPUT
+          echo "registry=${REGISTRY}" >> $GITHUB_OUTPUT
+          echo "full_image=${FULL_IMAGE}" >> $GITHUB_OUTPUT
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+          echo "Building: ${FULL_IMAGE}:${SHA_TAG}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        id: push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.full_image }}:${{ steps.meta.outputs.sha_tag }}
+            ${{ steps.meta.outputs.full_image }}:canary
+          build-args: ${{ inputs.build_args }}
+          cache-from: type=registry,ref=${{ steps.meta.outputs.full_image }}:stable
+          cache-to: type=inline
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+
+      - name: Summary
+        run: |
+          echo "### Container Build" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ steps.meta.outputs.image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Digest:** \`${{ steps.push.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags pushed:** \`${{ steps.meta.outputs.sha_tag }}\`, \`canary\`" >> $GITHUB_STEP_SUMMARY
