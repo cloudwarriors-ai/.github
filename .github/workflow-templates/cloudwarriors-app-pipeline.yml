@@ -1,0 +1,74 @@
+# CloudWarriors App Pipeline
+#
+# Drop this file into .github/workflows/ of any app repo.
+# It wires up three things automatically:
+#
+#   1. @claude in an issue → Claude fixes it, opens PR, auto-merges on approval
+#   2. Merge to main       → Docker image built, pushed to GHCR
+#   3. After image push    → Deploy canary, health check, promote or rollback
+#
+# Required secrets (set at repo or org level):
+#   ANTHROPIC_API_KEY  — for Claude
+#   DEPLOY_SSH_KEY     — private key for deploy user (ssh-compose/docker-service deploys)
+#   KUBECONFIG         — kubeconfig yaml (kubectl deploys only)
+#
+# Required variables (set at repo level → Settings → Variables):
+#   DEPLOY_HOST        — hostname of your deploy target
+#   HEALTH_URL         — full URL to your /health endpoint
+#
+# Optional overrides — edit the `with:` blocks below to customize.
+
+name: App Pipeline
+
+on:
+  issue_comment:
+    types: [created]
+  push:
+    branches: [main]
+
+jobs:
+
+  # ── 1. Claude issue fix loop ─────────────────────────────────────────────────
+  claude-fix:
+    if: |
+      github.event_name == 'issue_comment' &&
+      contains(github.event.comment.body, '@claude') &&
+      github.event.issue.pull_request == null
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-claude-issue-handler.yml@main
+    with:
+      # Customize test/lint/build commands for your stack.
+      # Leave blank to use auto-detected defaults (npm/pytest).
+      lint_command: ''
+      test_command: ''
+      build_command: ''
+      e2e_command: ''     # advisory only — never blocks merge
+      timeout_minutes: 20
+    secrets: inherit
+
+  # ── 2. Build Docker image on merge to main ───────────────────────────────────
+  build:
+    if: github.event_name == 'push'
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-container-build.yml@main
+    with:
+      image_name: ${{ github.event.repository.name }}
+      dockerfile: Dockerfile
+      context: .
+    secrets: inherit
+
+  # ── 3. Deploy with rollback ──────────────────────────────────────────────────
+  deploy:
+    needs: build
+    if: github.event_name == 'push'
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-deploy-with-rollback.yml@main
+    with:
+      image: ${{ needs.build.outputs.image }}
+      image_base: ghcr.io/cloudwarriors-ai/${{ github.event.repository.name }}
+      health_url: ${{ vars.HEALTH_URL }}
+      health_retries: 12
+      health_interval_seconds: 10
+      deploy_type: ssh-compose          # ssh-compose | docker-service | kubectl
+      deploy_host: ${{ vars.DEPLOY_HOST }}
+      deploy_user: deploy
+      compose_file: ~/app/docker-compose.yml
+      service_name: app
+    secrets: inherit
