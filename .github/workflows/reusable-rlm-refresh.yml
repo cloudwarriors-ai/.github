@@ -1,0 +1,200 @@
+name: RLM Cache Refresh (Reusable)
+
+# Standalone workflow to warm/refresh the rlm-cache branch.
+# Called by reusable-claude-issue-handler.yml (rlm-preflight job) and can be
+# triggered directly on a schedule or when structural dirs change.
+
+on:
+  workflow_call:
+    inputs:
+      target_branch:
+        description: 'Branch to scan (default: main)'
+        type: string
+        default: 'main'
+      structural_dirs:
+        description: 'Space-separated dirs to watch for structural changes'
+        type: string
+        default: 'src lib app'
+      change_threshold:
+        description: 'Changed file count above which to trigger a full rescan'
+        type: number
+        default: 20
+      force_full:
+        description: 'Force a full rescan even if cache is current'
+        type: boolean
+        default: false
+    secrets:
+      OPENROUTER_API_KEY:
+        required: true
+    outputs:
+      scan_mode:
+        description: 'Scan mode used: none | targeted | full'
+        value: ${{ jobs.refresh.outputs.scan_mode }}
+      cache_sha:
+        description: 'Commit SHA written to rlm-cache branch'
+        value: ${{ jobs.refresh.outputs.cache_sha }}
+
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 'Branch to scan'
+        type: string
+        default: 'main'
+      structural_dirs:
+        description: 'Space-separated dirs to watch'
+        type: string
+        default: 'src lib app'
+      change_threshold:
+        description: 'File count threshold for full rescan'
+        type: number
+        default: 20
+      force_full:
+        description: 'Force full rescan'
+        type: boolean
+        default: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      scan_mode: ${{ steps.staleness.outputs.mode }}
+      cache_sha: ${{ steps.commit.outputs.sha }}
+
+    env:
+      ANTHROPIC_API_KEY: ""
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.OPENROUTER_API_KEY }}
+      ANTHROPIC_BASE_URL: https://openrouter.ai/api
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_branch }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check RLM cache staleness
+        id: staleness
+        env:
+          THRESHOLD: ${{ inputs.change_threshold }}
+          DIRS: ${{ inputs.structural_dirs }}
+          FORCE_FULL: ${{ inputs.force_full }}
+        run: |
+          if [ "$FORCE_FULL" = "true" ]; then
+            echo "mode=full" >> $GITHUB_OUTPUT
+            echo "Force full rescan requested"
+            exit 0
+          fi
+
+          if git ls-remote --heads origin rlm-cache | grep -q rlm-cache; then
+            git fetch origin rlm-cache --depth=1
+            LAST_SHA=$(git show origin/rlm-cache:meta.json 2>/dev/null \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('last_scan_sha',''))" 2>/dev/null || echo "")
+
+            if [ -n "$LAST_SHA" ] && git cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null; then
+              COUNT=$(git diff --name-only "$LAST_SHA"..HEAD -- $DIRS 2>/dev/null | wc -l | tr -d ' ')
+              CHANGED=$(git diff --name-only "$LAST_SHA"..HEAD -- $DIRS 2>/dev/null | head -50 | tr '\n' ' ')
+
+              if [ "$COUNT" -eq 0 ]; then
+                echo "mode=none" >> $GITHUB_OUTPUT
+                echo "Cache current — no structural changes since last scan"
+              elif [ "$COUNT" -le "$THRESHOLD" ]; then
+                echo "mode=targeted" >> $GITHUB_OUTPUT
+                printf 'changed=%s\n' "$CHANGED" >> $GITHUB_OUTPUT
+                echo "Targeted patch: $COUNT file(s) changed"
+              else
+                echo "mode=full" >> $GITHUB_OUTPUT
+                echo "Full rescan: $COUNT files changed (threshold: $THRESHOLD)"
+              fi
+            else
+              echo "mode=full" >> $GITHUB_OUTPUT
+              echo "No valid last_scan_sha — full scan"
+            fi
+          else
+            echo "mode=full" >> $GITHUB_OUTPUT
+            echo "No rlm-cache branch — initial full scan"
+          fi
+
+      - name: Install Claude Code CLI
+        if: steps.staleness.outputs.mode != 'none'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Setup RLM cache worktree
+        if: steps.staleness.outputs.mode != 'none'
+        run: |
+          if git ls-remote --heads origin rlm-cache | grep -q rlm-cache; then
+            git fetch origin rlm-cache
+            git worktree add /tmp/rlm-cache origin/rlm-cache
+          else
+            git worktree add --orphan -b rlm-cache /tmp/rlm-cache
+          fi
+          mkdir -p /tmp/rlm-cache
+
+      - name: Run full RLM scan
+        if: steps.staleness.outputs.mode == 'full'
+        run: |
+          claude --print --permission-mode bypassPermissions \
+            "Perform a general RLM scan of this codebase. Write two files:
+          1. /tmp/rlm-cache/rlm_scan_general.json with keys: project_summary, key_findings, modules (array of {path, description, key_files, responsibilities}), file_hashes (filepath -> hash for every source file)
+          2. /tmp/rlm-cache/rlm_summary.md — codebase map (max 2000 words): architecture overview, module table (Path | Responsibility | Key Files), entry points, where common bug types live, important patterns.
+          Use rg --files to discover sources. Include all non-vendor source files in file_hashes."
+
+      - name: Run targeted RLM patch
+        if: steps.staleness.outputs.mode == 'targeted'
+        env:
+          CHANGED_FILES: ${{ steps.staleness.outputs.changed }}
+        run: |
+          cp /tmp/rlm-cache/rlm_scan_general.json /tmp/rlm_scan_patch.json 2>/dev/null || echo '{}' > /tmp/rlm_scan_patch.json
+          cp /tmp/rlm-cache/rlm_summary.md /tmp/rlm_summary_patch.md 2>/dev/null || echo '' > /tmp/rlm_summary_patch.md
+
+          claude --print --permission-mode bypassPermissions \
+            "These source files changed since the last RLM scan: $CHANGED_FILES
+          1. Read each changed file
+          2. Update affected module entries in /tmp/rlm_scan_patch.json — preserve all other entries exactly
+          3. Update file_hashes for only the changed files
+          4. Patch affected sections in /tmp/rlm_summary_patch.md — preserve unchanged sections
+          Write updated content back to the same /tmp paths."
+
+          cp /tmp/rlm_scan_patch.json /tmp/rlm-cache/rlm_scan_general.json
+          cp /tmp/rlm_summary_patch.md /tmp/rlm-cache/rlm_summary.md
+
+      - name: Commit updated cache to rlm-cache branch
+        id: commit
+        if: steps.staleness.outputs.mode != 'none'
+        run: |
+          CURRENT_SHA=$(git rev-parse HEAD)
+          python3 -c "
+import json, datetime
+meta = {
+  'last_scan_sha': '$CURRENT_SHA',
+  'scan_timestamp': datetime.datetime.utcnow().isoformat() + 'Z',
+  'scan_mode': '${{ steps.staleness.outputs.mode }}'
+}
+open('/tmp/rlm-cache/meta.json', 'w').write(json.dumps(meta, indent=2))
+"
+          cd /tmp/rlm-cache
+          git config user.name "Claude Code Bot"
+          git config user.email "claude-bot@anthropic.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          else
+            git commit -m "rlm: update [sha: ${CURRENT_SHA:0:8}] [mode: ${{ steps.staleness.outputs.mode }}]"
+            git push origin rlm-cache
+            echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Summary
+        run: |
+          MODE="${{ steps.staleness.outputs.mode }}"
+          if [ "$MODE" = "none" ]; then
+            echo "### RLM Cache: Current" >> $GITHUB_STEP_SUMMARY
+            echo "No structural changes detected — existing cache is valid." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### RLM Cache: Updated" >> $GITHUB_STEP_SUMMARY
+            echo "**Mode:** $MODE" >> $GITHUB_STEP_SUMMARY
+            echo "**Commit:** ${{ steps.commit.outputs.sha }}" >> $GITHUB_STEP_SUMMARY
+          fi
