@@ -450,6 +450,41 @@ CI_CLAUDE_EOF
             });
             core.setOutput('comment_id', comment.data.id);
 
+
+      - name: Assess issue quality
+        id: quality
+        uses: actions/github-script@v7
+        env:
+          ISSUE_BODY: ${{ steps.issue.outputs.body }}
+          ISSUE_TITLE: ${{ steps.issue.outputs.title }}
+        with:
+          script: |
+            const body = process.env.ISSUE_BODY || '';
+            const signals = {
+              hasCodeOrError: /```|error|exception|traceback|stack.?trace|failed with|undefined is not|cannot read/i.test(body),
+              hasReproOrSteps: /repro|steps to|how to reproduce|to reproduce|when i |i click|i navigate|i run/i.test(body),
+              hasSufficientDetail: body.length > 80,
+              hasExpectedVsActual: /expected|actual|should|instead|but got|but see/i.test(body),
+            };
+            const score = Object.values(signals).filter(Boolean).length;
+            console.log('Quality signals:', JSON.stringify(signals), 'Score:', score);
+            if (score < 2) {
+              const missing = [];
+              if (!signals.hasCodeOrError) missing.push('- A code snippet, error message, or stack trace');
+              if (!signals.hasReproOrSteps) missing.push('- Steps to reproduce the issue');
+              if (!signals.hasSufficientDetail) missing.push('- More detail about what is happening');
+              if (!signals.hasExpectedVsActual) missing.push('- What you expected vs what actually happened');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `## More information needed\n\nI need more detail before I can work on this reliably.\n\n**Missing:**\n${missing.join('\n')}\n\nOnce you add these, comment \`@claude\` again and I'll get started.`
+              });
+              core.setOutput('sufficient', 'false');
+            } else {
+              core.setOutput('sufficient', 'true');
+            }
+
       - name: Parse options
         id: options
         run: |
@@ -513,6 +548,7 @@ CI_CLAUDE_EOF
 
       - name: Create Feature Branch
         id: branch
+        if: steps.quality.outputs.sufficient == 'true'
         run: |
           BRANCH_NAME="fix/issue-${{ steps.issue.outputs.number }}"
           TARGET="${{ steps.options.outputs.target }}"
@@ -535,6 +571,7 @@ CI_CLAUDE_EOF
 
       - name: Sanitize and Build Prompt
         id: prompt
+        if: steps.quality.outputs.sufficient == 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -590,8 +627,8 @@ ${issueBody}
 
 1. ${locateInstruction}
 2. **REPRODUCE** — Run existing tests to confirm a clean baseline. Identify the failure signal.
-3. **TEST** — Write the minimal failing test that captures the bug. Commit it first.
-4. **FIX** — Implement the minimal change. No refactors outside the bug surface.
+3. **TEST** — Write the minimal failing test. Run the tests and confirm they FAIL. Commit with message `test: <description>` — this prefix is required for TDD verification.
+4. **FIX** — Implement the minimal change. No refactors outside the bug surface. Commit separately with message `fix: <description>`.
 5. **GATE** — Run all quality gates:
    \`\`\`bash
    ${lintCmd}
@@ -656,13 +693,36 @@ ${hintSection}`;
           ATTEMPT=0
           SUCCESS=false
 
+          PREV_FAILURE=""
+
           while [ $ATTEMPT -lt $MAX_RETRIES ]; do
             ATTEMPT=$((ATTEMPT + 1))
             echo "🔄 Attempt $ATTEMPT of $MAX_RETRIES..."
 
+            # Inject failure context from previous attempt into the prompt
+            if [ -n "$PREV_FAILURE" ]; then
+              {
+                echo "## Previous Attempt Failed (Attempt $((ATTEMPT - 1)))"
+                echo ""
+                echo "The following is what was tried and why it failed. Do NOT repeat the same approach. Diagnose the root cause before writing any new code."
+                echo ""
+                echo '```'
+                tail -150 /tmp/prev-failure.txt
+                echo '```'
+                echo ""
+                echo "---"
+                echo ""
+                cat /tmp/fix-prompt.md
+              } > /tmp/fix-prompt-retry.md
+              ACTIVE_PROMPT="/tmp/fix-prompt-retry.md"
+              echo "  ↳ Injected failure context from attempt $((ATTEMPT - 1))"
+            else
+              ACTIVE_PROMPT="/tmp/fix-prompt.md"
+            fi
+
             set +e
             timeout ${{ inputs.timeout_minutes }}m claude --print --permission-mode bypassPermissions \
-              "$(cat /tmp/fix-prompt.md)" 2>&1 | tee /tmp/claude-output.txt
+              "$(cat $ACTIVE_PROMPT)" 2>&1 | tee /tmp/claude-output.txt
             EXIT_CODE=$?
             set -e
 
@@ -674,6 +734,11 @@ ${hintSection}`;
             else
               echo "❌ Claude failed with exit code $EXIT_CODE"
             fi
+
+            # Save tail for next retry's context, then reset working tree
+            tail -150 /tmp/claude-output.txt > /tmp/prev-failure.txt
+            PREV_FAILURE="set"
+            git checkout -- . 2>/dev/null || true
 
             if grep -qi "rate.limit\|429" /tmp/claude-output.txt; then
               echo "⏳ Rate limited, waiting longer..."
@@ -703,6 +768,51 @@ ${hintSection}`;
 
           echo "has_changes=$HAS_CHANGES" >> "$GITHUB_OUTPUT"
           echo "success=$SUCCESS" >> "$GITHUB_OUTPUT"
+
+
+      - name: TDD Gate — verify test was failing before fix
+        id: tdd
+        if: steps.fix.outputs.has_changes == 'true'
+        env:
+          TEST_CMD: ${{ inputs.test_command }}
+        run: |
+          TEST_COMMIT=$(git log --oneline HEAD | grep -E "^[a-f0-9]+ test(\(.+\))?:" | head -1 | awk '{print $1}')
+
+          if [ -z "$TEST_COMMIT" ]; then
+            echo "::warning::No 'test:' commit found — TDD sequence unverified"
+            echo "tdd_valid=unverified" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "Found test commit: $TEST_COMMIT — checking tests fail at this point"
+          git stash --include-untracked 2>/dev/null || true
+          git checkout "$TEST_COMMIT" -- . 2>/dev/null || true
+
+          if [ -n "$TEST_CMD" ]; then
+            RUN_CMD="$TEST_CMD"
+          elif [ -f package-lock.json ] || [ -f package.json ]; then
+            RUN_CMD="npm run test:unit 2>/dev/null || npm test"
+          elif [ -f requirements.txt ] || [ -f pyproject.toml ]; then
+            RUN_CMD="pytest --tb=no -q"
+          else
+            RUN_CMD="echo 'no test runner detected'; exit 0"
+          fi
+
+          set +e
+          eval "$RUN_CMD" > /tmp/tdd-gate.txt 2>&1
+          TDD_EXIT=$?
+          set -e
+
+          git checkout HEAD -- . 2>/dev/null || true
+          git stash pop 2>/dev/null || true
+
+          if [ $TDD_EXIT -ne 0 ]; then
+            echo "✅ TDD gate passed — tests fail before fix, pass after"
+            echo "tdd_valid=true" >> $GITHUB_OUTPUT
+          else
+            echo "::warning::TDD gate: tests passed at the test commit — test may not capture the bug"
+            echo "tdd_valid=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Run Secret Scan
         if: steps.fix.outputs.has_changes == 'true'
@@ -927,6 +1037,68 @@ ${hintSection}`;
             core.setOutput('number', pr.data.number);
             core.setOutput('url', pr.data.html_url);
 
+
+      - name: Claude PR Review
+        if: steps.fix.outputs.has_changes == 'true' && steps.gates.outputs.passed == 'true' && steps.pr.outputs.number != ''
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ""
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_BASE_URL: https://openrouter.ai/api
+          TDD_VALID: ${{ steps.tdd.outputs.tdd_valid }}
+          TARGET_BRANCH: ${{ steps.options.outputs.target }}
+        run: |
+          git fetch origin "$TARGET_BRANCH" 2>/dev/null || true
+          DIFF=$(git diff "origin/$TARGET_BRANCH"..HEAD -- . ':(exclude).github/' ':(exclude)*.lock' 2>/dev/null | head -c 8000)
+
+          TDD_NOTE=""
+          [ "$TDD_VALID" = "false" ] && TDD_NOTE="WARNING: TDD gate failed — tests may not have been failing before the fix."
+          [ "$TDD_VALID" = "unverified" ] && TDD_NOTE="NOTE: TDD unverified — no 'test:' commit found."
+
+          {
+            echo "You are a senior engineer reviewing an automated fix. Be concise and direct."
+            echo ""
+            echo "## Diff"
+            printf '```diff\n%s\n```\n' "$DIFF"
+            echo ""
+            [ -n "$TDD_NOTE" ] && echo "⚠️ $TDD_NOTE" && echo ""
+            echo "Review for:"
+            echo "1. Correctness — does this fix the bug, or does it just make tests pass?"
+            echo "2. Regressions — could this break adjacent code paths?"
+            echo "3. Scope creep — does this change more than the bug surface? Flag anything outside it."
+            echo "4. Security — injection, auth bypass, secret exposure, or trust boundary issues?"
+            echo "5. Simple is best — is there a simpler fix that achieves the same result?"
+            echo ""
+            echo "Output: if no issues, one sentence. If issues found, bullet list by severity (critical/high/medium) with file:line."
+            echo "End with exactly: VERDICT: APPROVE  or  VERDICT: REQUEST_CHANGES"
+          } > /tmp/review-prompt.md
+
+          set +e
+          timeout 8m claude --print --permission-mode bypassPermissions \
+            "$(cat /tmp/review-prompt.md)" 2>&1 | tee /tmp/review-output.txt
+          set -e
+
+          VERDICT="APPROVE"
+          grep -q "VERDICT: REQUEST_CHANGES" /tmp/review-output.txt && VERDICT="REQUEST_CHANGES"
+          echo "verdict=$VERDICT" >> $GITHUB_OUTPUT
+
+      - name: Post review to PR
+        if: steps.pr.outputs.number != '' && steps.review.outputs.verdict != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let body = '';
+            try { body = fs.readFileSync('/tmp/review-output.txt', 'utf8').trim(); } catch(e) {}
+            const verdict = '${{ steps.review.outputs.verdict }}';
+            const icon = verdict === 'APPROVE' ? '✅' : '⚠️';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: parseInt('${{ steps.pr.outputs.number }}'),
+              body: `## ${icon} Claude Code Review\n\n${body}\n\n---\n*Automated review by Claude Code*`
+            });
+
       - name: Update progress - Complete
         if: steps.fix.outputs.has_changes == 'true' && steps.gates.outputs.passed == 'true'
         uses: actions/github-script@v7
@@ -943,9 +1115,10 @@ ${hintSection}`;
             |------|--------|
             | Analyze issue | ✅ Complete |
             | Create branch | ✅ Complete |
-            | Implement fix | ✅ Complete |
-            | Run quality gates | ✅ All passed |
+            | TDD + implement fix | ✅ Complete |
+            | Quality gates | ✅ All passed |
             | Create PR | ✅ Created |
+            | Code review | ✅ Complete |
 
             **PR:** #${{ steps.pr.outputs.number }}
             ${{ steps.pr.outputs.url }}
@@ -1069,6 +1242,7 @@ ${hintSection}`;
             /tmp/test-summary.json
           if-no-files-found: ignore
           retention-days: 7
+
 
 
 
