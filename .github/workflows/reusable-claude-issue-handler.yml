@@ -349,6 +349,63 @@ open('/tmp/rlm-cache/meta.json','w').write(json.dumps(meta,indent=2))
           name: rlm-summary-${{ github.run_id }}
           path: /tmp/rlm-artifacts
 
+
+      - name: Write CI CLAUDE.md
+        run: |
+          # Preserve any existing repo CLAUDE.md, then prepend CI rules
+          if [ -f CLAUDE.md ]; then
+            mv CLAUDE.md /tmp/repo-claude.md
+            EXISTING=$(cat /tmp/repo-claude.md)
+          else
+            EXISTING=""
+          fi
+
+          cat > CLAUDE.md << 'CI_CLAUDE_EOF'
+# Claude CI Operating Rules
+
+These rules govern Claude's behavior in this CI environment and take precedence over any project-level guidance below.
+
+## Core Operating Rules
+
+- Default to action over asking. Ask only when there is genuine ambiguity about direction or an authority boundary.
+- Prefer discovering facts from the repo over asking for context.
+- Keep the end goal in view. Do not stop at partial analysis when safe momentum remains.
+- Anti-overengineering gate: no new service, persistence layer, schema, or orchestration engine unless you can prove an existing primitive cannot satisfy the requirement in one sentence. Changes exceeding 500 LOC or 3 files require justification.
+- No mid-task progress reports. Report when done or blocked on a real decision.
+- No hedging language. State what was run, what the output was, and whether it passed or failed.
+
+## Fix Protocol
+
+1. LOCATE — use the codebase map if available; navigate directly. Minimize broad exploration.
+2. REPRODUCE — run existing tests to confirm a clean baseline. Identify the failure signal.
+3. TEST — write the minimal failing test that captures the bug. Verify it actually fails before implementing the fix.
+4. FIX — implement the minimal change. No refactors outside the bug surface.
+5. GATE — run lint, tests, build. All must pass.
+6. ITERATE — on failure: read the actual error, trace the call path, form a hypothesis, verify it, then fix. After 3 failures on the same surface, escalate with the exact blocker (file and line).
+7. EXIT — success: failing test passes + gates green. Blocked: report exact blocker.
+
+## Before Stopping
+
+Ask: is there one more small, local, reversible step that materially improves the result?
+Continue if: obvious adjacent improvement, incomplete path to goal, missing verification step in scope.
+Stop if: goal satisfied end to end, evidence complete, remaining ideas are speculative.
+
+## Security Rules
+
+- Do NOT modify .github/workflows/ or .env* files
+- Do NOT commit secrets, API keys, or credentials
+- Do NOT push to main
+- Keep changes focused on this issue only
+CI_CLAUDE_EOF
+
+          # Append original repo CLAUDE.md content below the CI rules
+          if [ -n "$EXISTING" ]; then
+            echo "" >> CLAUDE.md
+            echo "---" >> CLAUDE.md
+            echo "" >> CLAUDE.md
+            echo "$EXISTING" >> CLAUDE.md
+          fi
+
       - name: Get Issue Details
         id: issue
         uses: actions/github-script@v7
@@ -1006,4 +1063,5 @@ ${hintSection}`;
             /tmp/test-summary.json
           if-no-files-found: ignore
           retention-days: 7
+
 
