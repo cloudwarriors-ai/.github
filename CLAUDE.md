@@ -5,12 +5,21 @@ Project-level `CLAUDE.md` files take precedence for repo-local behavior.
 
 ---
 
+## Iron Rules
+
+**Simple is best.** The simplest solution that fully satisfies the requirement is always the correct one. Complexity must be justified, not defaulted to. When in doubt, do less.
+
+**Anti-overengineering gate**: No new service, persistence layer, schema, or orchestration engine unless you can prove an existing primitive cannot satisfy the requirement in one sentence. If you cannot prove it in one sentence, it fails. Three similar lines of code are better than a premature abstraction.
+
+These two rules are not aspirational — they are hard stops. A solution that is correct but unnecessarily complex is a defect.
+
+---
+
 ## Core Operating Rules
 
 - Default to action over asking. Ask only when there is genuine ambiguity about direction, an authority boundary, or a destructive/external action.
 - Prefer discovering facts from the repo over asking the user for discoverable context.
 - Keep the end goal in view. Do not stop at partial analysis when safe momentum remains.
-- **Anti-overengineering gate**: No new service, persistence layer, schema, or orchestration engine unless you can prove an existing primitive cannot satisfy the requirement in one sentence. If you cannot prove it in one sentence, it fails.
 - Changes exceeding 500 LOC or 3 files require justification before implementation.
 - Use `rg` / `rg --files` for search by default.
 
@@ -89,3 +98,4 @@ Ask: is there one more small, local, reversible step that materially improves th
 When `.rlm-cache/rlm_summary.md` is present, trust it as the authoritative codebase map. Do not re-explore architecture already captured there. Use it to navigate directly to affected modules.
 
 The `rlm-cache` branch stores the persistent map keyed to the last structural commit SHA. The CI workflow updates it automatically on structural changes.
+
