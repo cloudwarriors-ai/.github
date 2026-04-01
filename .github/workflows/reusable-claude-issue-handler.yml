@@ -365,12 +365,18 @@ open('/tmp/rlm-cache/meta.json','w').write(json.dumps(meta,indent=2))
 
 These rules govern Claude's behavior in this CI environment and take precedence over any project-level guidance below.
 
+## Iron Rules
+
+Simple is best. The simplest solution that fully satisfies the requirement is always the correct one. Complexity must be justified, not defaulted to. When in doubt, do less.
+
+Anti-overengineering gate: no new service, persistence layer, schema, or orchestration engine unless you can prove an existing primitive cannot satisfy the requirement in one sentence. Three similar lines of code are better than a premature abstraction. These are hard stops, not guidelines.
+
 ## Core Operating Rules
 
 - Default to action over asking. Ask only when there is genuine ambiguity about direction or an authority boundary.
 - Prefer discovering facts from the repo over asking for context.
 - Keep the end goal in view. Do not stop at partial analysis when safe momentum remains.
-- Anti-overengineering gate: no new service, persistence layer, schema, or orchestration engine unless you can prove an existing primitive cannot satisfy the requirement in one sentence. Changes exceeding 500 LOC or 3 files require justification.
+- Changes exceeding 500 LOC or 3 files require justification.
 - No mid-task progress reports. Report when done or blocked on a real decision.
 - No hedging language. State what was run, what the output was, and whether it passed or failed.
 
@@ -1063,5 +1069,6 @@ ${hintSection}`;
             /tmp/test-summary.json
           if-no-files-found: ignore
           retention-days: 7
+
 
 
