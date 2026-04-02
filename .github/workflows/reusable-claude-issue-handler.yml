@@ -541,6 +541,9 @@ jobs:
           BRANCH_NAME="fix/issue-${{ steps.issue.outputs.number }}"
           TARGET="${{ steps.options.outputs.target }}"
 
+          # Stash any workspace changes (e.g. CI CLAUDE.md) before switching branches
+          git stash --include-untracked 2>/dev/null || true
+
           git fetch origin
           git checkout "$TARGET" 2>/dev/null || git checkout -b "$TARGET" "origin/$TARGET"
 
@@ -554,6 +557,9 @@ jobs:
           else
             git checkout -b "$BRANCH_NAME"
           fi
+
+          # Restore stashed changes (CI CLAUDE.md back in place for Claude to read)
+          git stash pop 2>/dev/null || true
 
           echo "branch=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
 
