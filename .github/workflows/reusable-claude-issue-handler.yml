@@ -1097,18 +1097,7 @@ jobs:
           if [ "$RUNTIME_FOUND" = "true" ] && [ -n "$RUNTIME_TEST_E2E_CMD" ]; then
             ALL_FATAL_HEALTHY="true"
             if [ -f /tmp/shadow-services-status.json ]; then
-              ALL_FATAL_HEALTHY=$(python3 -c "
-import json, sys
-try:
-    d = json.load(open('/tmp/shadow-services-status.json'))
-    # Run e2e only if fatal AND degraded services are all healthy
-    # (e2e tests need all services even if failure_mode=degraded)
-    no_fatal_fail = len(d.get('fatal_failed', [])) == 0
-    no_degraded_fail = len(d.get('degraded_failed', [])) == 0
-    print('true' if (no_fatal_fail and no_degraded_fail) else 'false')
-except Exception:
-    print('false')
-" 2>/dev/null || echo "false")
+              ALL_FATAL_HEALTHY=$(python3 -c "import json; d=json.load(open('/tmp/shadow-services-status.json')); print('true' if not d.get('fatal_failed') and not d.get('degraded_failed') else 'false')" 2>/dev/null || echo "false")
             fi
             if [ "$ALL_FATAL_HEALTHY" = "true" ]; then
               E2E_CMD="$RUNTIME_TEST_E2E_CMD"
