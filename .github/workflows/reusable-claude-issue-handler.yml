@@ -543,6 +543,16 @@ jobs:
         with:
           script: |
             const body = process.env.ISSUE_BODY || '';
+
+            // Shadow issues are synced from real user-submitted bugs in source repos.
+            // They may lack structured repro steps but are always actionable — skip the
+            // quality gate and proceed directly.
+            if (/Shadow of \[/.test(body)) {
+              console.log('Shadow issue detected — bypassing quality gate');
+              core.setOutput('sufficient', 'true');
+              return;
+            }
+
             const signals = {
               hasCodeOrError: /```|error|exception|traceback|stack.?trace|failed with|undefined is not|cannot read/i.test(body),
               hasReproOrSteps: /repro|steps to|how to reproduce|to reproduce|when i |i click|i navigate|i run/i.test(body),
