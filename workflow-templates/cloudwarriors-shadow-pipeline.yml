@@ -24,13 +24,13 @@ jobs:
 
   # @claude on shadow issues → existing fix loop, unchanged
   handle-issue:
-    if: |
+    if: >
       github.event_name == 'issue_comment' &&
       !github.event.issue.pull_request &&
       contains(github.event.comment.body, '@claude')
     uses: cloudwarriors-ai/.github/.github/workflows/reusable-claude-issue-handler.yml@main
     with:
-      target_branch: main
+      target_branch: upstream/main
       node_version: '22'
       install_command: 'npm ci'
       lint_command: 'npm run lint --if-present'
@@ -40,7 +40,7 @@ jobs:
 
   # Scheduled issue sync from source repo + manual dispatch
   sync-issues:
-    if: |
+    if: >
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch'
     uses: cloudwarriors-ai/.github/.github/workflows/reusable-shadow-sync.yml@main
@@ -50,7 +50,7 @@ jobs:
 
   # Open upstream PR when fix/issue-N merges into main
   upstream-pr:
-    if: |
+    if: >
       github.event_name == 'pull_request' &&
       github.event.action == 'closed' &&
       github.event.pull_request.merged == true &&
@@ -60,5 +60,4 @@ jobs:
       shadow_repo: ${{ github.repository }}
       shadow_pr_number: ${{ github.event.pull_request.number }}
       shadow_branch: ${{ github.event.pull_request.head.ref }}
-      source_issue_number: ${{ fromJSON(replace(github.event.pull_request.head.ref, 'fix/issue-', '')) }}
     secrets: inherit
