@@ -1101,7 +1101,11 @@ jobs:
 import json, sys
 try:
     d = json.load(open('/tmp/shadow-services-status.json'))
-    print('true' if d.get('all_fatal_healthy', False) else 'false')
+    # Run e2e only if fatal AND degraded services are all healthy
+    # (e2e tests need all services even if failure_mode=degraded)
+    no_fatal_fail = len(d.get('fatal_failed', [])) == 0
+    no_degraded_fail = len(d.get('degraded_failed', [])) == 0
+    print('true' if (no_fatal_fail and no_degraded_fail) else 'false')
 except Exception:
     print('false')
 " 2>/dev/null || echo "false")
