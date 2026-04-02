@@ -167,7 +167,7 @@ jobs:
             });
             console.log('Installed .github/workflows/claude-ci.yml');
 
-      - name: Trigger initial issue sync
+      - name: Trigger initial issue sync and runtime detection
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
@@ -185,6 +185,16 @@ jobs:
             });
             console.log(`Triggered initial sync for ${shadowRepo}`);
 
+            // Detect stack and generate .shadow/runtime.yml
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'cloudwarriors-ai',
+              repo: '.github',
+              workflow_id: 'reusable-shadow-detect-runtime.yml',
+              ref: 'main',
+              inputs: { shadow_repo: shadowRepo },
+            });
+            console.log(`Triggered runtime detection for ${shadowRepo}`);
+
       - name: Summary
         uses: actions/github-script@v7
         with:
@@ -196,6 +206,6 @@ jobs:
                 `**Source:** ${{ inputs.source_repo }}`,
                 `**Shadow:** ${{ steps.create-repo.outputs.shadow_repo }}`,
                 ``,
-                `Initial issue sync triggered. Add \`@claude\` to any shadow issue to start the fix loop.`,
+                `Initial issue sync and runtime detection triggered. Add \`@claude\` to any shadow issue to start the fix loop.`,
               ].join('\n'))
               .write();
