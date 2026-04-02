@@ -338,6 +338,130 @@ jobs:
             eval "$SETUP_CMD"
           fi
 
+      - name: Read Shadow Runtime Config
+        id: runtime_config
+        run: |
+          if [ -f .shadow/runtime.yml ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            python3 << 'PYEOF'
+          import yaml, os, json, sys
+
+          with open('.shadow/runtime.yml') as f:
+              cfg = yaml.safe_load(f)
+
+          commands = cfg.get('commands', {})
+          env_cfg = cfg.get('env', {})
+          services = cfg.get('services', [])
+
+          out = os.environ['GITHUB_OUTPUT']
+          with open(out, 'a') as f:
+              f.write(f"lint_cmd={commands.get('lint', '')}\n")
+              f.write(f"test_unit_cmd={commands.get('test_unit', '')}\n")
+              f.write(f"test_e2e_cmd={commands.get('test_e2e', '')}\n")
+              f.write(f"build_cmd={commands.get('build', '')}\n")
+              f.write(f"seed_cmd={commands.get('seed', '')}\n")
+              f.write(f"has_services={'true' if services else 'false'}\n")
+
+          with open('/tmp/shadow-env.sh', 'w') as f:
+              for k, v in env_cfg.get('defaults', {}).items():
+                  f.write(f'export {k}="{v}"\n')
+              for k, v in env_cfg.get('ci_overrides', {}).items():
+                  f.write(f'export {k}="{v}"\n')
+
+          with open('/tmp/shadow-services.json', 'w') as f:
+              json.dump(services, f)
+
+          print(f"Shadow runtime loaded: {len(services)} service(s), "
+                f"unit={commands.get('test_unit','')!r}, e2e={commands.get('test_e2e','')!r}")
+          PYEOF
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "has_services=false" >> "$GITHUB_OUTPUT"
+            touch /tmp/shadow-env.sh
+            echo "[]" > /tmp/shadow-services.json
+          fi
+
+      - name: Start Shadow Services
+        id: services
+        if: steps.runtime_config.outputs.has_services == 'true'
+        continue-on-error: true
+        run: |
+          source /tmp/shadow-env.sh
+          python3 << 'PYEOF'
+          import json, subprocess, time, urllib.request, os, sys
+
+          with open('/tmp/shadow-services.json') as f:
+              services = json.load(f)
+
+          pids = {}
+          for svc in services:
+              name = svc['name']
+              cmd = svc['start_command']
+              log_file = f"/tmp/service-{name}.log"
+              print(f"Starting: {name}")
+              proc = subprocess.Popen(
+                  cmd, shell=True,
+                  stdout=open(log_file, 'w'), stderr=subprocess.STDOUT,
+                  preexec_fn=os.setpgrp
+              )
+              pids[name] = {'pid': proc.pid, 'failure_mode': svc.get('failure_mode', 'degraded')}
+              print(f"  PID: {proc.pid}, log: {log_file}")
+
+          with open('/tmp/shadow-service-pids.json', 'w') as f:
+              json.dump(pids, f)
+
+          fatal_failed = []
+          degraded_failed = []
+          for svc in services:
+              name = svc['name']
+              failure_mode = svc.get('failure_mode', 'degraded')
+              all_healthy = True
+              for hc in svc.get('health_checks', []):
+                  url = hc['url']
+                  timeout = hc.get('timeout_seconds', 60)
+                  deadline = time.time() + timeout
+                  healthy = False
+                  print(f"  [{name}/{hc['name']}] polling {url} (timeout={timeout}s)")
+                  while time.time() < deadline:
+                      try:
+                          resp = urllib.request.urlopen(url, timeout=3)
+                          if resp.status < 400:
+                              print(f"  [{name}/{hc['name']}] ready (HTTP {resp.status})")
+                              healthy = True
+                              break
+                      except Exception:
+                          pass
+                      time.sleep(3)
+                  if not healthy:
+                      print(f"  [{name}/{hc['name']}] TIMEOUT after {timeout}s")
+                      all_healthy = False
+              if not all_healthy:
+                  if failure_mode == 'fatal':
+                      fatal_failed.append(name)
+                  else:
+                      degraded_failed.append(name)
+                      print(f"::warning::{name} unhealthy (degraded — unit tests still run)")
+
+          with open('/tmp/shadow-services-status.json', 'w') as f:
+              json.dump({'fatal_failed': fatal_failed, 'degraded_failed': degraded_failed,
+                         'all_fatal_healthy': len(fatal_failed) == 0}, f)
+
+          if fatal_failed:
+              print(f"::error::Fatal service(s) failed: {fatal_failed}")
+              sys.exit(1)
+          print(f"Services ready. Degraded: {degraded_failed}")
+          PYEOF
+
+      - name: Seed Test Data
+        if: >
+          steps.runtime_config.outputs.found == 'true' &&
+          steps.runtime_config.outputs.seed_cmd != '' &&
+          steps.services.outcome != 'failure'
+        run: |
+          source /tmp/shadow-env.sh
+          echo "Running seed: ${{ steps.runtime_config.outputs.seed_cmd }}"
+          eval "${{ steps.runtime_config.outputs.seed_cmd }}"
+
       - name: Install Claude Code CLI
         run: npm install -g @anthropic-ai/claude-code
 
@@ -872,23 +996,57 @@ jobs:
           INPUT_BUILD_CMD: ${{ inputs.build_command }}
           INPUT_E2E_CMD: ${{ inputs.e2e_command }}
           BASELINE_FAIL_COUNT: ${{ steps.baseline.outputs.baseline_fail_count }}
+          RUNTIME_FOUND: ${{ steps.runtime_config.outputs.found }}
+          RUNTIME_LINT_CMD: ${{ steps.runtime_config.outputs.lint_cmd }}
+          RUNTIME_TEST_UNIT_CMD: ${{ steps.runtime_config.outputs.test_unit_cmd }}
+          RUNTIME_TEST_E2E_CMD: ${{ steps.runtime_config.outputs.test_e2e_cmd }}
+          RUNTIME_BUILD_CMD: ${{ steps.runtime_config.outputs.build_cmd }}
         run: |
-          LINT_CMD="$INPUT_LINT_CMD"
-          TEST_CMD="$INPUT_TEST_CMD"
-          BUILD_CMD="$INPUT_BUILD_CMD"
+          # Source runtime environment variables (Firebase emulator hosts, etc.)
+          [ -f /tmp/shadow-env.sh ] && source /tmp/shadow-env.sh
 
-          [ -z "$LINT_CMD" ] && LINT_CMD="npm run lint"
-          [ -z "$TEST_CMD" ] && TEST_CMD="npm run test:unit"
-          [ -z "$BUILD_CMD" ] && BUILD_CMD="npm run build"
+          # Command resolution: runtime config overrides 'skip' inputs
+          resolve_cmd() {
+            local input_val="$1"
+            local runtime_val="$2"
+            local default_val="$3"
+            if [ "$input_val" = "skip" ] && [ "$RUNTIME_FOUND" = "true" ] && [ -n "$runtime_val" ]; then
+              echo "$runtime_val"
+            elif [ "$input_val" = "skip" ]; then
+              echo "skip"
+            elif [ -n "$input_val" ]; then
+              echo "$input_val"
+            elif [ "$RUNTIME_FOUND" = "true" ] && [ -n "$runtime_val" ]; then
+              echo "$runtime_val"
+            else
+              echo "${default_val}"
+            fi
+          }
+
+          LINT_CMD=$(resolve_cmd "$INPUT_LINT_CMD" "$RUNTIME_LINT_CMD" "npm run lint")
+          TEST_CMD=$(resolve_cmd "$INPUT_TEST_CMD" "$RUNTIME_TEST_UNIT_CMD" "npm run test:unit")
+          BUILD_CMD=$(resolve_cmd "$INPUT_BUILD_CMD" "$RUNTIME_BUILD_CMD" "npm run build")
 
           set +e
-          echo "Running: $LINT_CMD"
-          eval "$LINT_CMD" 2>&1 | tee /tmp/lint.txt
-          LINT_EXIT=$?
+          if [ "$LINT_CMD" = "skip" ]; then
+            echo "Lint skipped"
+            LINT_EXIT=0
+            echo "lint skipped" > /tmp/lint.txt
+          else
+            echo "Running: $LINT_CMD"
+            eval "$LINT_CMD" 2>&1 | tee /tmp/lint.txt
+            LINT_EXIT=$?
+          fi
 
-          echo "Running: $TEST_CMD"
-          eval "$TEST_CMD" 2>&1 | tee /tmp/test.txt
-          TEST_EXIT=$?
+          if [ "$TEST_CMD" = "skip" ]; then
+            echo "Tests skipped"
+            TEST_EXIT=0
+            echo "tests skipped" > /tmp/test.txt
+          else
+            echo "Running: $TEST_CMD"
+            eval "$TEST_CMD" 2>&1 | tee /tmp/test.txt
+            TEST_EXIT=$?
+          fi
 
           if [ "$BUILD_CMD" = "skip" ]; then
             echo "Build skipped (build_command=skip)"
@@ -934,10 +1092,32 @@ jobs:
           fi
 
           # E2e — advisory only, never blocks
-          if [ -n "$INPUT_E2E_CMD" ]; then
-            echo "Running e2e (advisory): $INPUT_E2E_CMD"
+          # Determine e2e command: runtime config takes over if services are healthy
+          E2E_CMD="$INPUT_E2E_CMD"
+          if [ "$RUNTIME_FOUND" = "true" ] && [ -n "$RUNTIME_TEST_E2E_CMD" ]; then
+            ALL_FATAL_HEALTHY="true"
+            if [ -f /tmp/shadow-services-status.json ]; then
+              ALL_FATAL_HEALTHY=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('/tmp/shadow-services-status.json'))
+    print('true' if d.get('all_fatal_healthy', False) else 'false')
+except Exception:
+    print('false')
+" 2>/dev/null || echo "false")
+            fi
+            if [ "$ALL_FATAL_HEALTHY" = "true" ]; then
+              E2E_CMD="$RUNTIME_TEST_E2E_CMD"
+            else
+              echo "::warning::Skipping e2e tests — not all fatal services are healthy"
+              E2E_CMD=""
+            fi
+          fi
+
+          if [ -n "$E2E_CMD" ] && [ "$E2E_CMD" != "skip" ]; then
+            echo "Running e2e (advisory): $E2E_CMD"
             set +e
-            eval "$INPUT_E2E_CMD" 2>&1 | tee /tmp/e2e.txt
+            eval "$E2E_CMD" 2>&1 | tee /tmp/e2e.txt
             E2E_EXIT=$?
             set -e
             echo "e2e_status=$([ $E2E_EXIT -eq 0 ] && echo 'passed' || echo 'failed')" >> "$GITHUB_OUTPUT"
@@ -1387,11 +1567,33 @@ jobs:
             /tmp/claude-output.txt
             /tmp/lint.txt
             /tmp/test.txt
+            /tmp/e2e.txt
             /tmp/build.txt
             /tmp/metrics.json
             /tmp/test-summary.json
+            /tmp/shadow-services-status.json
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Cleanup Shadow Services
+        if: always()
+        run: |
+          if [ -f /tmp/shadow-service-pids.json ]; then
+            python3 << 'PYEOF'
+          import json, os, signal
+          try:
+              with open('/tmp/shadow-service-pids.json') as f:
+                  pids = json.load(f)
+              for name, info in pids.items():
+                  try:
+                      os.killpg(os.getpgid(info['pid']), signal.SIGTERM)
+                      print(f"Terminated service: {name}")
+                  except Exception as e:
+                      print(f"Could not terminate {name}: {e}")
+          except Exception as e:
+              print(f"Cleanup skipped: {e}")
+          PYEOF
+          fi
 
 
 
