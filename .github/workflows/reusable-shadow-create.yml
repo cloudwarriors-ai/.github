@@ -1,0 +1,199 @@
+name: Shadow Repo Create (Reusable)
+
+# Creates a new shadow repo in cloudwarriors-ai from a source repo.
+# Pushes source code, writes .shadow/config.json, installs claude-ci.yml, triggers initial sync.
+
+on:
+  workflow_call:
+    inputs:
+      source_repo:
+        description: 'Source repo full name (e.g. acme/backend)'
+        type: string
+        required: true
+      shadow_name:
+        description: 'Shadow repo name override (default: shadow-{owner}-{repo})'
+        type: string
+        default: ''
+    outputs:
+      shadow_repo:
+        description: 'Created shadow repo full name (cloudwarriors-ai/...)'
+        value: ${{ jobs.create.outputs.shadow_repo }}
+
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 'Source repo full name (e.g. acme/backend)'
+        type: string
+        required: true
+      shadow_name:
+        description: 'Shadow repo name override (default: shadow-{owner}-{repo})'
+        type: string
+        default: ''
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    outputs:
+      shadow_repo: ${{ steps.create-repo.outputs.shadow_repo }}
+
+    steps:
+      - name: Create shadow repo and bootstrap
+        id: create-repo
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const sourceRepo = '${{ inputs.source_repo }}';
+            const [sourceOwner, sourceRepoName] = sourceRepo.split('/');
+
+            // Derive shadow name
+            let shadowName = '${{ inputs.shadow_name }}';
+            if (!shadowName) {
+              shadowName = `shadow-${sourceOwner}-${sourceRepoName}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+            }
+            const shadowRepo = `cloudwarriors-ai/${shadowName}`;
+
+            // ── 1. Create shadow repo ─────────────────────────────────────────
+            try {
+              await github.rest.repos.createInOrg({
+                org: 'cloudwarriors-ai',
+                name: shadowName,
+                description: `Shadow of ${sourceRepo}`,
+                private: true,
+                auto_init: false,
+                has_issues: true,
+              });
+              console.log(`Created repo: ${shadowRepo}`);
+            } catch (e) {
+              if (e.status === 422) {
+                console.log(`Repo ${shadowRepo} already exists — continuing`);
+              } else {
+                throw e;
+              }
+            }
+
+            // ── 2. Write .shadow/config.json ──────────────────────────────────
+            const config = {
+              schemaVersion: '1',
+              sourceRepo,
+              shadowRepo,
+              createdAt: new Date().toISOString(),
+              lastSyncAt: null,
+              syncStats: { totalSynced: 0, open: 0, closed: 0 },
+              issueMap: {},
+            };
+
+            // Check if config already exists
+            let existingSha;
+            try {
+              const { data } = await github.rest.repos.getContent({
+                owner: 'cloudwarriors-ai',
+                repo: shadowName,
+                path: '.shadow/config.json',
+              });
+              existingSha = data.sha;
+            } catch (e) { /* doesn't exist yet */ }
+
+            await github.rest.repos.createOrUpdateFileContents({
+              owner: 'cloudwarriors-ai',
+              repo: shadowName,
+              path: '.shadow/config.json',
+              message: 'chore: initialize shadow config',
+              content: Buffer.from(JSON.stringify(config, null, 2)).toString('base64'),
+              ...(existingSha ? { sha: existingSha } : {}),
+            });
+            console.log('Wrote .shadow/config.json');
+
+            core.setOutput('shadow_repo', shadowRepo);
+            core.setOutput('shadow_name', shadowName);
+
+      - name: Push source code to shadow repo
+        env:
+          WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
+          SOURCE_REPO: ${{ inputs.source_repo }}
+          SHADOW_NAME: ${{ steps.create-repo.outputs.shadow_name }}
+        run: |
+          # Mirror source code into shadow repo
+          # Using --mirror to get all branches and tags
+          git clone --mirror \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/${SOURCE_REPO}.git" source.git
+
+          cd source.git
+          git remote set-url origin \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/cloudwarriors-ai/${SHADOW_NAME}.git"
+
+          # Push all refs; if shadow already has commits, use --force
+          git push --mirror || git push --mirror --force
+          echo "Pushed source code to cloudwarriors-ai/${SHADOW_NAME}"
+
+      - name: Install claude-ci workflow in shadow repo
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const shadowName = '${{ steps.create-repo.outputs.shadow_name }}';
+
+            // The shadow pipeline caller workflow content (base64 encoded below)
+            // Source: cloudwarriors-ai/.github/workflow-templates/cloudwarriors-shadow-pipeline.yml
+            const { data: templateFile } = await github.rest.repos.getContent({
+              owner: 'cloudwarriors-ai',
+              repo: '.github',
+              path: 'workflow-templates/cloudwarriors-shadow-pipeline.yml',
+            });
+
+            // Check if claude-ci.yml already exists
+            let existingSha;
+            try {
+              const { data } = await github.rest.repos.getContent({
+                owner: 'cloudwarriors-ai',
+                repo: shadowName,
+                path: '.github/workflows/claude-ci.yml',
+              });
+              existingSha = data.sha;
+            } catch (e) { /* doesn't exist */ }
+
+            await github.rest.repos.createOrUpdateFileContents({
+              owner: 'cloudwarriors-ai',
+              repo: shadowName,
+              path: '.github/workflows/claude-ci.yml',
+              message: 'ci: install shadow pipeline (claude-ci)',
+              content: templateFile.content, // already base64 from getContent
+              ...(existingSha ? { sha: existingSha } : {}),
+            });
+            console.log('Installed .github/workflows/claude-ci.yml');
+
+      - name: Trigger initial issue sync
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const shadowRepo = '${{ steps.create-repo.outputs.shadow_repo }}';
+            // Small delay to let repo settle
+            await new Promise(r => setTimeout(r, 3000));
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'cloudwarriors-ai',
+              repo: '.github',
+              workflow_id: 'reusable-shadow-sync.yml',
+              ref: 'main',
+              inputs: { shadow_repo: shadowRepo },
+            });
+            console.log(`Triggered initial sync for ${shadowRepo}`);
+
+      - name: Summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await core.summary
+              .addRaw([
+                `### Shadow Repo Created`,
+                ``,
+                `**Source:** ${{ inputs.source_repo }}`,
+                `**Shadow:** ${{ steps.create-repo.outputs.shadow_repo }}`,
+                ``,
+                `Initial issue sync triggered. Add \`@claude\` to any shadow issue to start the fix loop.`,
+              ].join('\n'))
+              .write();
