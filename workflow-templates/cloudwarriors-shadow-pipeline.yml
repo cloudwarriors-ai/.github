@@ -1,0 +1,64 @@
+name: Shadow Pipeline
+
+# Installed in cloudwarriors-ai shadow repos.
+# Provides: @claude fix loop, scheduled issue sync (every 6h), upstream PR after merge.
+
+on:
+  issue_comment:
+    types: [created]
+
+  schedule:
+    - cron: '0 */6 * * *'
+
+  pull_request:
+    types: [closed]
+
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to run: sync-issues | (leave blank for full sync)'
+        type: string
+        default: 'sync-issues'
+
+jobs:
+
+  # @claude on shadow issues → existing fix loop, unchanged
+  handle-issue:
+    if: |
+      github.event_name == 'issue_comment' &&
+      !github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@claude')
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-claude-issue-handler.yml@main
+    with:
+      target_branch: main
+      node_version: '22'
+      install_command: 'npm ci'
+      lint_command: 'npm run lint --if-present'
+      test_command: 'npm test --if-present'
+      build_command: 'skip'
+    secrets: inherit
+
+  # Scheduled issue sync from source repo + manual dispatch
+  sync-issues:
+    if: |
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-shadow-sync.yml@main
+    with:
+      shadow_repo: ${{ github.repository }}
+    secrets: inherit
+
+  # Open upstream PR when fix/issue-N merges into main
+  upstream-pr:
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'fix/issue-')
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-shadow-upstream-pr.yml@main
+    with:
+      shadow_repo: ${{ github.repository }}
+      shadow_pr_number: ${{ github.event.pull_request.number }}
+      shadow_branch: ${{ github.event.pull_request.head.ref }}
+      source_issue_number: ${{ fromJSON(replace(github.event.pull_request.head.ref, 'fix/issue-', '')) }}
+    secrets: inherit
