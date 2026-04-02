@@ -1208,10 +1208,12 @@ jobs:
           git config user.email "claude-bot@anthropic.com"
 
           # Restore CI-injected CLAUDE.md to its original state so we don't commit it
-          if git show HEAD:CLAUDE.md > /tmp/orig-claude.md 2>/dev/null; then
+          # Compare against the target branch, not current HEAD (which may already have CI rules)
+          TARGET="${{ inputs.target_branch }}"
+          if git show "origin/${TARGET}:CLAUDE.md" > /tmp/orig-claude.md 2>/dev/null; then
             cp /tmp/orig-claude.md CLAUDE.md
           elif git ls-files --error-unmatch CLAUDE.md 2>/dev/null; then
-            git checkout HEAD -- CLAUDE.md
+            git checkout "origin/${TARGET}" -- CLAUDE.md 2>/dev/null || true
           fi
 
           if [ -n "$(git status --porcelain)" ]; then
