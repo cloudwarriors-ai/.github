@@ -294,7 +294,6 @@ jobs:
             console.log(`Committed .shadow/runtime.yml: ${result.data.content.sha}`);
 
             // Write summary
-            const yaml = require('js-yaml') || { load: () => ({}) };
             await core.summary
               .addRaw(`### Runtime Config Generated\n\n**Repo:** ${{ inputs.shadow_repo }}\n\n\`\`\`yaml\n${content.slice(0, 1500)}\n\`\`\``)
               .write();
