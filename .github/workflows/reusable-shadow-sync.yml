@@ -1,0 +1,186 @@
+name: Shadow Issue Sync (Reusable)
+
+# Syncs issues from a source repo into a shadow repo.
+# Reads .shadow/config.json for source_repo and issueMap.
+# Upserts: create new shadow issues, update existing ones, close if source closed.
+
+on:
+  workflow_call:
+    inputs:
+      shadow_repo:
+        description: 'Shadow repo full name (e.g. cloudwarriors-ai/cloudflow-shadow)'
+        type: string
+        required: true
+    outputs:
+      issues_synced:
+        description: 'Number of issues synced'
+        value: ${{ jobs.sync.outputs.issues_synced }}
+
+  workflow_dispatch:
+    inputs:
+      shadow_repo:
+        description: 'Shadow repo full name (e.g. cloudwarriors-ai/cloudflow-shadow)'
+        type: string
+        required: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+
+    outputs:
+      issues_synced: ${{ steps.sync.outputs.issues_synced }}
+
+    steps:
+      - name: Sync issues
+        id: sync
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const [shadowOwner, shadowRepoName] = '${{ inputs.shadow_repo }}'.split('/');
+
+            // ── 1. Read .shadow/config.json ──────────────────────────────────
+            let config, configSha;
+            try {
+              const { data } = await github.rest.repos.getContent({
+                owner: shadowOwner,
+                repo: shadowRepoName,
+                path: '.shadow/config.json',
+              });
+              configSha = data.sha;
+              config = JSON.parse(Buffer.from(data.content, 'base64').toString());
+            } catch (e) {
+              core.setFailed(`.shadow/config.json not found in ${shadowOwner}/${shadowRepoName}: ${e.message}`);
+              return;
+            }
+
+            const sourceRepo = config.sourceRepo;
+            const [sourceOwner, sourceRepoName] = sourceRepo.split('/');
+            const issueMap = config.issueMap || {};
+            console.log(`Syncing from ${sourceRepo} → ${shadowOwner}/${shadowRepoName}`);
+            console.log(`Existing issueMap entries: ${Object.keys(issueMap).length}`);
+
+            // ── 2. Ensure required labels exist in shadow repo ───────────────
+            const ensureLabel = async (name, color = 'ededed', description = '') => {
+              try {
+                await github.rest.issues.getLabel({ owner: shadowOwner, repo: shadowRepoName, name });
+              } catch (e) {
+                if (e.status === 404) {
+                  try {
+                    await github.rest.issues.createLabel({ owner: shadowOwner, repo: shadowRepoName, name, color, description });
+                  } catch (ce) { /* may already exist from concurrent run */ }
+                }
+              }
+            };
+            await ensureLabel('shadow', '0075ca', 'Issue mirrored from an external source repo');
+            await ensureLabel('AUTOFIX: Ready', '2da44e', 'Ready for automated fix');
+
+            // ── 3. Fetch all issues from source (paginated) ──────────────────
+            let page = 1, allIssues = [];
+            while (true) {
+              const { data } = await github.rest.issues.listForRepo({
+                owner: sourceOwner,
+                repo: sourceRepoName,
+                state: 'all',
+                per_page: 100,
+                page,
+              });
+              if (!data.length) break;
+              // Filter out pull requests
+              allIssues.push(...data.filter(i => !i.pull_request));
+              if (data.length < 100) break;
+              page++;
+            }
+            console.log(`Fetched ${allIssues.length} issues from ${sourceRepo}`);
+
+            // ── 4. Upsert each issue in shadow ───────────────────────────────
+            let created = 0, updated = 0;
+            for (let i = 0; i < allIssues.length; i++) {
+              const src = allIssues[i];
+              const shadowFooter = `\n\n---\n*Shadow of [${sourceRepo}#${src.number}](${src.html_url})*`;
+              const body = (src.body || '') + shadowFooter;
+              const title = src.title;
+              const state = src.state;
+
+              // Mirror source labels + add shadow labels
+              const sourceLabels = src.labels.map(l => l.name);
+              const labels = [...new Set([...sourceLabels, 'shadow', 'AUTOFIX: Ready'])];
+
+              // Ensure all source labels exist in shadow
+              for (const lbl of sourceLabels) {
+                await ensureLabel(lbl);
+              }
+
+              const shadowNumber = issueMap[String(src.number)];
+
+              if (shadowNumber) {
+                // Update existing shadow issue
+                await github.rest.issues.update({
+                  owner: shadowOwner,
+                  repo: shadowRepoName,
+                  issue_number: shadowNumber,
+                  title,
+                  body,
+                  state,
+                  labels,
+                });
+                updated++;
+              } else {
+                // Create new shadow issue
+                const { data: created_issue } = await github.rest.issues.create({
+                  owner: shadowOwner,
+                  repo: shadowRepoName,
+                  title,
+                  body,
+                  labels,
+                });
+                issueMap[String(src.number)] = created_issue.number;
+                created++;
+              }
+
+              // Rate limit mitigation: sleep 1s every 30 upserts
+              if ((i + 1) % 30 === 0) {
+                await new Promise(r => setTimeout(r, 1000));
+              }
+            }
+
+            const totalSynced = allIssues.length;
+            const openCount = allIssues.filter(i => i.state === 'open').length;
+            const closedCount = totalSynced - openCount;
+            console.log(`Created: ${created}, Updated: ${updated}`);
+
+            // ── 5. Write back updated config.json ────────────────────────────
+            const updatedConfig = {
+              ...config,
+              lastSyncAt: new Date().toISOString(),
+              syncStats: { totalSynced, open: openCount, closed: closedCount },
+              issueMap,
+            };
+
+            await github.rest.repos.createOrUpdateFileContents({
+              owner: shadowOwner,
+              repo: shadowRepoName,
+              path: '.shadow/config.json',
+              sha: configSha,
+              message: `chore: shadow sync [${totalSynced} issues, +${created} new]`,
+              content: Buffer.from(JSON.stringify(updatedConfig, null, 2)).toString('base64'),
+            });
+
+            core.setOutput('issues_synced', totalSynced);
+            console.log(`Sync complete. ${totalSynced} issues total.`);
+
+            // ── Summary ──────────────────────────────────────────────────────
+            const summary = [
+              `### Shadow Sync: ${sourceRepo} → ${shadowOwner}/${shadowRepoName}`,
+              `| Metric | Value |`,
+              `|--------|-------|`,
+              `| Source issues | ${totalSynced} |`,
+              `| Created | ${created} |`,
+              `| Updated | ${updated} |`,
+              `| Open | ${openCount} |`,
+              `| Closed | ${closedCount} |`,
+            ].join('\n');
+            await core.summary.addRaw(summary).write();
