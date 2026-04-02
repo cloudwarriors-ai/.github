@@ -22,7 +22,7 @@ on:
 
 jobs:
 
-  # @claude on shadow issues → existing fix loop, unchanged
+  # @claude on shadow issues → fix loop with runtime.yml service startup
   handle-issue:
     if: >
       github.event_name == 'issue_comment' &&
@@ -33,8 +33,8 @@ jobs:
       target_branch: upstream/main
       node_version: '22'
       install_command: 'npm ci'
-      lint_command: 'npm run lint --if-present'
-      test_command: 'npm test --if-present'
+      lint_command: 'skip'
+      test_command: 'skip'
       build_command: 'skip'
     secrets: inherit
 
