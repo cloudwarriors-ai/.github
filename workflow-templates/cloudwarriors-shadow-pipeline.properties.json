@@ -1,0 +1,6 @@
+{
+  "name": "CloudWarriors Shadow Pipeline",
+  "description": "Shadow repo CI: @claude fix loop on synced issues, scheduled sync from source, upstream PR on merge.",
+  "iconName": "octicon-repo-forked",
+  "categories": ["Automation", "Shadow"]
+}
