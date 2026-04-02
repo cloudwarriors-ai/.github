@@ -238,7 +238,7 @@ jobs:
           git config user.email "claude-bot@anthropic.com"
           git add -A
           git diff --cached --quiet || git commit -m "rlm: update [sha: ${CURRENT_SHA:0:8}] [mode: ${{ steps.staleness.outputs.mode }}]"
-          git push origin rlm-cache
+          git push origin HEAD:rlm-cache
 
       - name: Export RLM summary as artifact
         id: export
