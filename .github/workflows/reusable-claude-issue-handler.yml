@@ -1207,6 +1207,13 @@ jobs:
           git config user.name "Claude Code Bot"
           git config user.email "claude-bot@anthropic.com"
 
+          # Restore CI-injected CLAUDE.md to its original state so we don't commit it
+          if git show HEAD:CLAUDE.md > /tmp/orig-claude.md 2>/dev/null; then
+            cp /tmp/orig-claude.md CLAUDE.md
+          elif git ls-files --error-unmatch CLAUDE.md 2>/dev/null; then
+            git checkout HEAD -- CLAUDE.md
+          fi
+
           if [ -n "$(git status --porcelain)" ]; then
             git add -A
             git commit -m "fix: resolve issue #${{ steps.issue.outputs.number }}
