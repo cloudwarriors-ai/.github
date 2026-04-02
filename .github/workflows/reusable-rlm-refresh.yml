@@ -183,7 +183,7 @@ open('/tmp/rlm-cache/meta.json', 'w').write(json.dumps(meta, indent=2))
             echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
           else
             git commit -m "rlm: update [sha: ${CURRENT_SHA:0:8}] [mode: ${{ steps.staleness.outputs.mode }}]"
-            git push origin rlm-cache
+            git push origin HEAD:rlm-cache
             echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
           fi
 
@@ -198,3 +198,4 @@ open('/tmp/rlm-cache/meta.json', 'w').write(json.dumps(meta, indent=2))
             echo "**Mode:** $MODE" >> $GITHUB_STEP_SUMMARY
             echo "**Commit:** ${{ steps.commit.outputs.sha }}" >> $GITHUB_STEP_SUMMARY
           fi
+
