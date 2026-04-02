@@ -123,7 +123,8 @@ jobs:
               skipBrowser: /\[skip-browser\]/i.test(comment) || ${{ inputs.skip_browser_verification }},
               hint: extractOption(comment, /\[hint:([^\]]+)\]/i) || '',
               dryRun: /\[dry-run\]/i.test(comment),
-              verbose: /\[verbose\]/i.test(comment)
+              verbose: /\[verbose\]/i.test(comment),
+              skipQualityGate: /\[skip-quality-gate\]/i.test(comment)
             };
 
             console.log('Parsed options:', JSON.stringify(options, null, 2));
@@ -453,6 +454,7 @@ jobs:
           echo "skip_browser=$(echo "$OPTIONS" | jq -r '.skipBrowser')" >> "$GITHUB_OUTPUT"
           echo "hint=$(echo "$OPTIONS" | jq -r '.hint')" >> "$GITHUB_OUTPUT"
           echo "dry_run=$(echo "$OPTIONS" | jq -r '.dryRun')" >> "$GITHUB_OUTPUT"
+          echo "skip_quality_gate=$(echo "$OPTIONS" | jq -r '.skipQualityGate')" >> "$GITHUB_OUTPUT"
 
       - name: Extract Acceptance Criteria
         id: criteria
@@ -507,7 +509,7 @@ jobs:
 
       - name: Capture test baseline
         id: baseline
-        if: steps.quality.outputs.sufficient == 'true'
+        if: steps.quality.outputs.sufficient == 'true' || steps.options.outputs.skip_quality_gate == 'true'
         env:
           INPUT_TEST_CMD: ${{ inputs.test_command }}
         run: |
@@ -536,7 +538,7 @@ jobs:
 
       - name: Create Feature Branch
         id: branch
-        if: steps.quality.outputs.sufficient == 'true'
+        if: steps.quality.outputs.sufficient == 'true' || steps.options.outputs.skip_quality_gate == 'true'
         run: |
           BRANCH_NAME="fix/issue-${{ steps.issue.outputs.number }}"
           TARGET="${{ steps.options.outputs.target }}"
@@ -565,7 +567,7 @@ jobs:
 
       - name: Sanitize and Build Prompt
         id: prompt
-        if: steps.quality.outputs.sufficient == 'true'
+        if: steps.quality.outputs.sufficient == 'true' || steps.options.outputs.skip_quality_gate == 'true'
         uses: actions/github-script@v7
         with:
           script: |
