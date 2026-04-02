@@ -1,0 +1,300 @@
+name: Shadow Runtime Detection (Reusable)
+
+# Generates .shadow/runtime.yml for a shadow repo by detecting its stack
+# and asking Claude to produce a CI environment spec.
+# Run once at shadow creation, or on-demand to regenerate.
+
+on:
+  workflow_call:
+    inputs:
+      shadow_repo:
+        description: 'Shadow repo full name (e.g. cloudwarriors-ai/cloudflow-shadow)'
+        type: string
+        required: true
+      shadow_repo_ref:
+        description: 'Branch to commit runtime.yml to'
+        type: string
+        default: 'main'
+
+  workflow_dispatch:
+    inputs:
+      shadow_repo:
+        description: 'Shadow repo full name (e.g. cloudwarriors-ai/cloudflow-shadow)'
+        type: string
+        required: true
+      shadow_repo_ref:
+        description: 'Branch to commit runtime.yml to'
+        type: string
+        default: 'main'
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout shadow repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.shadow_repo }}
+          token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+          ref: ${{ inputs.shadow_repo_ref }}
+
+      - name: Gather stack signals
+        id: signals
+        run: |
+          python3 << 'PYEOF'
+          import json, os
+
+          def read_safe(path, max_lines=None):
+              if not os.path.exists(path):
+                  return None
+              with open(path, errors='replace') as f:
+                  lines = f.readlines()
+              if max_lines:
+                  lines = lines[:max_lines]
+              return ''.join(lines)
+
+          def package_json_summary():
+              raw = read_safe('package.json')
+              if not raw:
+                  return None
+              try:
+                  pkg = json.loads(raw)
+                  return {
+                      'scripts': pkg.get('scripts', {}),
+                      'dependency_names': sorted(pkg.get('dependencies', {}).keys()),
+                      'dev_dependency_names': sorted(pkg.get('devDependencies', {}).keys()),
+                      'engines': pkg.get('engines', {}),
+                  }
+              except Exception:
+                  return {'raw': raw[:500]}
+
+          signals = {
+              'package_json': package_json_summary(),
+              'firebase_json': read_safe('firebase.json'),
+              'env_example': read_safe('.env.example') or read_safe('.env.local.example'),
+              'playwright_config': read_safe('playwright.config.ts') or read_safe('playwright.config.js'),
+              'vitest_config': read_safe('vitest.config.ts') or read_safe('vitest.config.js'),
+              'docker_compose': read_safe('docker-compose.yml') or read_safe('compose.yml'),
+              'dockerfile': read_safe('Dockerfile', max_lines=40),
+              'requirements_txt': read_safe('requirements.txt', max_lines=60),
+              'pyproject_toml': read_safe('pyproject.toml', max_lines=40),
+              'gemfile': read_safe('Gemfile', max_lines=40),
+              'go_mod': read_safe('go.mod', max_lines=20),
+              'readme': read_safe('README.md', max_lines=80),
+              'existing_shadow_config': read_safe('.shadow/config.json'),
+              'existing_runtime': read_safe('.shadow/runtime.yml'),
+          }
+
+          # Filter out None values to keep prompt tight
+          signals = {k: v for k, v in signals.items() if v is not None}
+
+          with open('/tmp/stack-signals.json', 'w') as f:
+              json.dump(signals, f, indent=2)
+
+          print(f"Signals gathered: {list(signals.keys())}")
+          PYEOF
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code@latest --prefer-offline 2>/dev/null || npm install -g @anthropic-ai/claude-code@latest
+
+      - name: Build detection prompt
+        run: |
+          SHADOW_REPO='${{ inputs.shadow_repo }}'
+          cat > /tmp/detect-prompt.md << 'PROMPTEOF'
+          You are a CI runtime configuration generator for shadow repositories used for autonomous AI bug fixing.
+
+          Given the stack signals below, generate a `.shadow/runtime.yml` file that describes how to spin up this application for CI integration testing.
+
+          ## Output Format
+
+          Output ONLY the YAML content between these exact markers, nothing else before or after:
+          ---START_YAML---
+          <yaml content here>
+          ---END_YAML---
+
+          ## Schema (all fields required unless noted)
+
+          ```yaml
+          schema_version: "1"
+          generated_at: "<ISO timestamp>"
+
+          stack:
+            framework: <nextjs|express|fastapi|rails|django|flask|unknown>
+            language: <typescript|javascript|python|ruby|go|unknown>
+            package_manager: <npm|pnpm|yarn|pip|bundler|go>
+            node_version: "<string>"  # omit entirely for non-js/ts projects
+            python_version: "<string>"  # omit entirely for non-python projects
+
+          services:   # background processes needed before tests; use [] if none required
+            - name: <descriptive-name>
+              start_command: "<shell command to start service>"
+              health_checks:
+                - name: <check-name>
+                  url: "http://localhost:<port>"
+                  expected_status: 200
+                  timeout_seconds: 60
+              failure_mode: <degraded|fatal>
+              # degraded: unit tests still run if this service fails
+              # fatal: entire test run fails if this service is unhealthy
+
+          commands:
+            install: "<command>"
+            lint: "<command or empty string to skip>"
+            test_unit: "<command for fast unit tests needing NO services, or empty to skip>"
+            test_e2e: "<command for e2e/integration tests needing services, or empty to skip>"
+            build: "<command or empty string to skip>"
+            seed: "<command to seed test data after services start, or empty to skip>"
+
+          env:
+            defaults:       # injected for ALL runs; use emulator endpoints or fake/demo values ONLY
+              KEY: "value"
+            ci_overrides:   # injected only in CI; omit section if empty
+              KEY: "value"
+
+          secrets:
+            required: []    # GitHub secret names; run fails if absent
+            optional:       # GitHub secret names; passed through if present, tests skip gracefully if absent
+              - SECRET_NAME
+          ```
+
+          ## Generation Rules
+
+          1. **Firebase projects**: Read `firebase.json` for emulator ports. Set `FIRESTORE_EMULATOR_HOST`, `FIREBASE_AUTH_EMULATOR_HOST`, `FIREBASE_STORAGE_EMULATOR_HOST` in `env.defaults` pointing at those ports. Generate fake/demo values for all `NEXT_PUBLIC_FIREBASE_*` vars.
+
+          2. **test_unit**: Must run without any background services. For Next.js + vitest: use `npm run test:run`. For Python: `pytest -x --ignore=e2e` or `pytest src/`. For Rails: `rails test`.
+
+          3. **test_e2e**: Use the Playwright/Cypress/Selenium command. If `playwright.config.ts` has a `webServer` block, the dev server auto-starts — no separate service needed. Use `npm run test:e2e` or equivalent.
+
+          4. **services failure_mode**: Use `degraded` for Firebase emulators (unit tests can still run if emulators fail). Use `fatal` for databases that unit tests also require.
+
+          5. **secrets.optional**: Any var from `.env.example` that maps to an external paid API (Anthropic, Stripe, Zoom, Resend, Twilio, etc.) goes here.
+
+          6. **env.defaults**: Use emulator hostnames for Firebase. Use `demo-shadow` as the Firebase project ID. Never put real credentials or production URLs in defaults.
+
+          7. **build command**: For Next.js, only include if the project actually builds without external services. If build requires live DB/API, use empty string.
+
+          8. If the stack cannot be determined, use `framework: unknown`, `services: []`, and leave `test_unit` and `test_e2e` empty.
+
+          ## Stack Signals
+
+          PROMPTEOF
+
+          echo "" >> /tmp/detect-prompt.md
+          echo '```json' >> /tmp/detect-prompt.md
+          cat /tmp/stack-signals.json >> /tmp/detect-prompt.md
+          echo '' >> /tmp/detect-prompt.md
+          echo '```' >> /tmp/detect-prompt.md
+
+          echo "Prompt ready ($(wc -l < /tmp/detect-prompt.md) lines)"
+
+      - name: Generate runtime config with Claude
+        id: generate
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          echo "Running Claude stack detection..."
+          timeout 120 claude --print --permission-mode bypassPermissions \
+            --model claude-sonnet-4-6 \
+            "$(cat /tmp/detect-prompt.md)" > /tmp/claude-output.txt 2>&1
+          EXIT=$?
+          echo "Claude exit code: $EXIT"
+          if [ $EXIT -ne 0 ]; then
+            echo "::error::Claude detection failed"
+            cat /tmp/claude-output.txt
+            exit 1
+          fi
+          echo "Claude output ($(wc -l < /tmp/claude-output.txt) lines)"
+
+      - name: Extract and validate runtime.yml
+        id: validate
+        run: |
+          python3 << 'PYEOF'
+          import sys, re, yaml, json
+
+          # Extract YAML between markers
+          content = open('/tmp/claude-output.txt').read()
+          match = re.search(r'---START_YAML---\n(.*?)---END_YAML---', content, re.DOTALL)
+          if not match:
+              print('::error::Claude output did not contain ---START_YAML--- / ---END_YAML--- markers')
+              print('Output was:')
+              print(content[:2000])
+              sys.exit(1)
+
+          yaml_content = match.group(1)
+
+          # Parse check
+          try:
+              cfg = yaml.safe_load(yaml_content)
+          except yaml.YAMLError as e:
+              print(f'::error::Generated runtime.yml failed YAML parse: {e}')
+              print('Content was:')
+              print(yaml_content[:1000])
+              sys.exit(1)
+
+          # Required top-level keys
+          required = ['schema_version', 'stack', 'services', 'commands', 'env', 'secrets']
+          for k in required:
+              if k not in cfg:
+                  print(f'::error::Missing required key: {k}')
+                  sys.exit(1)
+
+          # Required commands keys
+          required_cmds = ['install', 'lint', 'test_unit', 'test_e2e', 'build', 'seed']
+          for k in required_cmds:
+              if k not in cfg.get('commands', {}):
+                  print(f'::error::Missing commands.{k}')
+                  sys.exit(1)
+
+          # Write validated file
+          with open('/tmp/runtime.yml', 'w') as f:
+              f.write(yaml_content)
+
+          print(f"Validation passed. Stack: {cfg['stack']}")
+          print(f"Services: {[s['name'] for s in cfg.get('services', [])]}")
+          cmds = cfg.get('commands', {})
+          print(f"Commands: unit={cmds.get('test_unit','')!r}, e2e={cmds.get('test_e2e','')!r}")
+          PYEOF
+
+      - name: Commit runtime.yml to shadow repo
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const [owner, repo] = '${{ inputs.shadow_repo }}'.split('/');
+            const ref = '${{ inputs.shadow_repo_ref }}';
+
+            const content = fs.readFileSync('/tmp/runtime.yml', 'utf8');
+            const encoded = Buffer.from(content).toString('base64');
+
+            // Check if file already exists (need SHA to update)
+            let existingSha = null;
+            try {
+              const { data } = await github.rest.repos.getContent({
+                owner, repo, path: '.shadow/runtime.yml', ref,
+              });
+              existingSha = data.sha;
+            } catch (e) {
+              if (e.status !== 404) throw e;
+            }
+
+            const params = {
+              owner, repo,
+              path: '.shadow/runtime.yml',
+              message: 'ci: generate .shadow/runtime.yml [auto-detected stack]',
+              content: encoded,
+              branch: ref,
+            };
+            if (existingSha) params.sha = existingSha;
+
+            const result = await github.rest.repos.createOrUpdateFileContents(params);
+            console.log(`Committed .shadow/runtime.yml: ${result.data.content.sha}`);
+
+            // Write summary
+            const yaml = require('js-yaml') || { load: () => ({}) };
+            await core.summary
+              .addRaw(`### Runtime Config Generated\n\n**Repo:** ${{ inputs.shadow_repo }}\n\n\`\`\`yaml\n${content.slice(0, 1500)}\n\`\`\``)
+              .write();
