@@ -30,7 +30,7 @@ jobs:
       contains(github.event.comment.body, '@claude')
     uses: cloudwarriors-ai/.github/.github/workflows/reusable-claude-issue-handler.yml@main
     with:
-      target_branch: upstream/main
+      target_branch: main
       node_version: '22'
       install_command: 'npm ci'
       lint_command: 'skip'
