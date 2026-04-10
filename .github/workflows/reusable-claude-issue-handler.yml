@@ -686,7 +686,7 @@ jobs:
           if match:
               print(match.group(2))
           else:
-              print(0)
+              print(-1)
           PY
           }
 
@@ -1102,7 +1102,7 @@ jobs:
           if match:
               print(match.group(2))
           else:
-              print(0)
+              print(-1)
           PY
           }
 
@@ -1144,7 +1144,10 @@ jobs:
           else
             CURRENT_LINT_ERRORS=$(lint_error_count /tmp/lint.txt)
             echo "lint_total_errors=$CURRENT_LINT_ERRORS" >> "$GITHUB_OUTPUT"
-            if [ "${BASELINE_LINT_EXIT:-0}" -ne 0 ] && [ "$CURRENT_LINT_ERRORS" -le "${BASELINE_LINT_ERRORS:-0}" ]; then
+            if [ "${BASELINE_LINT_EXIT:-0}" -ne 0 ] && \
+               [ "$CURRENT_LINT_ERRORS" -ge 0 ] && \
+               [ "${BASELINE_LINT_ERRORS:-0}" -ge 0 ] && \
+               [ "$CURRENT_LINT_ERRORS" -le "${BASELINE_LINT_ERRORS:-0}" ]; then
               echo "lint_status=pre-existing" >> "$GITHUB_OUTPUT"
               echo "lint_regression=pre-existing" >> "$GITHUB_OUTPUT"
               echo "::warning::Lint is failing, but no more errors than baseline (${CURRENT_LINT_ERRORS} <= ${BASELINE_LINT_ERRORS:-0})"
