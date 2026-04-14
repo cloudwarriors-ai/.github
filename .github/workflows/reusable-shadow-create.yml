@@ -213,6 +213,6 @@ jobs:
                 `**Source:** ${{ inputs.source_repo }}`,
                 `**Shadow:** ${{ steps.create-repo.outputs.shadow_repo }}`,
                 ``,
-                `Initial issue sync and runtime detection triggered. Add \`@claude\` to any shadow issue to start the fix loop.`,
+                `Initial issue sync and runtime detection triggered. Apply \`AUTOFIX: Ready\` or comment \`@claude\` on any shadow issue to start the fix loop.`,
               ].join('\n'))
               .write();
