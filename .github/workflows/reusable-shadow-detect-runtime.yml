@@ -419,8 +419,11 @@ jobs:
                   defaults.setdefault('E2E_BACKEND_URL', 'http://localhost:8000')
 
           if has_manage_py and has_ensure_e2e_admin:
-              defaults.setdefault('E2E_EMAIL', 'e2e-admin@cloudwarriors.com')
-              defaults.setdefault('E2E_PASSWORD', 'E2eAdmin123!')
+              defaults['E2E_EMAIL'] = 'e2e-admin@cloudwarriors.com'
+              defaults['E2E_PASSWORD'] = 'E2eAdmin123!'
+              ci_overrides['E2E_EMAIL'] = defaults['E2E_EMAIL']
+              ci_overrides['E2E_PASSWORD'] = defaults['E2E_PASSWORD']
+              ci_overrides.pop('E2E_USERNAME', None)
               commands['seed'] = '(cd service && DJANGO_E2E_ENABLED=true .venv/bin/python manage.py migrate --noinput && DJANGO_E2E_ENABLED=true .venv/bin/python manage.py ensure_e2e_admin --email "$E2E_EMAIL" --password "$E2E_PASSWORD")'
           elif has_manage_py:
               commands['seed'] = '(cd service && .venv/bin/python manage.py migrate --noinput)'
