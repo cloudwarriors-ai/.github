@@ -195,24 +195,29 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
+          touch /tmp/claude-output.txt
           echo "Running Claude stack detection..."
-          timeout 120 claude --print --permission-mode bypassPermissions \
+          set +e
+          timeout 300 claude --print --permission-mode bypassPermissions \
             --model claude-sonnet-4-6 \
             "$(cat /tmp/detect-prompt.md)" > /tmp/claude-output.txt 2>&1
           EXIT=$?
+          set -e
+          echo "claude_exit=$EXIT" >> "$GITHUB_OUTPUT"
           echo "Claude exit code: $EXIT"
           if [ $EXIT -ne 0 ]; then
-            echo "::error::Claude detection failed"
-            cat /tmp/claude-output.txt
-            exit 1
+            echo "::warning::Claude detection failed or timed out; falling back to deterministic runtime generation"
+            cat /tmp/claude-output.txt || true
+          else
+            echo "Claude output ($(wc -l < /tmp/claude-output.txt) lines)"
           fi
-          echo "Claude output ($(wc -l < /tmp/claude-output.txt) lines)"
 
       - name: Extract and validate runtime.yml
         id: validate
         run: |
           python3 << 'PYEOF'
-          import sys, re, yaml, json
+          import re, yaml, json
+          from datetime import datetime, timezone
           from pathlib import Path
 
           def read_text(path):
@@ -220,6 +225,15 @@ jobs:
               if not p.exists():
                   return ''
               return p.read_text(errors='replace')
+
+          def read_json(path):
+              raw = read_text(path)
+              if not raw:
+                  return {}
+              try:
+                  return json.loads(raw)
+              except json.JSONDecodeError:
+                  return {}
 
           def normalize_shell(cmd):
               return cmd.replace('source ', '. ')
@@ -259,46 +273,9 @@ jobs:
                   })
               return services
 
-          # Extract YAML between markers
-          content = open('/tmp/claude-output.txt').read()
-          match = re.search(r'---START_YAML---\n(.*?)---END_YAML---', content, re.DOTALL)
-          if not match:
-              print('::error::Claude output did not contain ---START_YAML--- / ---END_YAML--- markers')
-              print('Output was:')
-              print(content[:2000])
-              sys.exit(1)
-
-          yaml_content = match.group(1)
-
-          # Parse check
-          try:
-              cfg = yaml.safe_load(yaml_content)
-          except yaml.YAMLError as e:
-              print(f'::error::Generated runtime.yml failed YAML parse: {e}')
-              print('Content was:')
-              print(yaml_content[:1000])
-              sys.exit(1)
-
-          # Required top-level keys
-          required = ['schema_version', 'stack', 'services', 'commands', 'env', 'secrets']
-          for k in required:
-              if k not in cfg:
-                  print(f'::error::Missing required key: {k}')
-                  sys.exit(1)
-
-          # Required commands keys
-          required_cmds = ['install', 'lint', 'test_unit', 'test_e2e', 'build', 'seed']
-          for k in required_cmds:
-              if k not in cfg.get('commands', {}):
-                  print(f'::error::Missing commands.{k}')
-                  sys.exit(1)
-
-          # Deterministic enrichment for common full-stack shadow repos.
-          defaults = cfg.setdefault('env', {}).setdefault('defaults', {})
-          ci_overrides = cfg.setdefault('env', {}).setdefault('ci_overrides', {})
-          commands = cfg.setdefault('commands', {})
-          validation = cfg.setdefault('validation', {})
-
+          package_json = read_json('package.json')
+          scripts = package_json.get('scripts', {})
+          dependency_names = set(package_json.get('dependencies', {}).keys()) | set(package_json.get('devDependencies', {}).keys())
           playwright_text = read_text('playwright.config.ts') or read_text('playwright.config.js')
           global_setup_text = read_text('e2e/global-setup.ts') or read_text('e2e/global-setup.js')
           has_package_lock = Path('package-lock.json').exists()
@@ -306,6 +283,114 @@ jobs:
           has_service_requirements = Path('service/requirements.txt').exists()
           has_extraction_requirements = Path('service/apps/extraction/requirements.txt').exists()
           has_ensure_e2e_admin = any(Path('service').glob('**/management/commands/ensure_e2e_admin.py')) if Path('service').exists() else False
+
+          def fallback_cfg(reason):
+              framework = 'unknown'
+              if 'next' in dependency_names:
+                  framework = 'nextjs'
+              elif has_manage_py:
+                  framework = 'django'
+
+              if Path('tsconfig.json').exists() or Path('playwright.config.ts').exists() or Path('vitest.config.ts').exists():
+                  language = 'typescript'
+              elif package_json:
+                  language = 'javascript'
+              elif has_manage_py:
+                  language = 'python'
+              else:
+                  language = 'unknown'
+
+              package_manager = 'npm' if (package_json or has_package_lock) else 'pip' if has_manage_py else 'unknown'
+
+              stack = {
+                  'framework': framework,
+                  'language': language,
+                  'package_manager': package_manager,
+              }
+              if package_json or has_package_lock:
+                  stack['node_version'] = package_json.get('engines', {}).get('node', '22')
+              if has_manage_py:
+                  stack['python_version'] = '3.11'
+
+              lint_cmd = 'npm run lint' if 'lint' in scripts else ''
+              if 'test:unit' in scripts:
+                  unit_cmd = 'npm run test:unit'
+              elif 'test:run' in scripts:
+                  unit_cmd = 'npm run test:run'
+              elif 'test' in scripts:
+                  unit_cmd = 'npm test'
+              elif has_manage_py:
+                  unit_cmd = 'pytest --tb=no -q'
+              else:
+                  unit_cmd = ''
+
+              if 'build' in scripts:
+                  build_cmd = 'npm run build'
+              else:
+                  build_cmd = ''
+
+              if 'test:e2e' in scripts:
+                  e2e_cmd = 'npm run test:e2e'
+              elif playwright_text:
+                  e2e_cmd = 'npx playwright test --project=smoke'
+              else:
+                  e2e_cmd = ''
+
+              print(f'::warning::{reason}; using deterministic runtime fallback')
+              return {
+                  'schema_version': '1',
+                  'generated_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+                  'stack': stack,
+                  'services': [],
+                  'commands': {
+                      'install': '',
+                      'lint': lint_cmd,
+                      'test_unit': unit_cmd,
+                      'test_e2e': e2e_cmd,
+                      'build': build_cmd,
+                      'seed': '',
+                  },
+                  'env': {
+                      'defaults': {},
+                      'ci_overrides': {},
+                  },
+                  'secrets': {
+                      'required': [],
+                      'optional': [],
+                  },
+              }
+
+          # Extract YAML between markers
+          content = read_text('/tmp/claude-output.txt')
+          required = ['schema_version', 'stack', 'services', 'commands', 'env', 'secrets']
+          required_cmds = ['install', 'lint', 'test_unit', 'test_e2e', 'build', 'seed']
+          cfg = None
+          match = re.search(r'---START_YAML---\n(.*?)---END_YAML---', content, re.DOTALL) if content else None
+          if match:
+              yaml_content = match.group(1)
+              try:
+                  candidate = yaml.safe_load(yaml_content) or {}
+                  missing_keys = [k for k in required if k not in candidate]
+                  missing_cmds = [k for k in required_cmds if k not in candidate.get('commands', {})]
+                  if missing_keys or missing_cmds:
+                      reason = 'Claude output missing required runtime schema keys'
+                      if missing_keys:
+                          reason += f" top-level={missing_keys}"
+                      if missing_cmds:
+                          reason += f" commands={missing_cmds}"
+                      cfg = fallback_cfg(reason)
+                  else:
+                      cfg = candidate
+              except yaml.YAMLError as e:
+                  cfg = fallback_cfg(f'Generated runtime.yml failed YAML parse: {e}')
+          else:
+              cfg = fallback_cfg('Claude output did not contain runtime YAML markers')
+
+          # Deterministic enrichment for common full-stack shadow repos.
+          defaults = cfg.setdefault('env', {}).setdefault('defaults', {})
+          ci_overrides = cfg.setdefault('env', {}).setdefault('ci_overrides', {})
+          commands = cfg.setdefault('commands', {})
+          validation = cfg.setdefault('validation', {})
 
           if has_manage_py and has_service_requirements:
               install_parts = ['npm ci' if has_package_lock else 'npm install']
