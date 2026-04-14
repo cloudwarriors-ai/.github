@@ -213,6 +213,51 @@ jobs:
         run: |
           python3 << 'PYEOF'
           import sys, re, yaml, json
+          from pathlib import Path
+
+          def read_text(path):
+              p = Path(path)
+              if not p.exists():
+                  return ''
+              return p.read_text(errors='replace')
+
+          def normalize_shell(cmd):
+              return cmd.replace('source ', '. ')
+
+          def detect_playwright_services(playwright_text):
+              services = []
+              pattern = re.compile(r'command:\s*"([^"]+)"\s*,\s*url:\s*([^,\n]+)', re.S)
+              for idx, (raw_command, raw_url) in enumerate(pattern.findall(playwright_text), start=1):
+                  command = normalize_shell(raw_command.strip())
+                  url_expr = raw_url.strip()
+                  if 'backendUrl' in url_expr:
+                      url = 'http://localhost:8000/api/v1/vendors/'
+                  elif 'frontendUrl' in url_expr:
+                      url = 'http://localhost:3000'
+                  else:
+                      url = url_expr.strip('`"\' ')
+
+                  if 'manage.py runserver' in command:
+                      name = 'django'
+                  elif 'uvicorn' in command:
+                      name = 'extraction'
+                  elif 'npm run dev' in command or 'next dev' in command:
+                      name = 'frontend'
+                  else:
+                      name = f'service-{idx}'
+
+                  services.append({
+                      'name': name,
+                      'start_command': command,
+                      'health_checks': [{
+                          'name': 'ready',
+                          'url': url,
+                          'expected_status': 200,
+                          'timeout_seconds': 60,
+                      }],
+                      'failure_mode': 'fatal',
+                  })
+              return services
 
           # Extract YAML between markers
           content = open('/tmp/claude-output.txt').read()
@@ -248,14 +293,67 @@ jobs:
                   print(f'::error::Missing commands.{k}')
                   sys.exit(1)
 
+          # Deterministic enrichment for common full-stack shadow repos.
+          defaults = cfg.setdefault('env', {}).setdefault('defaults', {})
+          ci_overrides = cfg.setdefault('env', {}).setdefault('ci_overrides', {})
+          commands = cfg.setdefault('commands', {})
+          validation = cfg.setdefault('validation', {})
+
+          playwright_text = read_text('playwright.config.ts') or read_text('playwright.config.js')
+          global_setup_text = read_text('e2e/global-setup.ts') or read_text('e2e/global-setup.js')
+          has_package_lock = Path('package-lock.json').exists()
+          has_manage_py = Path('service/manage.py').exists()
+          has_service_requirements = Path('service/requirements.txt').exists()
+          has_extraction_requirements = Path('service/apps/extraction/requirements.txt').exists()
+          has_ensure_e2e_admin = any(Path('service').glob('**/management/commands/ensure_e2e_admin.py')) if Path('service').exists() else False
+
+          if has_manage_py and has_service_requirements:
+              install_parts = ['npm ci' if has_package_lock else 'npm install']
+              install_parts.append('python -m venv service/.venv')
+              install_parts.append('service/.venv/bin/pip install -r service/requirements.txt')
+              if has_extraction_requirements:
+                  install_parts.append('service/.venv/bin/pip install -r service/apps/extraction/requirements.txt')
+              if 'playwright' in playwright_text.lower() or 'playwright' in commands.get('test_e2e', '').lower():
+                  install_parts.append('npx playwright install chromium --with-deps')
+              commands['install'] = ' && '.join(install_parts)
+
+          if has_manage_py:
+              defaults.setdefault('DJANGO_DEBUG', '1')
+              defaults.setdefault('DISABLE_THROTTLING', '1')
+              defaults.setdefault('API_BASE_URL', 'http://127.0.0.1:8000/api/v1')
+
+          if has_extraction_requirements:
+              defaults.setdefault('NEXT_PUBLIC_EXTRACTION_URL', 'http://localhost:9000')
+
+          detected_services = detect_playwright_services(playwright_text)
+          if detected_services:
+              cfg['services'] = detected_services
+              if any(s['name'] == 'frontend' for s in detected_services):
+                  defaults.setdefault('E2E_FRONTEND_URL', 'http://localhost:3000')
+              if any(s['name'] == 'django' for s in detected_services):
+                  defaults.setdefault('E2E_BACKEND_URL', 'http://localhost:8000')
+
+          if has_manage_py and has_ensure_e2e_admin:
+              defaults.setdefault('E2E_EMAIL', 'e2e-admin@cloudwarriors.com')
+              defaults.setdefault('E2E_PASSWORD', 'E2eAdmin123!')
+              commands['seed'] = '(cd service && DJANGO_E2E_ENABLED=true .venv/bin/python manage.py migrate --noinput && DJANGO_E2E_ENABLED=true .venv/bin/python manage.py ensure_e2e_admin --email "$E2E_EMAIL" --password "$E2E_PASSWORD")'
+          elif has_manage_py:
+              commands['seed'] = '(cd service && .venv/bin/python manage.py migrate --noinput)'
+
+          if commands.get('test_e2e') and (has_ensure_e2e_admin or 'ensure_e2e_admin' in global_setup_text):
+              validation['block_e2e'] = True
+
+          ci_overrides.setdefault('CI', 'true')
+
           # Write validated file
           with open('/tmp/runtime.yml', 'w') as f:
-              f.write(yaml_content)
+              f.write(yaml.safe_dump(cfg, sort_keys=False))
 
           print(f"Validation passed. Stack: {cfg['stack']}")
           print(f"Services: {[s['name'] for s in cfg.get('services', [])]}")
           cmds = cfg.get('commands', {})
-          print(f"Commands: unit={cmds.get('test_unit','')!r}, e2e={cmds.get('test_e2e','')!r}")
+          print(f"Commands: install={cmds.get('install','')!r}, unit={cmds.get('test_unit','')!r}, e2e={cmds.get('test_e2e','')!r}, seed={cmds.get('seed','')!r}")
+          print(f"Validation: block_e2e={cfg.get('validation', {}).get('block_e2e', False)!r}")
           PYEOF
 
       - name: Commit runtime.yml to shadow repo
