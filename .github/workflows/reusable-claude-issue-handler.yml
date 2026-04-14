@@ -297,10 +297,18 @@ jobs:
               labels: ['claude-working']
             });
 
+      - name: Resolve repository refs
+        id: repo_refs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const defaultBranch = context.payload.repository?.default_branch || 'main';
+            core.setOutput('default_branch', defaultBranch);
+
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.target_branch }}
+          ref: ${{ steps.repo_refs.outputs.default_branch }}
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -316,13 +324,68 @@ jobs:
         with:
           python-version: ${{ inputs.python_version }}
 
+      - name: Read Shadow Runtime Config
+        id: runtime_config
+        run: |
+          if [ -f .shadow/runtime.yml ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            python3 << 'PYEOF'
+          import yaml, os, json, sys
+
+          with open('.shadow/runtime.yml') as f:
+              cfg = yaml.safe_load(f)
+
+          commands = cfg.get('commands', {})
+          env_cfg = cfg.get('env', {})
+          services = cfg.get('services', [])
+          validation = cfg.get('validation', {})
+
+          out = os.environ['GITHUB_OUTPUT']
+          with open(out, 'a') as f:
+              f.write(f"install_cmd={commands.get('install', '')}\n")
+              f.write(f"lint_cmd={commands.get('lint', '')}\n")
+              f.write(f"test_unit_cmd={commands.get('test_unit', '')}\n")
+              f.write(f"test_e2e_cmd={commands.get('test_e2e', '')}\n")
+              f.write(f"build_cmd={commands.get('build', '')}\n")
+              f.write(f"seed_cmd={commands.get('seed', '')}\n")
+              f.write(f"block_e2e={'true' if validation.get('block_e2e') else 'false'}\n")
+              f.write(f"has_services={'true' if services else 'false'}\n")
+
+          with open('/tmp/shadow-env.sh', 'w') as f:
+              for k, v in env_cfg.get('defaults', {}).items():
+                  f.write(f'export {k}="{v}"\n')
+              for k, v in env_cfg.get('ci_overrides', {}).items():
+                  f.write(f'export {k}="{v}"\n')
+
+          with open('/tmp/shadow-services.json', 'w') as f:
+              json.dump(services, f)
+
+          print(f"Shadow runtime loaded: {len(services)} service(s), "
+                f"install={commands.get('install','')!r}, "
+                f"unit={commands.get('test_unit','')!r}, e2e={commands.get('test_e2e','')!r}, "
+                f"block_e2e={validation.get('block_e2e', False)!r}")
+          PYEOF
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "block_e2e=false" >> "$GITHUB_OUTPUT"
+            echo "has_services=false" >> "$GITHUB_OUTPUT"
+            touch /tmp/shadow-env.sh
+            echo "[]" > /tmp/shadow-services.json
+          fi
+
       - name: Install Dependencies
         env:
           INSTALL_CMD: ${{ inputs.install_command }}
+          RUNTIME_FOUND: ${{ steps.runtime_config.outputs.found }}
+          RUNTIME_INSTALL_CMD: ${{ steps.runtime_config.outputs.install_cmd }}
           SETUP_CMD: ${{ inputs.setup_command }}
         run: |
+          # Runtime config takes precedence so shadow repos can stay in parity
+          # with the mirrored application without caller-specific overrides.
+          if [ "$RUNTIME_FOUND" = "true" ] && [ -n "$RUNTIME_INSTALL_CMD" ]; then
+            eval "$RUNTIME_INSTALL_CMD"
           # Use custom install command if provided
-          if [ -n "$INSTALL_CMD" ]; then
+          elif [ -n "$INSTALL_CMD" ]; then
             eval "$INSTALL_CMD"
           # Auto-detect based on project files
           elif [ -f package-lock.json ]; then
@@ -340,49 +403,6 @@ jobs:
           # Run custom setup command if provided
           if [ -n "$SETUP_CMD" ]; then
             eval "$SETUP_CMD"
-          fi
-
-      - name: Read Shadow Runtime Config
-        id: runtime_config
-        run: |
-          if [ -f .shadow/runtime.yml ]; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-            python3 << 'PYEOF'
-          import yaml, os, json, sys
-
-          with open('.shadow/runtime.yml') as f:
-              cfg = yaml.safe_load(f)
-
-          commands = cfg.get('commands', {})
-          env_cfg = cfg.get('env', {})
-          services = cfg.get('services', [])
-
-          out = os.environ['GITHUB_OUTPUT']
-          with open(out, 'a') as f:
-              f.write(f"lint_cmd={commands.get('lint', '')}\n")
-              f.write(f"test_unit_cmd={commands.get('test_unit', '')}\n")
-              f.write(f"test_e2e_cmd={commands.get('test_e2e', '')}\n")
-              f.write(f"build_cmd={commands.get('build', '')}\n")
-              f.write(f"seed_cmd={commands.get('seed', '')}\n")
-              f.write(f"has_services={'true' if services else 'false'}\n")
-
-          with open('/tmp/shadow-env.sh', 'w') as f:
-              for k, v in env_cfg.get('defaults', {}).items():
-                  f.write(f'export {k}="{v}"\n')
-              for k, v in env_cfg.get('ci_overrides', {}).items():
-                  f.write(f'export {k}="{v}"\n')
-
-          with open('/tmp/shadow-services.json', 'w') as f:
-              json.dump(services, f)
-
-          print(f"Shadow runtime loaded: {len(services)} service(s), "
-                f"unit={commands.get('test_unit','')!r}, e2e={commands.get('test_e2e','')!r}")
-          PYEOF
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "has_services=false" >> "$GITHUB_OUTPUT"
-            touch /tmp/shadow-env.sh
-            echo "[]" > /tmp/shadow-services.json
           fi
 
       - name: Start Shadow Services
@@ -634,15 +654,26 @@ jobs:
             console.log(`Found ${criteria.length} acceptance criteria`);
 
       - name: Ensure target branch exists
+        id: target_branch
         run: |
           TARGET="${{ steps.options.outputs.target }}"
+          INPUT_TARGET="${{ inputs.target_branch }}"
+          DEFAULT_BRANCH="${{ steps.repo_refs.outputs.default_branch }}"
           git fetch origin
 
-          if ! git ls-remote --heads origin "$TARGET" | grep -q "$TARGET"; then
-            echo "Creating target branch: $TARGET"
-            git checkout -b "$TARGET" origin/${{ inputs.target_branch }}
+          if git ls-remote --heads origin "$TARGET" | grep -q "$TARGET"; then
+            EFFECTIVE_TARGET="$TARGET"
+          elif [ "$TARGET" = "$INPUT_TARGET" ]; then
+            echo "::warning::Target branch $TARGET does not exist; falling back to default branch $DEFAULT_BRANCH"
+            EFFECTIVE_TARGET="$DEFAULT_BRANCH"
+          else
+            echo "Creating target branch: $TARGET from $DEFAULT_BRANCH"
+            git checkout -B "$TARGET" "origin/$DEFAULT_BRANCH"
             git push -u origin "$TARGET"
+            EFFECTIVE_TARGET="$TARGET"
           fi
+
+          echo "effective_target=$EFFECTIVE_TARGET" >> "$GITHUB_OUTPUT"
 
 
       - name: Capture quality baseline
@@ -727,7 +758,7 @@ jobs:
         if: steps.quality.outputs.sufficient == 'true' || steps.options.outputs.skip_quality_gate == 'true'
         run: |
           BRANCH_NAME="fix/issue-${{ steps.issue.outputs.number }}"
-          TARGET="${{ steps.options.outputs.target }}"
+          TARGET="${{ steps.target_branch.outputs.effective_target }}"
 
           # Stash any workspace changes (e.g. CI CLAUDE.md) before switching branches
           git stash --include-untracked 2>/dev/null || true
@@ -841,7 +872,7 @@ jobs:
           ISSUE_NUM: ${{ steps.issue.outputs.number }}
           ISSUE_TITLE: ${{ steps.issue.outputs.title }}
           ISSUE_BODY: ${{ steps.issue.outputs.body }}
-          TARGET_BRANCH: ${{ steps.options.outputs.target }}
+          TARGET_BRANCH: ${{ steps.target_branch.outputs.effective_target }}
           HINT: ${{ steps.options.outputs.hint }}
           LINT_CMD: ${{ inputs.lint_command }}
           TEST_CMD: ${{ inputs.test_command }}
@@ -946,8 +977,8 @@ jobs:
           fi
 
           # Check for unpushed commits
-          git fetch origin "${{ steps.options.outputs.target }}" 2>/dev/null || true
-          AHEAD=$(git rev-list "origin/${{ steps.options.outputs.target }}..HEAD" --count 2>/dev/null || echo "0")
+          git fetch origin "${{ steps.target_branch.outputs.effective_target }}" 2>/dev/null || true
+          AHEAD=$(git rev-list "origin/${{ steps.target_branch.outputs.effective_target }}..HEAD" --count 2>/dev/null || echo "0")
           if [ "$AHEAD" -gt 0 ]; then
             HAS_CHANGES=true
           fi
@@ -1029,7 +1060,7 @@ jobs:
           cd - > /dev/null
 
           set +e
-          "$GITLEAKS_DIR/gitleaks" detect --source . --log-opts "origin/${{ steps.options.outputs.target }}..HEAD" --report-format json --report-path /tmp/secrets.json 2>&1
+          "$GITLEAKS_DIR/gitleaks" detect --source . --log-opts "origin/${{ steps.target_branch.outputs.effective_target }}..HEAD" --report-format json --report-path /tmp/secrets.json 2>&1
           EXIT_CODE=$?
           set -e
 
@@ -1058,6 +1089,7 @@ jobs:
           INPUT_BUILD_CMD: ${{ inputs.build_command }}
           INPUT_E2E_CMD: ${{ inputs.e2e_command }}
           BLOCK_E2E: ${{ inputs.block_e2e }}
+          RUNTIME_BLOCK_E2E: ${{ steps.runtime_config.outputs.block_e2e }}
           BASELINE_LINT_EXIT: ${{ steps.baseline.outputs.baseline_lint_exit }}
           BASELINE_LINT_ERRORS: ${{ steps.baseline.outputs.baseline_lint_errors }}
           BASELINE_FAIL_COUNT: ${{ steps.baseline.outputs.baseline_fail_count }}
@@ -1091,6 +1123,11 @@ jobs:
           LINT_CMD=$(resolve_cmd "$INPUT_LINT_CMD" "$RUNTIME_LINT_CMD" "npm run lint")
           TEST_CMD=$(resolve_cmd "$INPUT_TEST_CMD" "$RUNTIME_TEST_UNIT_CMD" "npm run test:unit")
           BUILD_CMD=$(resolve_cmd "$INPUT_BUILD_CMD" "$RUNTIME_BUILD_CMD" "npm run build")
+          EFFECTIVE_BLOCK_E2E="$BLOCK_E2E"
+          if [ "$RUNTIME_BLOCK_E2E" = "true" ]; then
+            EFFECTIVE_BLOCK_E2E="true"
+          fi
+          echo "block_e2e_effective=$EFFECTIVE_BLOCK_E2E" >> "$GITHUB_OUTPUT"
 
           lint_error_count() {
             python3 - "$1" <<'PY'
@@ -1206,7 +1243,7 @@ jobs:
 
           E2E_EXIT=0
           if [ -n "$E2E_CMD" ] && [ "$E2E_CMD" != "skip" ]; then
-            if [ "$BLOCK_E2E" = "true" ]; then
+            if [ "$EFFECTIVE_BLOCK_E2E" = "true" ]; then
               echo "Running e2e (blocking): $E2E_CMD"
             else
               echo "Running e2e (advisory): $E2E_CMD"
@@ -1217,7 +1254,7 @@ jobs:
             set -e
             echo "e2e_status=$([ $E2E_EXIT -eq 0 ] && echo 'passed' || echo 'failed')" >> "$GITHUB_OUTPUT"
             if [ $E2E_EXIT -ne 0 ]; then
-              if [ "$BLOCK_E2E" = "true" ]; then
+              if [ "$EFFECTIVE_BLOCK_E2E" = "true" ]; then
                 echo "::error::E2e tests failed (blocking)"
               else
                 echo "::warning::E2e tests failed (advisory — not blocking)"
@@ -1231,7 +1268,7 @@ jobs:
           # and optional blocking e2e passes when enabled.
           if [ "$(cat $GITHUB_OUTPUT | grep lint_status | cut -d= -f2)" != "failed" ] && [ $BUILD_EXIT -eq 0 ] && \
              [ "$(cat $GITHUB_OUTPUT | grep test_status | cut -d= -f2)" != "failed" ] && \
-             { [ "$BLOCK_E2E" != "true" ] || [ "$E2E_EXIT" -eq 0 ]; }; then
+             { [ "$EFFECTIVE_BLOCK_E2E" != "true" ] || [ "$E2E_EXIT" -eq 0 ]; }; then
             echo "passed=true" >> "$GITHUB_OUTPUT"
           else
             echo "passed=false" >> "$GITHUB_OUTPUT"
@@ -1320,7 +1357,7 @@ jobs:
 
           # Restore CI-injected CLAUDE.md to its original state so we don't commit it
           # Compare against the target branch, not current HEAD (which may already have CI rules)
-          TARGET="${{ inputs.target_branch }}"
+          TARGET="${{ steps.target_branch.outputs.effective_target }}"
           if git show "origin/${TARGET}:CLAUDE.md" > /tmp/orig-claude.md 2>/dev/null; then
             cp /tmp/orig-claude.md CLAUDE.md
           elif git ls-files --error-unmatch CLAUDE.md 2>/dev/null; then
@@ -1366,7 +1403,7 @@ jobs:
             | Duration | ${summary.duration} |`;
             } catch (e) {}
 
-            const targetBranch = '${{ steps.options.outputs.target }}';
+            const targetBranch = '${{ steps.target_branch.outputs.effective_target }}';
 
             const lintStatus = '${{ steps.gates.outputs.lint_status }}';
             const testRegression = '${{ steps.gates.outputs.test_regression }}';
@@ -1374,7 +1411,7 @@ jobs:
             const newFailures = '${{ steps.gates.outputs.test_new_failures }}' || '0';
             const testsModified = '${{ steps.test_changes.outputs.tests_modified }}' === 'true';
             const e2eStatus = '${{ steps.gates.outputs.e2e_status }}';
-            const blockE2E = '${{ inputs.block_e2e }}' === 'true';
+            const blockE2E = '${{ steps.gates.outputs.block_e2e_effective }}' === 'true';
             const tddValid = '${{ steps.tdd.outputs.tdd_valid }}';
 
             const lintGateIcon = lintStatus === 'passed' ? '✅' : lintStatus === 'pre-existing' ? '⚠️' : '❌';
@@ -1445,7 +1482,7 @@ jobs:
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_BASE_URL: https://openrouter.ai/api
           TDD_VALID: ${{ steps.tdd.outputs.tdd_valid }}
-          TARGET_BRANCH: ${{ steps.options.outputs.target }}
+          TARGET_BRANCH: ${{ steps.target_branch.outputs.effective_target }}
         run: |
           git fetch origin "$TARGET_BRANCH" 2>/dev/null || true
           DIFF=$(git diff "origin/$TARGET_BRANCH"..HEAD -- . ':(exclude).github/' ':(exclude)*.lock' 2>/dev/null | head -c 8000)
@@ -1575,7 +1612,7 @@ jobs:
             let diffSummary = '';
             try {
               const { execSync } = require('child_process');
-              const target = '${{ inputs.target_branch }}';
+              const target = '${{ steps.target_branch.outputs.effective_target }}';
               const files = execSync(
                 `git diff --name-only origin/${target}..HEAD -- . ':(exclude).github/' ':(exclude)*.lock' 2>/dev/null || true`,
                 { encoding: 'utf8', cwd: process.env.GITHUB_WORKSPACE }
@@ -1610,7 +1647,7 @@ jobs:
             const body = [
               `## ✅ Fixed by Claude Code`,
               ``,
-              `**PR:** [#${prNumber}](${prUrl}) — merged into \`${{ inputs.target_branch }}\``,
+              `**PR:** [#${prNumber}](${prUrl}) — merged into \`${{ steps.target_branch.outputs.effective_target }}\``,
               ``,
               `### What Was Fixed`,
               `This issue was diagnosed and fixed automatically. The fix implements the correct behavior as described in the issue.`,
