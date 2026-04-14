@@ -80,9 +80,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Check if this comment triggers Claude
+  # Check if this event triggers Claude
   check-trigger:
-    if: contains(github.event.comment.body, '@claude')
+    if: >
+      (github.event_name == 'issue_comment' &&
+       contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'issues' &&
+       github.event.action == 'labeled' &&
+       github.event.label.name == 'AUTOFIX: Ready')
     runs-on: ubuntu-latest
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
@@ -113,7 +118,11 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const comment = context.payload.comment.body || '';
+            const comment = context.payload.comment?.body || '';
+            const isLabelTrigger =
+              context.eventName === 'issues' &&
+              context.payload.action === 'labeled' &&
+              context.payload.label?.name === 'AUTOFIX: Ready';
 
             const extractOption = (text, pattern) => {
               const match = text.match(pattern);
@@ -128,7 +137,8 @@ jobs:
               hint: extractOption(comment, /\[hint:([^\]]+)\]/i) || '',
               dryRun: /\[dry-run\]/i.test(comment),
               verbose: /\[verbose\]/i.test(comment),
-              skipQualityGate: /\[skip-quality-gate\]/i.test(comment)
+              skipQualityGate: /\[skip-quality-gate\]/i.test(comment),
+              triggerSource: isLabelTrigger ? 'label' : 'comment'
             };
 
             console.log('Parsed options:', JSON.stringify(options, null, 2));
@@ -595,7 +605,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                body: `## More information needed\n\nI need more detail before I can work on this reliably.\n\n**Missing:**\n${missing.join('\n')}\n\nOnce you add these, comment \`@claude\` again and I'll get started.`
+                body: `## More information needed\n\nI need more detail before I can work on this reliably.\n\n**Missing:**\n${missing.join('\n')}\n\nOnce you add these, re-apply \`AUTOFIX: Ready\` or comment \`@claude\` again and I'll get started.`
               });
               core.setOutput('sufficient', 'false');
             } else {
@@ -1716,7 +1726,7 @@ jobs:
 
             ### What you can do
             1. Check the [workflow run](${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID})
-            2. Add more context: \`@claude [hint: focus on X]\`
+            2. Add more context, then re-apply \`AUTOFIX: Ready\` or comment \`@claude [hint: focus on X]\`
             3. Fix manually and close the issue
 
             _Failed: ${new Date().toISOString()}_`;

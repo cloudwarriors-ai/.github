@@ -1,14 +1,17 @@
 name: Shadow Pipeline
 
 # Installed in cloudwarriors-ai shadow repos.
-# Provides: @claude fix loop, scheduled issue sync (every 6h), upstream PR after merge.
+# Provides: AUTOFIX label + @claude fix loop, hourly parity sync, upstream PR after merge.
 
 on:
+  issues:
+    types: [labeled]
+
   issue_comment:
     types: [created]
 
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '15 * * * *'
 
   pull_request:
     types: [closed]
@@ -16,18 +19,21 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'Action to run: sync-issues | (leave blank for full sync)'
+        description: 'Action to run: full-sync | sync-code | sync-issues'
         type: string
-        default: 'sync-issues'
+        default: 'full-sync'
 
 jobs:
 
-  # @claude on shadow issues → fix loop with runtime.yml service startup
+  # AUTOFIX: Ready or @claude on shadow issues -> fix loop with runtime.yml service startup.
   handle-issue:
     if: >
-      github.event_name == 'issue_comment' &&
-      !github.event.issue.pull_request &&
-      contains(github.event.comment.body, '@claude')
+      (github.event_name == 'issue_comment' &&
+       !github.event.issue.pull_request &&
+       contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'issues' &&
+       github.event.action == 'labeled' &&
+       github.event.label.name == 'AUTOFIX: Ready')
     uses: cloudwarriors-ai/.github/.github/workflows/reusable-claude-issue-handler.yml@main
     with:
       target_branch: ${{ github.event.repository.default_branch }}
@@ -38,17 +44,33 @@ jobs:
       build_command: 'skip'
     secrets: inherit
 
-  # Scheduled issue sync from source repo + manual dispatch
+  # Keep mirrored application code in parity with the source repo.
+  sync-code:
+    if: >
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.event.inputs.action == '' ||
+        github.event.inputs.action == 'full-sync' ||
+        github.event.inputs.action == 'sync-code'))
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-shadow-code-sync.yml@main
+    with:
+      shadow_repo: ${{ github.repository }}
+    secrets: inherit
+
+  # Scheduled issue sync from source repo + manual dispatch.
   sync-issues:
     if: >
       github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch'
+      (github.event_name == 'workflow_dispatch' &&
+       (github.event.inputs.action == '' ||
+        github.event.inputs.action == 'full-sync' ||
+        github.event.inputs.action == 'sync-issues'))
     uses: cloudwarriors-ai/.github/.github/workflows/reusable-shadow-sync.yml@main
     with:
       shadow_repo: ${{ github.repository }}
     secrets: inherit
 
-  # Open upstream PR when fix/issue-N merges into main
+  # Open upstream PR when fix/issue-N merges into the shadow default branch.
   upstream-pr:
     if: >
       github.event_name == 'pull_request' &&

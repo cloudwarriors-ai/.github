@@ -76,32 +76,57 @@ jobs:
             core.exportVariable('SOURCE_OWNER', sourceOwner);
             core.exportVariable('SOURCE_REPO', sourceRepoName);
             core.exportVariable('SHADOW_BRANCH', shadowBranch);
+            core.exportVariable('SHADOW_BASE_BRANCH', shadowPr.base.ref || 'main');
             core.exportVariable('UPSTREAM_BRANCH', `shadow-fix-${sourceIssueNumber}`);
             core.exportVariable('DEFAULT_BRANCH', defaultBranch);
             core.exportVariable('SHADOW_PR_TITLE', shadowPr.title);
             core.exportVariable('SOURCE_ISSUE_NUMBER', String(sourceIssueNumber));
 
-      - name: Push fix branch to source repo
+      - name: Export fix branch to source repo
+        id: export
         env:
           WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
         run: |
+          set -euo pipefail
           git config --global user.name "Claude Code Bot"
           git config --global user.email "claude-bot@anthropic.com"
 
-          # Clone shadow repo and get the fix branch
+          git clone --no-tags --branch "$DEFAULT_BRANCH" \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/${SOURCE_OWNER}/${SOURCE_REPO}.git" source
           git clone --no-tags \
             "https://x-access-token:${WORKFLOW_PAT}@github.com/${{ inputs.shadow_repo }}.git" shadow
-          cd shadow
-          git checkout "$SHADOW_BRANCH"
 
-          # Push to source repo under a new branch name
-          git remote add upstream \
-            "https://x-access-token:${WORKFLOW_PAT}@github.com/${SOURCE_OWNER}/${SOURCE_REPO}.git"
-          git push upstream "HEAD:${UPSTREAM_BRANCH}" || true
+          git -C shadow fetch origin "$SHADOW_BASE_BRANCH"
+          git -C shadow fetch origin "pull/${{ inputs.shadow_pr_number }}/head:shadow-pr-head"
+          git -C source checkout -b "$UPSTREAM_BRANCH" "origin/$DEFAULT_BRANCH"
 
-          echo "Pushed ${SHADOW_BRANCH} -> ${SOURCE_OWNER}/${SOURCE_REPO}:${UPSTREAM_BRANCH}"
+          git -C shadow diff --binary "origin/$SHADOW_BASE_BRANCH...shadow-pr-head" \
+            -- . \
+            ':(exclude).shadow' \
+            ':(exclude).github/workflows/claude-ci.yml' > /tmp/shadow-fix.patch
+
+          if [ ! -s /tmp/shadow-fix.patch ]; then
+            echo "::warning::No source-app changes to export after excluding shadow control files"
+            echo "exported=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git -C source apply --index --3way /tmp/shadow-fix.patch
+
+          if [ -z "$(git -C source status --porcelain)" ]; then
+            echo "::warning::Patch exported no source changes after apply"
+            echo "exported=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git -C source commit -m "fix: automated fix for issue #${SOURCE_ISSUE_NUMBER}"
+          git -C source push origin "HEAD:${UPSTREAM_BRANCH}" --force-with-lease
+
+          echo "exported=true" >> "$GITHUB_OUTPUT"
+          echo "Exported ${SHADOW_BRANCH} -> ${SOURCE_OWNER}/${SOURCE_REPO}:${UPSTREAM_BRANCH}"
 
       - name: Create PR on source repo
+        if: steps.export.outputs.exported == 'true'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}

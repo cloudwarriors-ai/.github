@@ -76,7 +76,7 @@ jobs:
               }
             };
             await ensureLabel('shadow', '0075ca', 'Issue mirrored from an external source repo');
-            await ensureLabel('AUTOFIX: Ready', '2da44e', 'Ready for automated fix');
+            await ensureLabel('AUTOFIX: Ready', '2da44e', 'Opt-in automated fix trigger for shadow issues');
 
             // ── 3. Fetch all issues from source (paginated) ──────────────────
             let page = 1, allIssues = [];
@@ -97,6 +97,7 @@ jobs:
             console.log(`Fetched ${allIssues.length} issues from ${sourceRepo}`);
 
             // ── 4. Upsert each issue in shadow ───────────────────────────────
+            const preservedShadowLabels = new Set(['claude-working']);
             let created = 0, updated = 0;
             for (let i = 0; i < allIssues.length; i++) {
               const src = allIssues[i];
@@ -105,9 +106,10 @@ jobs:
               const title = src.title;
               const state = src.state;
 
-              // Mirror source labels + add shadow labels
+              // Mirror source labels, always add the shadow marker, and preserve
+              // only transient system labels that should survive a sync in flight.
               const sourceLabels = src.labels.map(l => l.name);
-              const labels = [...new Set([...sourceLabels, 'shadow', 'AUTOFIX: Ready'])];
+              let labels = [...new Set([...sourceLabels, 'shadow'])];
 
               // Ensure all source labels exist in shadow
               for (const lbl of sourceLabels) {
@@ -117,6 +119,17 @@ jobs:
               const shadowNumber = issueMap[String(src.number)];
 
               if (shadowNumber) {
+                const { data: shadowIssue } = await github.rest.issues.get({
+                  owner: shadowOwner,
+                  repo: shadowRepoName,
+                  issue_number: shadowNumber,
+                });
+                const currentShadowLabels = shadowIssue.labels.map(l => typeof l === 'string' ? l : l.name);
+                labels = [...new Set([
+                  ...labels,
+                  ...currentShadowLabels.filter(name => preservedShadowLabels.has(name)),
+                ])];
+
                 // Update existing shadow issue
                 await github.rest.issues.update({
                   owner: shadowOwner,
