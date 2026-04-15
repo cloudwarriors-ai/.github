@@ -196,10 +196,12 @@ jobs:
 
       - name: Install Claude Code CLI
         if: steps.staleness.outputs.mode != 'none'
+        continue-on-error: true
         run: npm install -g @anthropic-ai/claude-code
 
       - name: Setup RLM cache worktree
         if: steps.staleness.outputs.mode != 'none'
+        continue-on-error: true
         run: |
           if git ls-remote --heads origin rlm-cache | grep -q rlm-cache; then
             git fetch origin rlm-cache
@@ -215,12 +217,35 @@ jobs:
           ANTHROPIC_API_KEY: ""
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_BASE_URL: https://openrouter.ai/api
+        continue-on-error: true
         run: |
-          claude --print --permission-mode bypassPermissions \
+          mkdir -p /tmp/rlm-cache
+
+          if ! command -v claude >/dev/null 2>&1; then
+            echo "::warning::Claude CLI unavailable; skipping RLM full scan"
+            echo '{}' > /tmp/rlm-cache/rlm_scan_general.json
+            cat > /tmp/rlm-cache/rlm_summary.md <<'EOF'
+          RLM summary unavailable because Claude CLI was not installed during preflight.
+          EOF
+            exit 0
+          fi
+
+          set +e
+          timeout 8m claude --print --permission-mode bypassPermissions \
             "Perform a general RLM scan of this codebase. Write two files:
           1. /tmp/rlm-cache/rlm_scan_general.json with keys: project_summary, key_findings, modules (array of {path, description, key_files, responsibilities}), file_hashes (filepath -> hash for every source file)
           2. /tmp/rlm-cache/rlm_summary.md — codebase map (max 2000 words): architecture overview, module table (Path | Responsibility | Key Files), entry points, where common bug types live, important patterns.
           Use rg --files to discover sources. Include all non-vendor source files in file_hashes."
+          EXIT=$?
+          set -e
+
+          if [ $EXIT -ne 0 ]; then
+            echo "::warning::RLM full scan failed or timed out (exit=$EXIT); continuing without blocking the issue handler"
+            echo '{}' > /tmp/rlm-cache/rlm_scan_general.json
+            cat > /tmp/rlm-cache/rlm_summary.md <<'EOF'
+          RLM summary unavailable because the initial full scan failed or timed out.
+          EOF
+          fi
 
       - name: Run targeted RLM patch
         if: steps.staleness.outputs.mode == 'targeted'
@@ -229,21 +254,39 @@ jobs:
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.OPENROUTER_API_KEY }}
           ANTHROPIC_BASE_URL: https://openrouter.ai/api
           CHANGED_FILES: ${{ steps.staleness.outputs.changed }}
+        continue-on-error: true
         run: |
+          mkdir -p /tmp/rlm-cache
           cp /tmp/rlm-cache/rlm_scan_general.json /tmp/rlm_scan_patch.json 2>/dev/null || echo '{}' > /tmp/rlm_scan_patch.json
           cp /tmp/rlm-cache/rlm_summary.md /tmp/rlm_summary_patch.md 2>/dev/null || echo '' > /tmp/rlm_summary_patch.md
-          claude --print --permission-mode bypassPermissions \
+
+          if ! command -v claude >/dev/null 2>&1; then
+            echo "::warning::Claude CLI unavailable; skipping targeted RLM patch"
+            exit 0
+          fi
+
+          set +e
+          timeout 6m claude --print --permission-mode bypassPermissions \
             "These source files changed since the last RLM scan: $CHANGED_FILES
           1. Read each changed file
           2. Update the affected module entries in /tmp/rlm_scan_patch.json — preserve all other entries exactly
           3. Update file_hashes for only the changed files
           4. Patch the affected sections in /tmp/rlm_summary_patch.md — preserve unchanged sections
           Write updated content back to the same /tmp paths."
+          EXIT=$?
+          set -e
+
+          if [ $EXIT -ne 0 ]; then
+            echo "::warning::RLM targeted patch failed or timed out (exit=$EXIT); keeping the previous cache contents"
+            exit 0
+          fi
+
           cp /tmp/rlm_scan_patch.json /tmp/rlm-cache/rlm_scan_general.json
           cp /tmp/rlm_summary_patch.md /tmp/rlm-cache/rlm_summary.md
 
       - name: Commit updated cache to rlm-cache branch
         if: steps.staleness.outputs.mode != 'none'
+        continue-on-error: true
         run: |
           CURRENT_SHA=$(git rev-parse HEAD)
           python3 -c "import json,datetime; open('/tmp/rlm-cache/meta.json','w').write(json.dumps({'last_scan_sha':'$CURRENT_SHA','scan_timestamp':datetime.datetime.utcnow().isoformat()+'Z','scan_mode':'${{ steps.staleness.outputs.mode }}'},indent=2))"
@@ -256,6 +299,7 @@ jobs:
 
       - name: Export RLM summary as artifact
         id: export
+        continue-on-error: true
         run: |
           SRC=""
           if [ -f /tmp/rlm-cache/rlm_summary.md ]; then
@@ -272,6 +316,7 @@ jobs:
 
       - name: Upload RLM summary artifact
         if: steps.export.outputs.available == 'true'
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: rlm-summary-${{ github.run_id }}
