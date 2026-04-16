@@ -252,6 +252,18 @@ This repository also provides the original Claude CI workflows:
 | `reusable-secret-scan.yml` | Secret scanning | Called by other workflows | Active |
 | `reusable-claude-runner.yml` | Generic Claude wrapper | Called by other workflows | Active |
 
+### Shadow Pipeline Contract
+
+Shadow repos use a different operator contract than the legacy single-repo Claude CI flow:
+
+- `@claude [hint: ...]` on the **shadow issue** is the default human kickoff path.
+- `AUTOFIX: Ready` on the **shadow issue** is the explicit automation and queue trigger.
+- New source issues sync into shadow with `shadow` plus mirrored source labels; they do **not** auto-run unless `AUTOFIX: Ready` is present or an operator comments `@claude`.
+- Shadow issue numbers are mapped to source issue numbers through `.shadow/config.json`; they are not expected to match numerically.
+- Nothing is pushed to the source repo until a shadow fix PR merges.
+- When a merged shadow fix opens an upstream PR on the source repo, the workflow also upserts a source-issue comment linking the shadow issue, shadow PR, and upstream PR.
+- If `OPENROUTER_API_KEY` is available, the upstream source PR also gets an advisory Claude review comment. That review is non-blocking and does not auto-merge or mutate the source PR.
+
 ### Quick Start (Legacy)
 
 Add this workflow file to your repo at `.github/workflows/claude-ci.yml`:

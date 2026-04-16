@@ -18,15 +18,42 @@ on:
         description: 'Branch that was merged (e.g. fix/issue-7)'
         type: string
         required: true
+      source_issue_notification_mode:
+        description: 'How to notify the source issue (comment or none)'
+        type: string
+        default: 'comment'
+      source_pr_review_mode:
+        description: 'How to review the upstream source PR (advisory or none)'
+        type: string
+        default: 'advisory'
+    secrets:
+      WORKFLOW_PAT:
+        required: false
+      OPENROUTER_API_KEY:
+        required: false
 
 jobs:
   upstream-pr:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      issues: write
+      pull-requests: write
+    outputs:
+      source_repo: ${{ steps.prepare.outputs.source_repo }}
+      default_branch: ${{ steps.prepare.outputs.default_branch }}
+      source_pr_number: ${{ steps.create_pr.outputs.pr_number }}
+      review_enabled: ${{ steps.review_mode.outputs.enabled }}
+      runtime_install_command: ${{ steps.export.outputs.runtime_install_command }}
+      runtime_node_version: ${{ steps.export.outputs.runtime_node_version }}
+      runtime_python_version: ${{ steps.export.outputs.runtime_python_version }}
+      runtime_lint_command: ${{ steps.export.outputs.runtime_lint_command }}
+      runtime_test_command: ${{ steps.export.outputs.runtime_test_command }}
+      runtime_build_command: ${{ steps.export.outputs.runtime_build_command }}
 
     steps:
-      - name: Open upstream PR
+      - name: Prepare upstream mapping
+        id: prepare
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
@@ -35,7 +62,6 @@ jobs:
             const shadowPrNumber = ${{ inputs.shadow_pr_number }};
             const shadowBranch = '${{ inputs.shadow_branch }}';
 
-            // Extract shadow issue number from branch name (fix/issue-N)
             const branchMatch = shadowBranch.match(/fix\/issue-(\d+)/);
             if (!branchMatch) {
               core.warning(`Branch ${shadowBranch} does not match fix/issue-N pattern; skipping upstream PR`);
@@ -43,49 +69,54 @@ jobs:
             }
             const shadowIssueNumber = parseInt(branchMatch[1], 10);
 
-            // ── 1. Read .shadow/config.json ──────────────────────────────────
             const { data: configFile } = await github.rest.repos.getContent({
               owner: shadowOwner,
               repo: shadowRepoName,
               path: '.shadow/config.json',
             });
             const config = JSON.parse(Buffer.from(configFile.content, 'base64').toString());
-            const [sourceOwner, sourceRepoName] = config.sourceRepo.split('/');
+            const sourceRepo = config.sourceRepo;
+            const [sourceOwner, sourceRepoName] = sourceRepo.split('/');
 
-            // Reverse-lookup: shadow issue number → source issue number
             const reverseMap = Object.fromEntries(
               Object.entries(config.issueMap || {}).map(([src, shad]) => [String(shad), Number(src)])
             );
             const sourceIssueNumber = reverseMap[String(shadowIssueNumber)] || shadowIssueNumber;
 
-            // ── 2. Get merged shadow PR details ──────────────────────────────
             const { data: shadowPr } = await github.rest.pulls.get({
               owner: shadowOwner,
               repo: shadowRepoName,
               pull_number: shadowPrNumber,
             });
 
-            // ── 3. Get source repo default branch ────────────────────────────
             const { data: sourceRepoData } = await github.rest.repos.get({
               owner: sourceOwner,
               repo: sourceRepoName,
             });
             const defaultBranch = sourceRepoData.default_branch;
 
-            // Store values for the shell step
-            core.exportVariable('SOURCE_OWNER', sourceOwner);
-            core.exportVariable('SOURCE_REPO', sourceRepoName);
-            core.exportVariable('SHADOW_BRANCH', shadowBranch);
-            core.exportVariable('SHADOW_BASE_BRANCH', shadowPr.base.ref || 'main');
-            core.exportVariable('UPSTREAM_BRANCH', `shadow-fix-${sourceIssueNumber}`);
-            core.exportVariable('DEFAULT_BRANCH', defaultBranch);
-            core.exportVariable('SHADOW_PR_TITLE', shadowPr.title);
-            core.exportVariable('SOURCE_ISSUE_NUMBER', String(sourceIssueNumber));
+            core.setOutput('source_repo', sourceRepo);
+            core.setOutput('source_owner', sourceOwner);
+            core.setOutput('source_repo_name', sourceRepoName);
+            core.setOutput('source_issue_number', String(sourceIssueNumber));
+            core.setOutput('shadow_issue_number', String(shadowIssueNumber));
+            core.setOutput('shadow_issue_url', `https://github.com/${shadowOwner}/${shadowRepoName}/issues/${shadowIssueNumber}`);
+            core.setOutput('shadow_pr_url', shadowPr.html_url);
+            core.setOutput('shadow_base_branch', shadowPr.base.ref || 'main');
+            core.setOutput('upstream_branch', `shadow-fix-${sourceIssueNumber}`);
+            core.setOutput('default_branch', defaultBranch);
 
       - name: Export fix branch to source repo
         id: export
+        if: steps.prepare.outputs.source_repo != ''
         env:
-          WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
+          WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT || github.token }}
+          SOURCE_OWNER: ${{ steps.prepare.outputs.source_owner }}
+          SOURCE_REPO: ${{ steps.prepare.outputs.source_repo_name }}
+          SHADOW_BASE_BRANCH: ${{ steps.prepare.outputs.shadow_base_branch }}
+          UPSTREAM_BRANCH: ${{ steps.prepare.outputs.upstream_branch }}
+          DEFAULT_BRANCH: ${{ steps.prepare.outputs.default_branch }}
+          SOURCE_ISSUE_NUMBER: ${{ steps.prepare.outputs.source_issue_number }}
         run: |
           set -euo pipefail
           git config --global user.name "Claude Code Bot"
@@ -95,6 +126,28 @@ jobs:
             "https://x-access-token:${WORKFLOW_PAT}@github.com/${SOURCE_OWNER}/${SOURCE_REPO}.git" source
           git clone --no-tags \
             "https://x-access-token:${WORKFLOW_PAT}@github.com/${{ inputs.shadow_repo }}.git" shadow
+
+          ruby -ryaml <<'RUBY'
+          cfg = File.exist?('shadow/.shadow/runtime.yml') ? (YAML.load_file('shadow/.shadow/runtime.yml') || {}) : {}
+          stack = cfg.fetch('stack', {}) || {}
+          commands = cfg.fetch('commands', {}) || {}
+          out = ENV.fetch('GITHUB_OUTPUT')
+          values = {
+            'runtime_install_command' => commands['install'].to_s,
+            'runtime_node_version' => stack['node_version'].to_s,
+            'runtime_python_version' => stack['python_version'].to_s,
+            'runtime_lint_command' => commands['lint'].to_s,
+            'runtime_test_command' => commands['test_unit'].to_s,
+            'runtime_build_command' => commands['build'].to_s,
+          }
+          File.open(out, 'a') do |f|
+            values.each do |key, value|
+              f.puts "#{key}<<EOF"
+              f.puts value
+              f.puts 'EOF'
+            end
+          end
+          RUBY
 
           git -C shadow fetch origin "$SHADOW_BASE_BRANCH"
           git -C shadow fetch origin "pull/${{ inputs.shadow_pr_number }}/head:shadow-pr-head"
@@ -123,20 +176,22 @@ jobs:
           git -C source push origin "HEAD:${UPSTREAM_BRANCH}" --force-with-lease
 
           echo "exported=true" >> "$GITHUB_OUTPUT"
-          echo "Exported ${SHADOW_BRANCH} -> ${SOURCE_OWNER}/${SOURCE_REPO}:${UPSTREAM_BRANCH}"
+          echo "Exported ${{ inputs.shadow_branch }} -> ${SOURCE_OWNER}/${SOURCE_REPO}:${UPSTREAM_BRANCH}"
 
-      - name: Create PR on source repo
+      - name: Create or reuse PR on source repo
+        id: create_pr
         if: steps.export.outputs.exported == 'true'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
           script: |
-            const sourceOwner = process.env.SOURCE_OWNER;
-            const sourceRepoName = process.env.SOURCE_REPO;
-            const upstreamBranch = process.env.UPSTREAM_BRANCH;
-            const defaultBranch = process.env.DEFAULT_BRANCH;
-            const sourceIssueNumber = process.env.SOURCE_ISSUE_NUMBER;
+            const sourceOwner = '${{ steps.prepare.outputs.source_owner }}';
+            const sourceRepoName = '${{ steps.prepare.outputs.source_repo_name }}';
+            const upstreamBranch = '${{ steps.prepare.outputs.upstream_branch }}';
+            const defaultBranch = '${{ steps.prepare.outputs.default_branch }}';
+            const sourceIssueNumber = '${{ steps.prepare.outputs.source_issue_number }}';
 
+            const prTitle = `fix: automated fix for issue #${sourceIssueNumber} (via shadow)`;
             const prBody = [
               `## Automated Fix`,
               ``,
@@ -150,20 +205,129 @@ jobs:
               `🤖 Automated via [CloudWarriors Shadow Autopilot](https://github.com/cloudwarriors-ai/.github)`,
             ].join('\n');
 
-            try {
-              const { data: pr } = await github.rest.pulls.create({
+            const existing = await github.paginate(github.rest.pulls.list, {
+              owner: sourceOwner,
+              repo: sourceRepoName,
+              state: 'open',
+              head: `${sourceOwner}:${upstreamBranch}`,
+              base: defaultBranch,
+              per_page: 100,
+            });
+
+            let pr;
+            if (existing.length > 0) {
+              pr = existing[0];
+              await github.rest.pulls.update({
                 owner: sourceOwner,
                 repo: sourceRepoName,
-                title: `fix: automated fix for issue #${sourceIssueNumber} (via shadow)`,
+                pull_number: pr.number,
+                title: prTitle,
+                body: prBody,
+              });
+              core.setOutput('created', 'false');
+            } else {
+              const { data } = await github.rest.pulls.create({
+                owner: sourceOwner,
+                repo: sourceRepoName,
+                title: prTitle,
                 head: upstreamBranch,
                 base: defaultBranch,
                 body: prBody,
               });
-              console.log(`Upstream PR created: ${pr.html_url}`);
-
-              await core.summary
-                .addRaw(`### Upstream PR Created\n\n**PR:** [${pr.title}](${pr.html_url})\n**Source issue:** ${sourceOwner}/${sourceRepoName}#${sourceIssueNumber}`)
-                .write();
-            } catch (e) {
-              console.log(`::warning::Could not create upstream PR: ${e.message}`);
+              pr = data;
+              core.setOutput('created', 'true');
             }
+
+            core.setOutput('pr_number', String(pr.number));
+            core.setOutput('pr_url', pr.html_url);
+            console.log(`Upstream PR ready: ${pr.html_url}`);
+
+            await core.summary
+              .addRaw(`### Upstream PR Ready\n\n**PR:** [${pr.title}](${pr.html_url})\n**Source issue:** ${sourceOwner}/${sourceRepoName}#${sourceIssueNumber}`)
+              .write();
+
+      - name: Upsert source issue comment
+        if: steps.create_pr.outputs.pr_number != '' && inputs.source_issue_notification_mode == 'comment'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const marker = '<!-- SHADOW_RESOLUTION -->';
+            const sourceOwner = '${{ steps.prepare.outputs.source_owner }}';
+            const sourceRepoName = '${{ steps.prepare.outputs.source_repo_name }}';
+            const sourceIssueNumber = Number('${{ steps.prepare.outputs.source_issue_number }}');
+            const shadowIssueNumber = '${{ steps.prepare.outputs.shadow_issue_number }}';
+            const shadowIssueUrl = '${{ steps.prepare.outputs.shadow_issue_url }}';
+            const shadowPrUrl = '${{ steps.prepare.outputs.shadow_pr_url }}';
+            const sourcePrNumber = '${{ steps.create_pr.outputs.pr_number }}';
+            const sourcePrUrl = '${{ steps.create_pr.outputs.pr_url }}';
+
+            const body = [
+              marker,
+              '## 🤖 Shadow fix ready for source review',
+              '',
+              `- **Source issue:** #${sourceIssueNumber}`,
+              `- **Shadow issue:** [${{ inputs.shadow_repo }}#${shadowIssueNumber}](${shadowIssueUrl})`,
+              `- **Shadow PR:** [${{ inputs.shadow_repo }}#${{ inputs.shadow_pr_number }}](${shadowPrUrl})`,
+              `- **Upstream PR:** [${sourceOwner}/${sourceRepoName}#${sourcePrNumber}](${sourcePrUrl})`,
+              '- **Status:** shadow fix merged; source PR open for review',
+              '',
+              'Shadow issue numbers are mapped independently from source issue numbers.',
+            ].join('\n');
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: sourceOwner,
+              repo: sourceRepoName,
+              issue_number: sourceIssueNumber,
+              per_page: 100,
+            });
+
+            const existing = comments.find((comment) => (comment.body || '').includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: sourceOwner,
+                repo: sourceRepoName,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: sourceOwner,
+                repo: sourceRepoName,
+                issue_number: sourceIssueNumber,
+                body,
+              });
+            }
+
+      - name: Determine upstream review mode
+        id: review_mode
+        if: steps.create_pr.outputs.pr_number != ''
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ "${{ inputs.source_pr_review_mode }}" = "advisory" ] && [ -n "${OPENROUTER_API_KEY}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  review-upstream-pr:
+    needs: upstream-pr
+    if: >
+      needs.upstream-pr.outputs.source_pr_number != '' &&
+      needs.upstream-pr.outputs.review_enabled == 'true'
+    uses: ./.github/workflows/reusable-claude-pr-review.yml
+    with:
+      target_repo: ${{ needs.upstream-pr.outputs.source_repo }}
+      target_pr_number: ${{ fromJSON(needs.upstream-pr.outputs.source_pr_number) }}
+      advisory_only: true
+      target_branches: ${{ format('["{0}"]', needs.upstream-pr.outputs.default_branch) }}
+      install_command: ${{ needs.upstream-pr.outputs.runtime_install_command }}
+      node_version: ${{ needs.upstream-pr.outputs.runtime_node_version }}
+      python_version: ${{ needs.upstream-pr.outputs.runtime_python_version }}
+      lint_command: ${{ needs.upstream-pr.outputs.runtime_lint_command }}
+      test_command: ${{ needs.upstream-pr.outputs.runtime_test_command }}
+      build_command: ${{ needs.upstream-pr.outputs.runtime_build_command }}
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
