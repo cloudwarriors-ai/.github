@@ -98,13 +98,15 @@ jobs:
 
             // ── 4. Upsert each issue in shadow ───────────────────────────────
             const preservedShadowLabels = new Set(['claude-working']);
-            let created = 0, updated = 0;
+            let created = 0, updated = 0, preservedClosed = 0;
+            let shadowOpenCount = 0, shadowClosedCount = 0;
             for (let i = 0; i < allIssues.length; i++) {
               const src = allIssues[i];
               const shadowFooter = `\n\n---\n*Shadow of [${sourceRepo}#${src.number}](${src.html_url})*`;
               const body = (src.body || '') + shadowFooter;
               const title = src.title;
-              const state = src.state;
+              const sourceState = src.state;
+              let effectiveState = sourceState;
 
               // Mirror source labels, always add the shadow marker, and preserve
               // only transient system labels that should survive a sync in flight.
@@ -130,6 +132,13 @@ jobs:
                   ...currentShadowLabels.filter(name => preservedShadowLabels.has(name)),
                 ])];
 
+                // Preserve a completed shadow issue while the source issue remains
+                // open and is waiting on upstream review/merge.
+                if (shadowIssue.state === 'closed' && sourceState === 'open') {
+                  effectiveState = 'closed';
+                  preservedClosed++;
+                }
+
                 // Update existing shadow issue
                 await github.rest.issues.update({
                   owner: shadowOwner,
@@ -137,7 +146,7 @@ jobs:
                   issue_number: shadowNumber,
                   title,
                   body,
-                  state,
+                  state: effectiveState,
                   labels,
                 });
                 updated++;
@@ -151,7 +160,22 @@ jobs:
                   labels,
                 });
                 issueMap[String(src.number)] = created_issue.number;
+
+                if (sourceState === 'closed') {
+                  await github.rest.issues.update({
+                    owner: shadowOwner,
+                    repo: shadowRepoName,
+                    issue_number: created_issue.number,
+                    state: 'closed',
+                  });
+                }
                 created++;
+              }
+
+              if (effectiveState === 'closed') {
+                shadowClosedCount++;
+              } else {
+                shadowOpenCount++;
               }
 
               // Rate limit mitigation: sleep 1s every 30 upserts
@@ -161,15 +185,22 @@ jobs:
             }
 
             const totalSynced = allIssues.length;
-            const openCount = allIssues.filter(i => i.state === 'open').length;
-            const closedCount = totalSynced - openCount;
-            console.log(`Created: ${created}, Updated: ${updated}`);
+            const sourceOpenCount = allIssues.filter(i => i.state === 'open').length;
+            const sourceClosedCount = totalSynced - sourceOpenCount;
+            console.log(`Created: ${created}, Updated: ${updated}, Preserved closed: ${preservedClosed}`);
 
             // ── 5. Write back updated config.json ────────────────────────────
             const updatedConfig = {
               ...config,
               lastSyncAt: new Date().toISOString(),
-              syncStats: { totalSynced, open: openCount, closed: closedCount },
+              syncStats: {
+                totalSynced,
+                open: shadowOpenCount,
+                closed: shadowClosedCount,
+                sourceOpen: sourceOpenCount,
+                sourceClosed: sourceClosedCount,
+                preservedClosed,
+              },
               issueMap,
             };
 
@@ -193,7 +224,10 @@ jobs:
               `| Source issues | ${totalSynced} |`,
               `| Created | ${created} |`,
               `| Updated | ${updated} |`,
-              `| Open | ${openCount} |`,
-              `| Closed | ${closedCount} |`,
+              `| Shadow open | ${shadowOpenCount} |`,
+              `| Shadow closed | ${shadowClosedCount} |`,
+              `| Source open | ${sourceOpenCount} |`,
+              `| Source closed | ${sourceClosedCount} |`,
+              `| Preserved closed shadow issues | ${preservedClosed} |`,
             ].join('\n');
             await core.summary.addRaw(summary).write();
