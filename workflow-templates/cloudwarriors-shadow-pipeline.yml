@@ -1,7 +1,12 @@
 name: Shadow Pipeline
 
 # Installed in cloudwarriors-ai shadow repos.
-# Provides: AUTOFIX label + @claude fix loop, hourly parity sync, upstream PR after merge.
+# Operator contract:
+# - @claude on a shadow issue is the default human kickoff path.
+# - AUTOFIX: Ready on a shadow issue is the explicit automation/queue trigger.
+# - New source issues sync into shadow but do not auto-run unless one of those triggers is used.
+# - Nothing is pushed back to the source repo until a shadow fix PR merges.
+# - A merged shadow fix opens an upstream source PR, comments on the source issue, and can run advisory PR review.
 
 on:
   issues:
@@ -25,7 +30,7 @@ on:
 
 jobs:
 
-  # AUTOFIX: Ready or @claude on shadow issues -> fix loop with runtime.yml service startup.
+  # @claude is the default human trigger. AUTOFIX: Ready is the explicit automation path.
   handle-issue:
     if: >
       (github.event_name == 'issue_comment' &&
@@ -82,4 +87,6 @@ jobs:
       shadow_repo: ${{ github.repository }}
       shadow_pr_number: ${{ github.event.pull_request.number }}
       shadow_branch: ${{ github.event.pull_request.head.ref }}
+      source_issue_notification_mode: 'comment'
+      source_pr_review_mode: 'advisory'
     secrets: inherit

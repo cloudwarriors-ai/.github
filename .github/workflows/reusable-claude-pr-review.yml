@@ -3,6 +3,18 @@ name: Claude PR Review (Reusable)
 on:
   workflow_call:
     inputs:
+      target_repo:
+        description: 'Optional target repo to review (defaults to caller repo)'
+        type: string
+        default: ''
+      target_pr_number:
+        description: 'Optional PR number to review (defaults to event-derived PR)'
+        type: number
+        default: 0
+      advisory_only:
+        description: 'Post review findings only; do not mutate, auto-fix, or auto-merge'
+        type: boolean
+        default: false
       target_branches:
         description: 'JSON array of branches to review PRs for (default: ["main", "master"])'
         type: string
@@ -53,6 +65,8 @@ on:
     secrets:
       OPENROUTER_API_KEY:
         required: true
+      WORKFLOW_PAT:
+        required: false
 
 permissions:
   contents: write
@@ -81,9 +95,14 @@ jobs:
         id: pr_info
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
           script: |
+            const targetRepo = '${{ inputs.target_repo }}' || context.repo.owner + '/' + context.repo.repo;
+            const [targetOwner, targetRepoName] = targetRepo.split('/');
             let prNumber;
-            if (context.eventName === 'workflow_dispatch') {
+            if (Number('${{ inputs.target_pr_number }}') > 0) {
+              prNumber = Number('${{ inputs.target_pr_number }}');
+            } else if (context.eventName === 'workflow_dispatch') {
               prNumber = parseInt('${{ github.event.inputs.pr_number }}');
             } else if (context.eventName === 'repository_dispatch') {
               prNumber = parseInt(context.payload.client_payload.pr_number);
@@ -98,8 +117,8 @@ jobs:
             }
 
             const pr = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+              owner: targetOwner,
+              repo: targetRepoName,
               pull_number: prNumber
             });
 
@@ -118,10 +137,14 @@ jobs:
 
             core.setOutput('number', pr.data.number);
             core.setOutput('head_ref', pr.data.head.ref);
+            core.setOutput('head_sha', pr.data.head.sha);
             core.setOutput('base_ref', pr.data.base.ref);
             core.setOutput('title', pr.data.title);
             core.setOutput('body', pr.data.body || '');
             core.setOutput('author', pr.data.user.login);
+            core.setOutput('owner', targetOwner);
+            core.setOutput('repo', targetRepoName);
+            core.setOutput('repo_full_name', `${targetOwner}/${targetRepoName}`);
 
             console.log(`PR #${prNumber}: ${pr.data.title}`);
             console.log(`Head: ${pr.data.head.ref} -> Base: ${pr.data.base.ref}`);
@@ -129,51 +152,66 @@ jobs:
       - name: Check for review options
         id: options
         if: steps.pr_info.outputs.is_draft != 'true'
-        run: |
-          # Get latest commit message
-          COMMIT_MSG=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ steps.pr_info.outputs.number }}/commits" \
-            | jq -r '.[-1].commit.message // ""')
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            if (${{ inputs.advisory_only }}) {
+              core.setOutput('max_iterations', '1');
+              core.setOutput('skip', 'false');
+              core.setOutput('review_only', 'true');
+              return;
+            }
 
-          echo "Latest commit: $COMMIT_MSG"
+            const { data: commits } = await github.rest.pulls.listCommits({
+              owner: '${{ steps.pr_info.outputs.owner }}',
+              repo: '${{ steps.pr_info.outputs.repo }}',
+              pull_number: Number('${{ steps.pr_info.outputs.number }}'),
+              per_page: 100,
+            });
+            const commitMessage = commits.length ? (commits[commits.length - 1].commit?.message || '') : '';
+            console.log(`Latest commit: ${commitMessage}`);
 
-          # Parse options from commit message
-          if echo "$COMMIT_MSG" | grep -qE "\[iterations:[0-9]+\]"; then
-            MAX_ITER=$(echo "$COMMIT_MSG" | grep -oE "\[iterations:[0-9]+\]" | grep -oE "[0-9]+")
-            echo "max_iterations=$MAX_ITER" >> "$GITHUB_OUTPUT"
-          else
-            echo "max_iterations=$DEFAULT_MAX_ITERATIONS" >> "$GITHUB_OUTPUT"
-          fi
+            const iterationMatch = commitMessage.match(/\[iterations:(\d+)\]/i);
+            core.setOutput('max_iterations', iterationMatch ? iterationMatch[1] : String(process.env.DEFAULT_MAX_ITERATIONS));
 
-          if echo "$COMMIT_MSG" | grep -q "\[skip automated review\]"; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "review_only=false" >> "$GITHUB_OUTPUT"
-          elif echo "$COMMIT_MSG" | grep -q "\[review only\]"; then
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "review_only=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "review_only=false" >> "$GITHUB_OUTPUT"
-          fi
+            if (/\[skip automated review\]/i.test(commitMessage)) {
+              core.setOutput('skip', 'true');
+              core.setOutput('review_only', 'false');
+            } else if (/\[review only\]/i.test(commitMessage)) {
+              core.setOutput('skip', 'false');
+              core.setOutput('review_only', 'true');
+            } else {
+              core.setOutput('skip', 'false');
+              core.setOutput('review_only', 'false');
+            }
 
       - name: Check Iteration Count (Circuit Breaker)
         id: iteration
         if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
           script: |
+            if (${{ inputs.advisory_only }}) {
+              core.setOutput('count', '0');
+              core.setOutput('max', '1');
+              core.setOutput('circuit_break', 'false');
+              return;
+            }
+
             // Count workflow runs for this PR
             const runs = await github.rest.actions.listWorkflowRuns({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+              owner: '${{ steps.pr_info.outputs.owner }}',
+              repo: '${{ steps.pr_info.outputs.repo }}',
               workflow_id: 'claude-ci.yml',
-              head_sha: context.sha
+              head_sha: '${{ steps.pr_info.outputs.head_sha }}'
             });
 
             // Filter to only completed runs for this specific PR
             const prRuns = runs.data.workflow_runs.filter(r =>
               r.conclusion !== null &&
-              r.head_sha === context.sha
+              r.head_sha === '${{ steps.pr_info.outputs.head_sha }}'
             );
 
             const iterationCount = prRuns.length;
@@ -194,9 +232,10 @@ jobs:
         if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
+          repository: ${{ steps.pr_info.outputs.repo_full_name }}
           ref: ${{ steps.pr_info.outputs.head_ref }}
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
         if: ${{ steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true' && inputs.node_version != '' }}
@@ -258,6 +297,7 @@ jobs:
           PR_TITLE: ${{ steps.pr_info.outputs.title }}
           PR_BODY: ${{ steps.pr_info.outputs.body }}
         with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
           script: |
             const prTitle = process.env.PR_TITLE || '';
             const prBody = process.env.PR_BODY || '';
@@ -275,8 +315,8 @@ jobs:
 
             try {
               const issue = await github.rest.issues.get({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
+                owner: '${{ steps.pr_info.outputs.owner }}',
+                repo: '${{ steps.pr_info.outputs.repo }}',
                 issue_number: issueNumber
               });
 
@@ -317,6 +357,62 @@ jobs:
               core.setOutput('criteria', '[]');
             }
 
+      - name: Resolve Review Commands
+        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
+        id: commands
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let scripts = {};
+            try {
+              const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+              scripts = pkg.scripts || {};
+            } catch {}
+
+            const has = (file) => fs.existsSync(file);
+            const normalize = (value) => {
+              const trimmed = (value || '').trim();
+              if (!trimmed || trimmed.toLowerCase() === 'skip') {
+                return '';
+              }
+              return trimmed;
+            };
+            const pick = (...values) => values.map(normalize).find(Boolean) || '';
+
+            const lint = pick(
+              process.env.INPUT_LINT,
+              scripts.lint ? 'npm run lint' : '',
+              has('ruff.toml') || has('.ruff.toml') || has('pyproject.toml') ? 'ruff check .' : ''
+            );
+
+            const test = pick(
+              process.env.INPUT_TEST,
+              scripts['test:unit'] ? 'npm run test:unit' : '',
+              scripts['test:run'] ? 'npm run test:run' : '',
+              scripts.test ? 'npm test' : '',
+              has('pytest.ini') || has('conftest.py') || has('tests') ? 'pytest -q' : ''
+            );
+
+            const build = pick(
+              process.env.INPUT_BUILD,
+              scripts.build ? 'npm run build' : ''
+            );
+
+            const lines = [];
+            if (build) lines.push(`${build}   # Build/compile`);
+            if (lint) lines.push(`${lint}    # Linting/type checking`);
+            if (test) lines.push(`${test}    # Unit tests`);
+
+            core.setOutput('lint', lint);
+            core.setOutput('test', test);
+            core.setOutput('build', build);
+            core.setOutput('ci_block', lines.length ? lines.join('\n') : '# No explicit lint/test/build commands were detected for this repo');
+        env:
+          INPUT_LINT: ${{ inputs.lint_command }}
+          INPUT_TEST: ${{ inputs.test_command }}
+          INPUT_BUILD: ${{ inputs.build_command }}
+
       - name: Build Review Prompt
         if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
         id: prompt
@@ -342,10 +438,7 @@ jobs:
             Include an 'Acceptance Criteria Verification' section in your review with ✅/❌ for each.`;
             }
 
-            // Build CI commands based on inputs or defaults
-            const lintCmd = process.env.LINT_CMD || 'npm run lint';
-            const testCmd = process.env.TEST_CMD || 'npm run test:unit';
-            const buildCmd = process.env.BUILD_CMD || 'npm run build';
+            const ciBlock = process.env.CI_BLOCK || '# No explicit lint/test/build commands were detected for this repo';
 
             const prompt = `You are a senior developer reviewing PR #${process.env.PR_NUM}: "${process.env.PR_TITLE}"
 
@@ -357,9 +450,7 @@ jobs:
 
             1. **Run CI checks** (use Bash tool):
                \`\`\`bash
-               ${buildCmd}   # Build/compile
-               ${lintCmd}    # Linting/type checking
-               ${testCmd}    # Unit tests
+               ${ciBlock}
                \`\`\`
 
             2. **Review code changes** using project conventions from CLAUDE.md:
@@ -409,9 +500,7 @@ jobs:
           ISSUE_NUM: ${{ steps.linked_issue.outputs.number }}
           ISSUE_TITLE: ${{ steps.linked_issue.outputs.title }}
           CRITERIA: ${{ steps.linked_issue.outputs.criteria }}
-          LINT_CMD: ${{ inputs.lint_command }}
-          TEST_CMD: ${{ inputs.test_command }}
-          BUILD_CMD: ${{ inputs.build_command }}
+          CI_BLOCK: ${{ steps.commands.outputs.ci_block }}
 
       - name: Run Initial Review
         if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
@@ -497,13 +586,19 @@ jobs:
 
       - name: Post Review Comment
         if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
-        run: |
-          echo "" >> /tmp/review-markdown.md
-          echo "---" >> /tmp/review-markdown.md
-          echo "*🤖 Automated review by Claude Code (iteration ${{ steps.iteration.outputs.count || 1 }}/${{ steps.iteration.outputs.max || 3 }})*" >> /tmp/review-markdown.md
-          gh pr comment ${{ steps.pr_info.outputs.number }} --body-file /tmp/review-markdown.md
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            let body = fs.readFileSync('/tmp/review-markdown.md', 'utf8');
+            body += `\n\n---\n*🤖 Automated review by Claude Code (iteration ${{ steps.iteration.outputs.count || 1 }}/${{ steps.iteration.outputs.max || 3 }})*`;
+            await github.rest.issues.createComment({
+              owner: '${{ steps.pr_info.outputs.owner }}',
+              repo: '${{ steps.pr_info.outputs.repo }}',
+              issue_number: Number('${{ steps.pr_info.outputs.number }}'),
+              body,
+            });
 
       - name: Check if fixes needed
         id: needs_fix
@@ -542,6 +637,7 @@ jobs:
         if: |
           steps.pr_info.outputs.is_draft != 'true' &&
           steps.options.outputs.skip != 'true' &&
+          inputs.advisory_only != true &&
           steps.options.outputs.review_only != 'true' &&
           steps.iteration.outputs.circuit_break != 'true' &&
           steps.needs_fix.outputs.needs_fix == 'true'
@@ -612,7 +708,7 @@ jobs:
           fi
 
       - name: Post Fix Comment
-        if: steps.autofix.outputs.fixes_applied == 'true'
+        if: steps.autofix.outputs.fixes_applied == 'true' && inputs.advisory_only != true
         run: |
           FIX_SHA="${{ steps.autofix.outputs.fix_sha }}"
           cat > /tmp/fix-comment.md << EOF
@@ -630,14 +726,15 @@ jobs:
           *🤖 Automated fix by Claude Code*
           EOF
 
-          gh pr comment ${{ steps.pr_info.outputs.number }} --body-file /tmp/fix-comment.md
+          gh pr comment ${{ steps.pr_info.outputs.number }} -R "${{ steps.pr_info.outputs.repo_full_name }}" --body-file /tmp/fix-comment.md
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Re-trigger for Next Iteration
         if: |
           steps.pr_info.outputs.is_draft != 'true' &&
           steps.options.outputs.skip != 'true' &&
+          inputs.advisory_only != true &&
           steps.iteration.outputs.circuit_break != 'true' &&
           steps.autofix.outputs.fixes_applied == 'true' &&
           steps.review.outputs.approval != 'approve'
@@ -654,16 +751,17 @@ jobs:
             await new Promise(resolve => setTimeout(resolve, 5000));
 
             await github.rest.repos.createDispatchEvent({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+              owner: '${{ steps.pr_info.outputs.owner }}',
+              repo: '${{ steps.pr_info.outputs.repo }}',
               event_type: 'pr-review',
               client_payload: { pr_number: prNumber }
             });
 
       - name: Add Labels
-        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true'
+        if: steps.pr_info.outputs.is_draft != 'true' && steps.options.outputs.skip != 'true' && inputs.advisory_only != true
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
           script: |
             const approval = '${{ steps.review.outputs.approval }}';
             const labels = ['claude-reviewed'];
@@ -675,8 +773,8 @@ jobs:
             }
 
             await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+              owner: '${{ steps.pr_info.outputs.owner }}',
+              repo: '${{ steps.pr_info.outputs.repo }}',
               issue_number: parseInt('${{ steps.pr_info.outputs.number }}'),
               labels: labels
             });
@@ -685,6 +783,7 @@ jobs:
         if: |
           steps.pr_info.outputs.is_draft != 'true' &&
           steps.options.outputs.skip != 'true' &&
+          inputs.advisory_only != true &&
           steps.pr_info.outputs.base_ref == inputs.auto_merge_branch &&
           inputs.auto_merge_branch != '' &&
           steps.needs_fix.outputs.needs_fix != 'true' &&
@@ -692,36 +791,37 @@ jobs:
         run: |
           echo "✅ All checks passed. Merging..."
 
-          if ! gh pr merge ${{ steps.pr_info.outputs.number }} --squash --auto --delete-branch 2>/dev/null; then
+          if ! gh pr merge ${{ steps.pr_info.outputs.number }} -R "${{ steps.pr_info.outputs.repo_full_name }}" --squash --auto --delete-branch 2>/dev/null; then
             echo "Auto-merge not available, attempting direct merge..."
-            gh pr merge ${{ steps.pr_info.outputs.number }} --squash --delete-branch || {
+            gh pr merge ${{ steps.pr_info.outputs.number }} -R "${{ steps.pr_info.outputs.repo_full_name }}" --squash --delete-branch || {
               echo "::warning::Could not merge PR"
               exit 0
             }
           fi
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Circuit Breaker Notification
-        if: steps.iteration.outputs.circuit_break == 'true'
+        if: steps.iteration.outputs.circuit_break == 'true' && inputs.advisory_only != true
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
           script: |
             const prNumber = parseInt('${{ steps.pr_info.outputs.number }}');
             const maxIterations = parseInt('${{ steps.iteration.outputs.max }}');
 
             // Comment on PR
             await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+              owner: '${{ steps.pr_info.outputs.owner }}',
+              repo: '${{ steps.pr_info.outputs.repo }}',
               issue_number: prNumber,
               body: `## ⚠️ Circuit Breaker Triggered\n\n**${maxIterations} fix iterations** reached without resolving all issues.\n\n**Manual intervention required.**\n\n---\n🤖 Automated by Claude Code`
             });
 
             // Add label
             await github.rest.issues.addLabels({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
+              owner: '${{ steps.pr_info.outputs.owner }}',
+              repo: '${{ steps.pr_info.outputs.repo }}',
               issue_number: prNumber,
               labels: ['needs-human-review']
             });

@@ -1,0 +1,33 @@
+name: Validation - Shadow Upstream PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      shadow_repo:
+        description: 'Shadow repo full name'
+        required: true
+        type: string
+        default: 'cloudwarriors-ai/scopely-shadow'
+      shadow_pr_number:
+        description: 'Merged shadow PR number'
+        required: true
+        type: number
+        default: 239
+      shadow_branch:
+        description: 'Merged shadow branch'
+        required: true
+        type: string
+        default: 'fix/issue-2'
+
+jobs:
+  validate-upstream-pr:
+    uses: ./.github/workflows/reusable-shadow-upstream-pr.yml
+    with:
+      shadow_repo: ${{ inputs.shadow_repo }}
+      shadow_pr_number: ${{ inputs.shadow_pr_number }}
+      shadow_branch: ${{ inputs.shadow_branch }}
+      source_issue_notification_mode: 'comment'
+      source_pr_review_mode: 'advisory'
+    secrets:
+      WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

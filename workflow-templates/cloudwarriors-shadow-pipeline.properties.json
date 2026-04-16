@@ -1,6 +1,6 @@
 {
   "name": "CloudWarriors Shadow Pipeline",
-  "description": "Shadow repo CI: AUTOFIX label or @claude fix loop, hourly code and issue sync from source, upstream PR on merge.",
+  "description": "Shadow repo CI: @claude is the default human trigger, AUTOFIX: Ready is the automation trigger, hourly parity sync from source, upstream PR plus source notification on merge.",
   "iconName": "octicon-repo-forked",
   "categories": ["Automation", "Shadow"]
 }
