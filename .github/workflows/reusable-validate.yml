@@ -1,0 +1,304 @@
+name: "Reusable Validate: API-driven"
+
+# Runs Sentinel's API validation harness against a deployed target (preview or
+# otherwise), producing a verdict + signed attestation. Downstream callers
+# (autopilot-runner, shadow-upstream-pr) gate on the verdict and/or verify the
+# attestation rather than re-running the scenarios.
+#
+# Contract:
+#   - Caller must have .autopilot/validation.json + validation/scenarios/*.yml
+#     in the checked-out repo (or a manifest_path override).
+#   - If the caller's .autopilot/config.json has `validation.state` set to
+#     'pending_onboarding' or 'exempt' with a valid TTL + reason, validation
+#     is skipped with verdict=skipped (fail-open, but only within that window).
+#     Missing state on an app that's supposed to be active is a hard fail.
+#
+# Outputs:
+#   - verdict: unchanged | expected-diff | new-behavior | regression | skipped
+#   - api_validation_passed: false only when verdict is 'regression'
+#   - report_artifact_name: the uploaded artifact name (download via `gh run download`)
+
+on:
+  workflow_call:
+    inputs:
+      preview_url:
+        description: 'Base URL of the target environment (e.g. https://preview-123.pscx.ai)'
+        required: true
+        type: string
+      manifest_path:
+        description: 'Path to validation manifest, relative to caller repo'
+        required: false
+        type: string
+        default: '.autopilot/validation.json'
+      config_path:
+        description: 'Path to autopilot config (carries validation.state)'
+        required: false
+        type: string
+        default: '.autopilot/config.json'
+      target_env:
+        description: 'Environment label (informational)'
+        required: false
+        type: string
+        default: 'dev'
+      update_goldens:
+        description: 'Overwrite existing goldens with observed responses'
+        required: false
+        type: boolean
+        default: false
+      sentinel_ref:
+        description: 'Git ref of cloudwarriors-ai/sentinel to install (tag or SHA; avoid @main in prod)'
+        required: false
+        type: string
+        default: 'main'
+      issue_number:
+        description: 'Optional issue number for PR/issue comment linking'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      WORKFLOW_PAT:
+        required: true
+      VALIDATION_ATTESTATION_KEY:
+        required: true
+      E2E_EMAIL:
+        required: false
+      E2E_PASSWORD:
+        required: false
+    outputs:
+      verdict:
+        description: 'Run verdict from Sentinel'
+        value: ${{ jobs.validate.outputs.verdict }}
+      api_validation_passed:
+        description: 'True when verdict is not regression'
+        value: ${{ jobs.validate.outputs.api_validation_passed }}
+      report_artifact_name:
+        description: 'Artifact name for report.json + attestation.json'
+        value: ${{ jobs.validate.outputs.report_artifact_name }}
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  validate:
+    name: "Validate (${{ inputs.target_env }}) against ${{ inputs.preview_url }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    outputs:
+      verdict: ${{ steps.emit.outputs.verdict }}
+      api_validation_passed: ${{ steps.emit.outputs.api_validation_passed }}
+      report_artifact_name: ${{ steps.artifact-name.outputs.name }}
+
+    steps:
+      - name: Checkout caller repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Compute artifact name
+        id: artifact-name
+        run: |
+          echo "name=sentinel-validation-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+
+      - name: Check validation state
+        id: state
+        env:
+          CONFIG_PATH: ${{ inputs.config_path }}
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+        run: |
+          set -euo pipefail
+
+          RUN=true
+          REASON=""
+          STATE="active"
+
+          if [ -f "$CONFIG_PATH" ]; then
+            STATE=$(jq -r '.validation.state // "active"' "$CONFIG_PATH" 2>/dev/null || echo "active")
+            REASON=$(jq -r '.validation.reason // ""' "$CONFIG_PATH" 2>/dev/null || echo "")
+            TTL=$(jq -r '.validation.ttl_until // ""' "$CONFIG_PATH" 2>/dev/null || echo "")
+          fi
+
+          case "$STATE" in
+            active)
+              if [ ! -f "$MANIFEST_PATH" ]; then
+                echo "ERROR: validation.state=active but manifest missing at $MANIFEST_PATH" >&2
+                exit 1
+              fi
+              ;;
+            pending_onboarding|exempt)
+              if [ -z "$TTL" ] || [ -z "$REASON" ]; then
+                echo "ERROR: state=$STATE requires validation.ttl_until + validation.reason in $CONFIG_PATH" >&2
+                exit 1
+              fi
+              NOW=$(date -u +%s)
+              TTL_TS=$(date -u -d "$TTL" +%s 2>/dev/null || echo 0)
+              if [ "$TTL_TS" -le "$NOW" ]; then
+                echo "ERROR: state=$STATE but ttl_until has expired ($TTL)" >&2
+                exit 1
+              fi
+              RUN=false
+              ;;
+            *)
+              echo "ERROR: unknown validation.state='$STATE' in $CONFIG_PATH" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "state=$STATE" >> "$GITHUB_OUTPUT"
+          echo "reason=$REASON" >> "$GITHUB_OUTPUT"
+          echo "run=$RUN" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Python
+        if: steps.state.outputs.run == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Clone sentinel
+        if: steps.state.outputs.run == 'true'
+        env:
+          SENTINEL_REF: ${{ inputs.sentinel_ref }}
+        run: |
+          git clone --depth 1 --branch "$SENTINEL_REF" \
+            https://x-access-token:${{ secrets.WORKFLOW_PAT }}@github.com/cloudwarriors-ai/sentinel.git \
+            /tmp/sentinel
+
+      - name: Install sentinel
+        if: steps.state.outputs.run == 'true'
+        run: pip install -e /tmp/sentinel
+
+      - name: Fetch shared scripts
+        if: steps.state.outputs.run == 'true'
+        run: |
+          git clone --depth 1 https://x-access-token:${{ secrets.WORKFLOW_PAT }}@github.com/cloudwarriors-ai/.github.git /tmp/org-github
+          cd /tmp/org-github/scripts/autopilot && npm install --silent --no-audit --no-fund
+
+      - name: Run validation
+        id: run
+        if: steps.state.outputs.run == 'true'
+        env:
+          E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
+          E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+          PREVIEW_URL: ${{ inputs.preview_url }}
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+          UPDATE_GOLDENS: ${{ inputs.update_goldens }}
+        run: |
+          set -uo pipefail
+          FLAGS=""
+          if [ "$UPDATE_GOLDENS" = "true" ]; then FLAGS="--update-goldens"; fi
+
+          mkdir -p /tmp/sentinel-run
+
+          # Don't fail the step on regression — we still need to upload artifacts
+          # and emit outputs. The verdict is checked downstream.
+          set +e
+          sentinel validate-api \
+            --manifest "$MANIFEST_PATH" \
+            --target "$PREVIEW_URL" \
+            --out /tmp/sentinel-run \
+            --json \
+            $FLAGS > /tmp/sentinel-run/summary.json 2> /tmp/sentinel-run/stderr.log
+          EXIT=$?
+          set -e
+          echo "sentinel exit: $EXIT"
+          if [ -s /tmp/sentinel-run/stderr.log ]; then
+            echo '--- sentinel stderr ---'
+            cat /tmp/sentinel-run/stderr.log
+          fi
+
+          if [ ! -f /tmp/sentinel-run/report.json ]; then
+            echo "ERROR: report.json missing — sentinel did not produce output" >&2
+            exit 2
+          fi
+
+          VERDICT=$(jq -r .run_verdict /tmp/sentinel-run/report.json)
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+
+      - name: Sign attestation
+        if: steps.state.outputs.run == 'true' && steps.run.outputs.verdict != ''
+        env:
+          VALIDATION_ATTESTATION_KEY: ${{ secrets.VALIDATION_ATTESTATION_KEY }}
+          VERDICT: ${{ steps.run.outputs.verdict }}
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+        run: |
+          cd /tmp/org-github/scripts/autopilot
+          npx tsx validation/attestation.ts sign \
+            --report /tmp/sentinel-run/report.json \
+            --manifest "$GITHUB_WORKSPACE/$MANIFEST_PATH" \
+            --commit-sha "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verdict "$VERDICT" \
+            --out /tmp/sentinel-run/attestation.json
+
+      - name: Emit outputs
+        id: emit
+        if: always()
+        env:
+          STATE: ${{ steps.state.outputs.state }}
+          VERDICT: ${{ steps.run.outputs.verdict }}
+        run: |
+          if [ "$STATE" = "pending_onboarding" ] || [ "$STATE" = "exempt" ]; then
+            echo "verdict=skipped" >> "$GITHUB_OUTPUT"
+            echo "api_validation_passed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "$VERDICT" ]; then
+            # validation failed to produce a verdict — fail closed
+            echo "verdict=error" >> "$GITHUB_OUTPUT"
+            echo "api_validation_passed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          if [ "$VERDICT" = "regression" ]; then
+            echo "api_validation_passed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "api_validation_passed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact-name.outputs.name }}
+          path: /tmp/sentinel-run/
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Comment on issue with verdict
+        if: inputs.issue_number != '' && steps.emit.outputs.verdict != '' && steps.emit.outputs.verdict != 'skipped'
+        uses: actions/github-script@v7
+        env:
+          VERDICT: ${{ steps.emit.outputs.verdict }}
+          PASSED: ${{ steps.emit.outputs.api_validation_passed }}
+          ARTIFACT: ${{ steps.artifact-name.outputs.name }}
+          TARGET: ${{ inputs.preview_url }}
+          ISSUE: ${{ inputs.issue_number }}
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT }}
+          script: |
+            const verdict = process.env.VERDICT;
+            const passed = process.env.PASSED === 'true';
+            const icon = passed ? '✅' : '❌';
+            const body = [
+              `### ${icon} Sentinel API Validation — verdict: \`${verdict}\``,
+              ``,
+              `**Target:** ${process.env.TARGET}`,
+              `**Artifact:** \`${process.env.ARTIFACT}\` (download via \`gh run download ${context.runId} -n ${process.env.ARTIFACT}\`)`,
+              ``,
+              `[Workflow run](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(process.env.ISSUE),
+              body,
+            });
+
+      - name: Fail if regression
+        if: steps.emit.outputs.api_validation_passed == 'false'
+        run: |
+          echo "API validation did not pass (verdict=${{ steps.emit.outputs.verdict }})" >&2
+          exit 1
