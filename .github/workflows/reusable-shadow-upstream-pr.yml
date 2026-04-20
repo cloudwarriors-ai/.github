@@ -31,6 +31,8 @@ on:
         required: false
       OPENROUTER_API_KEY:
         required: false
+      VALIDATION_ATTESTATION_KEY:
+        required: false
 
 jobs:
   upstream-pr:
@@ -177,6 +179,100 @@ jobs:
 
           echo "exported=true" >> "$GITHUB_OUTPUT"
           echo "Exported ${{ inputs.shadow_branch }} -> ${SOURCE_OWNER}/${SOURCE_REPO}:${UPSTREAM_BRANCH}"
+
+      # ── Validation attestation verifier ───────────────────────────────
+      # Before any upstream PR is created, the autopilot run that produced this
+      # fix must carry a valid signed attestation (HMAC-SHA256, sha match, age
+      # ≤14d, verdict != regression). This is a verifier — it does NOT re-run
+      # validation, preserving the single-validation invariant.
+      - name: "Locate validation attestation (shadow PR head)"
+        id: locate_attestation
+        if: steps.export.outputs.exported == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const [shadowOwner, shadowRepoName] = '${{ inputs.shadow_repo }}'.split('/');
+            const { data: pr } = await github.rest.pulls.get({
+              owner: shadowOwner,
+              repo: shadowRepoName,
+              pull_number: ${{ inputs.shadow_pr_number }},
+            });
+            const headSha = pr.head.sha;
+            core.setOutput('head_sha', headSha);
+
+            const { data: runsResp } = await github.rest.actions.listWorkflowRunsForRepo({
+              owner: shadowOwner,
+              repo: shadowRepoName,
+              head_sha: headSha,
+              per_page: 50,
+            });
+
+            let matchRun = null;
+            let matchArtifact = null;
+            for (const run of runsResp.workflow_runs) {
+              const { data: artifactsData } = await github.rest.actions.listWorkflowRunArtifacts({
+                owner: shadowOwner,
+                repo: shadowRepoName,
+                run_id: run.id,
+              });
+              const art = artifactsData.artifacts.find(
+                (a) => a.name.startsWith('sentinel-validation-') && !a.expired
+              );
+              if (art) {
+                matchRun = run;
+                matchArtifact = art;
+                break;
+              }
+            }
+
+            if (!matchRun || !matchArtifact) {
+              core.setFailed(
+                `No sentinel-validation-* attestation found for commit ${headSha} ` +
+                `in ${shadowOwner}/${shadowRepoName}. Autopilot must produce one before ` +
+                `shadow-upstream-pr can push upstream.`
+              );
+              return;
+            }
+
+            core.setOutput('run_id', String(matchRun.id));
+            core.setOutput('artifact_name', matchArtifact.name);
+            core.setOutput('source_repo', `${shadowOwner}/${shadowRepoName}`);
+            console.log(
+              `Found attestation: run=${matchRun.id} artifact=${matchArtifact.name}`
+            );
+
+      - name: Download validation attestation
+        if: steps.export.outputs.exported == 'true' && steps.locate_attestation.outputs.run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.locate_attestation.outputs.artifact_name }}
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+          repository: ${{ inputs.shadow_repo }}
+          run-id: ${{ steps.locate_attestation.outputs.run_id }}
+          path: /tmp/sentinel-attestation
+
+      - name: Verify attestation
+        if: steps.export.outputs.exported == 'true' && steps.locate_attestation.outputs.run_id != ''
+        env:
+          VALIDATION_ATTESTATION_KEY: ${{ secrets.VALIDATION_ATTESTATION_KEY }}
+          HEAD_SHA: ${{ steps.locate_attestation.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VALIDATION_ATTESTATION_KEY:-}" ]; then
+            echo "::error::VALIDATION_ATTESTATION_KEY secret is not set — cannot verify attestation" >&2
+            exit 1
+          fi
+
+          git clone --depth 1 https://x-access-token:${{ secrets.WORKFLOW_PAT || github.token }}@github.com/cloudwarriors-ai/.github.git /tmp/org-github
+          cd /tmp/org-github/scripts/autopilot
+          npm install --silent --no-audit --no-fund
+
+          npx tsx validation/attestation.ts verify \
+            --attestation /tmp/sentinel-attestation/attestation.json \
+            --report /tmp/sentinel-attestation/report.json \
+            --commit-sha "$HEAD_SHA" \
+            --max-age-days 14
 
       - name: Create or reuse PR on source repo
         id: create_pr
