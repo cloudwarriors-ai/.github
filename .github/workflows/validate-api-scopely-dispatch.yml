@@ -1,0 +1,47 @@
+name: "Validate API — Scopely (manual)"
+
+# Ad-hoc API validation for Scopely, driven from this repo so it doesn't
+# depend on Scopely merge rights. Uses reusable-validate.yml's manifest_repo
+# override to check out cloudwarriors-ai/scopely cross-repo and run the
+# harness against a deployed target.
+#
+# Used for Test 2 of the validation harness rollout.
+
+on:
+  workflow_dispatch:
+    inputs:
+      preview_url:
+        description: "Target base URL"
+        required: false
+        type: string
+        default: "https://backend-dev-3144.up.railway.app"
+      manifest_ref:
+        description: "Scopely ref to check out for manifest + scenarios"
+        required: false
+        type: string
+        default: "dev"
+      target_env:
+        description: "Environment label (informational)"
+        required: false
+        type: string
+        default: "dev"
+      update_goldens:
+        description: "Overwrite committed goldens with observed responses"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  validate:
+    uses: ./.github/workflows/reusable-validate.yml
+    with:
+      preview_url: ${{ inputs.preview_url }}
+      target_env: ${{ inputs.target_env }}
+      update_goldens: ${{ inputs.update_goldens }}
+      manifest_repo: cloudwarriors-ai/scopely
+      manifest_ref: ${{ inputs.manifest_ref }}
+    secrets:
+      WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
+      VALIDATION_ATTESTATION_KEY: ${{ secrets.VALIDATION_ATTESTATION_KEY }}
+      E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
+      E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
