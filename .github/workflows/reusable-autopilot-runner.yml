@@ -356,7 +356,7 @@ jobs:
       always() && !cancelled() &&
       needs.deploy-preview.result == 'success' &&
       needs.deploy-preview.outputs.preview_url != ''
-    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-validate.yml@main
+    uses: ./.github/workflows/reusable-validate.yml
     with:
       preview_url: ${{ needs.deploy-preview.outputs.preview_url }}
       target_env: ${{ inputs.base == 'main' && 'production' || 'dev' }}
