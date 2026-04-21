@@ -55,6 +55,16 @@ on:
         required: false
         type: string
         default: ''
+      manifest_repo:
+        description: 'Repo that holds the manifest + scenarios (e.g. cloudwarriors-ai/scopely). Defaults to the caller repo.'
+        required: false
+        type: string
+        default: ''
+      manifest_ref:
+        description: 'Ref to check out when manifest_repo is set (default: that repo''s default branch)'
+        required: false
+        type: string
+        default: ''
     secrets:
       WORKFLOW_PAT:
         required: true
@@ -92,10 +102,26 @@ jobs:
       report_artifact_name: ${{ steps.artifact-name.outputs.name }}
 
     steps:
-      - name: Checkout caller repo
+      - name: Checkout caller repo (default)
+        if: inputs.manifest_repo == ''
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      - name: Checkout manifest repo (override)
+        if: inputs.manifest_repo != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.manifest_repo }}
+          ref: ${{ inputs.manifest_ref }}
+          token: ${{ secrets.WORKFLOW_PAT }}
+          fetch-depth: 1
+
+      - name: Capture manifest HEAD sha
+        id: manifest-sha
+        run: |
+          SHA=$(git rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
       - name: Compute artifact name
         id: artifact-name
@@ -222,14 +248,16 @@ jobs:
           VALIDATION_ATTESTATION_KEY: ${{ secrets.VALIDATION_ATTESTATION_KEY }}
           VERDICT: ${{ steps.run.outputs.verdict }}
           MANIFEST_PATH: ${{ inputs.manifest_path }}
+          MANIFEST_SHA: ${{ steps.manifest-sha.outputs.sha }}
+          MANIFEST_REPO: ${{ inputs.manifest_repo }}
         run: |
           cd /tmp/org-github/scripts/autopilot
           npx tsx validation/attestation.ts sign \
             --report /tmp/sentinel-run/report.json \
             --manifest "$GITHUB_WORKSPACE/$MANIFEST_PATH" \
-            --commit-sha "$GITHUB_SHA" \
+            --commit-sha "$MANIFEST_SHA" \
             --run-id "$GITHUB_RUN_ID" \
-            --repo "$GITHUB_REPOSITORY" \
+            --repo "${MANIFEST_REPO:-$GITHUB_REPOSITORY}" \
             --verdict "$VERDICT" \
             --out /tmp/sentinel-run/attestation.json
 
