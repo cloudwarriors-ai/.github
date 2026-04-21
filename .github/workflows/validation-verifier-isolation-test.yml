@@ -1,0 +1,183 @@
+name: "Validation: end-to-end isolation test (Option A')"
+
+# Mock-autopilot dispatch that exercises the exact caller wiring used by
+# reusable-autopilot-runner.yml (validate-api job) and reusable-shadow-upstream-pr.yml
+# (attestation verifier), without requiring a real autofix or preview deploy.
+#
+# Flow:
+#   1. validate-api  — calls reusable-validate.yml against Scopely dev backend,
+#                       produces signed attestation artifact (same as autopilot)
+#   2. verify        — mimics shadow-upstream's verifier: locate the artifact by
+#                       run_id, download, run attestation.ts verify
+#
+# Purpose: prove sign → upload → cross-run locate → download → HMAC verify
+# works before we depend on it in a real autopilot run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      preview_url:
+        description: "Target base URL (Scopely dev backend)"
+        required: false
+        type: string
+        default: "https://backend-dev-3144.up.railway.app"
+      manifest_ref:
+        description: "Scopely ref to check out for manifest + scenarios"
+        required: false
+        type: string
+        default: "dev"
+      expected_verdict:
+        description: "Expected verdict (sanity check only; informational)"
+        required: false
+        type: string
+        default: "new-behavior"
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  # ── Step 1: simulate autopilot's validate-api job ────────────────────
+  validate-api:
+    uses: ./.github/workflows/reusable-validate.yml
+    with:
+      preview_url: ${{ inputs.preview_url }}
+      target_env: dev
+      manifest_repo: cloudwarriors-ai/scopely
+      manifest_ref: ${{ inputs.manifest_ref }}
+    secrets:
+      WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
+      VALIDATION_ATTESTATION_KEY: ${{ secrets.VALIDATION_ATTESTATION_KEY }}
+      E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
+      E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+
+  # ── Step 2: simulate shadow-upstream-pr's verifier ───────────────────
+  verify:
+    needs: validate-api
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Locate attestation artifact in this run
+        id: locate
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const { data: artifactsData } = await github.rest.actions.listWorkflowRunArtifacts({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+            });
+            const art = artifactsData.artifacts.find(
+              (a) => a.name.startsWith('sentinel-validation-') && !a.expired
+            );
+            if (!art) {
+              core.setFailed(
+                `No sentinel-validation-* artifact found in run ${context.runId}. ` +
+                `Did validate-api succeed?`
+              );
+              return;
+            }
+            core.setOutput('artifact_name', art.name);
+            core.setOutput('run_id', String(context.runId));
+            console.log(`Found attestation artifact: ${art.name} in run ${context.runId}`);
+
+      - name: Download attestation artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.locate.outputs.artifact_name }}
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.locate.outputs.run_id }}
+          path: /tmp/sentinel-attestation
+
+      - name: Inspect attestation payload
+        run: |
+          set -euo pipefail
+          echo "--- attestation.json ---"
+          cat /tmp/sentinel-attestation/attestation.json
+          echo
+          COMMIT_SHA=$(jq -r .commit_sha /tmp/sentinel-attestation/attestation.json)
+          VERDICT=$(jq -r .verdict /tmp/sentinel-attestation/attestation.json)
+          echo "commit_sha=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+        id: payload
+
+      - name: Fetch shared scripts
+        run: |
+          git clone --depth 1 https://x-access-token:${{ secrets.WORKFLOW_PAT || github.token }}@github.com/cloudwarriors-ai/.github.git /tmp/org-github
+          cd /tmp/org-github/scripts/autopilot && npm install --silent --no-audit --no-fund
+
+      - name: Verify attestation (happy path)
+        env:
+          VALIDATION_ATTESTATION_KEY: ${{ secrets.VALIDATION_ATTESTATION_KEY }}
+          COMMIT_SHA: ${{ steps.payload.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VALIDATION_ATTESTATION_KEY:-}" ]; then
+            echo "::error::VALIDATION_ATTESTATION_KEY missing; cannot verify" >&2
+            exit 1
+          fi
+          cd /tmp/org-github/scripts/autopilot
+          npx tsx validation/attestation.ts verify \
+            --attestation /tmp/sentinel-attestation/attestation.json \
+            --report /tmp/sentinel-attestation/report.json \
+            --commit-sha "$COMMIT_SHA" \
+            --max-age-days 14
+
+      - name: Negative test — wrong commit SHA must fail
+        env:
+          VALIDATION_ATTESTATION_KEY: ${{ secrets.VALIDATION_ATTESTATION_KEY }}
+        run: |
+          set -u
+          cd /tmp/org-github/scripts/autopilot
+          set +e
+          npx tsx validation/attestation.ts verify \
+            --attestation /tmp/sentinel-attestation/attestation.json \
+            --report /tmp/sentinel-attestation/report.json \
+            --commit-sha "0000000000000000000000000000000000000000" \
+            --max-age-days 14
+          EXIT=$?
+          set -e
+          if [ "$EXIT" -eq 0 ]; then
+            echo "::error::Negative test FAILED — verifier accepted wrong commit SHA" >&2
+            exit 1
+          fi
+          echo "Negative test OK — verifier rejected wrong SHA (exit=$EXIT)"
+
+      - name: Negative test — wrong HMAC key must fail
+        env:
+          VALIDATION_ATTESTATION_KEY: "not-the-real-key-deliberately-wrong"
+          COMMIT_SHA: ${{ steps.payload.outputs.commit_sha }}
+        run: |
+          set -u
+          cd /tmp/org-github/scripts/autopilot
+          set +e
+          npx tsx validation/attestation.ts verify \
+            --attestation /tmp/sentinel-attestation/attestation.json \
+            --report /tmp/sentinel-attestation/report.json \
+            --commit-sha "$COMMIT_SHA" \
+            --max-age-days 14
+          EXIT=$?
+          set -e
+          if [ "$EXIT" -eq 0 ]; then
+            echo "::error::Negative test FAILED — verifier accepted wrong HMAC key" >&2
+            exit 1
+          fi
+          echo "Negative test OK — verifier rejected wrong HMAC key (exit=$EXIT)"
+
+      - name: Summary
+        env:
+          VERDICT: ${{ steps.payload.outputs.verdict }}
+          EXPECTED: ${{ inputs.expected_verdict }}
+          PASSED: ${{ needs.validate-api.outputs.api_validation_passed }}
+        run: |
+          echo "## Option A' Verifier Isolation Test — PASS" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- validate-api verdict: \`$VERDICT\` (expected: \`$EXPECTED\`)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- api_validation_passed: \`$PASSED\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- HMAC verify (happy path): OK" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Negative — wrong commit SHA rejected: OK" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Negative — wrong HMAC key rejected: OK" >> "$GITHUB_STEP_SUMMARY"
