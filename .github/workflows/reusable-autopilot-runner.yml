@@ -244,6 +244,9 @@ jobs:
           command_timeout: 15m
           envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD
           script: |
+            cd "$VPS_PATH"
+            git fetch origin dev --depth 1
+            git checkout origin/dev -- scripts/ .autopilot/
             "$VPS_PATH/scripts/preview-deploy.sh" "$DEPLOY_HEAD" "$DEPLOY_ISSUE"
         env:
           GITHUB_TOKEN: ${{ secrets.WORKFLOW_PAT }}
@@ -345,6 +348,9 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           envs: DEPLOY_ISSUE,VPS_PATH
           script: |
+            cd "$VPS_PATH"
+            git fetch origin dev --depth 1
+            git checkout origin/dev -- scripts/ .autopilot/
             "$VPS_PATH/scripts/preview-teardown.sh" "$DEPLOY_ISSUE"
         env:
           DEPLOY_ISSUE: ${{ inputs.issue_number }}
