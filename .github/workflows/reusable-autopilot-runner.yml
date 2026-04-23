@@ -87,6 +87,9 @@ jobs:
       health_endpoint: ${{ steps.config.outputs.health_endpoint }}
       preview_deploy: ${{ steps.config.outputs.preview_deploy }}
       auto_merge: ${{ steps.config.outputs.auto_merge }}
+      runtime: ${{ steps.config.outputs.runtime }}
+      python_version: ${{ steps.config.outputs.python_version }}
+      python_requirements: ${{ steps.config.outputs.python_requirements }}
     steps:
       - name: Checkout caller repo
         uses: actions/checkout@v4
@@ -107,6 +110,9 @@ jobs:
             echo "health_endpoint=$(echo "$CONFIG" | jq -r '.healthEndpoint // "/api/v1/health"')" >> "$GITHUB_OUTPUT"
             echo "preview_deploy=$(echo "$CONFIG" | jq -r '.previewDeploy // false')" >> "$GITHUB_OUTPUT"
             echo "auto_merge=$(echo "$CONFIG" | jq -r '.mergeRequirements.autoMerge // false')" >> "$GITHUB_OUTPUT"
+            echo "runtime=$(echo "$CONFIG" | jq -r '.runtime // ""')" >> "$GITHUB_OUTPUT"
+            echo "python_version=$(echo "$CONFIG" | jq -r '.pythonVersion // "3.11"')" >> "$GITHUB_OUTPUT"
+            echo "python_requirements=$(echo "$CONFIG" | jq -r '.pythonRequirements // "service/requirements.txt"')" >> "$GITHUB_OUTPUT"
           else
             echo "No .autopilot/config.json found — using defaults" >&2
             echo "config_json={}" >> "$GITHUB_OUTPUT"
@@ -117,6 +123,9 @@ jobs:
             echo "health_endpoint=/api/v1/health" >> "$GITHUB_OUTPUT"
             echo "preview_deploy=false" >> "$GITHUB_OUTPUT"
             echo "auto_merge=false" >> "$GITHUB_OUTPUT"
+            echo "runtime=" >> "$GITHUB_OUTPUT"
+            echo "python_version=3.11" >> "$GITHUB_OUTPUT"
+            echo "python_requirements=service/requirements.txt" >> "$GITHUB_OUTPUT"
           fi
 
   # ── Job 3: Validate fix bundle ─────────────────────────────────────
@@ -312,9 +321,28 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install dependencies
+      - name: Install Node dependencies
         run: |
           if [ -f package.json ]; then npm ci; fi
+
+      - name: Setup Python
+        if: needs.read-config.outputs.runtime == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ needs.read-config.outputs.python_version }}
+          cache: pip
+
+      - name: Install Python dependencies
+        if: needs.read-config.outputs.runtime == 'python'
+        env:
+          REQS: ${{ needs.read-config.outputs.python_requirements }}
+        run: |
+          if [ -f "$REQS" ]; then
+            python -m pip install --upgrade pip
+            pip install -r "$REQS"
+          else
+            echo "python requirements file not found at '$REQS' — skipping pip install" >&2
+          fi
 
       - name: Run test command
         id: test
