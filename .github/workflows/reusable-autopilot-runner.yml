@@ -336,7 +336,7 @@ jobs:
   # ── Job 7: Teardown preview ────────────────────────────────────────
   teardown-preview:
     name: "Teardown Preview (#${{ inputs.issue_number }})"
-    needs: [read-config, deploy-preview, test]
+    needs: [read-config, deploy-preview, test, validate-api]
     if: always() && needs.deploy-preview.result != 'skipped'
     runs-on: ubuntu-latest
     timeout-minutes: 5
