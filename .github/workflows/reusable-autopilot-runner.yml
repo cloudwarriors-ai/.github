@@ -227,6 +227,7 @@ jobs:
 
     outputs:
       preview_url: ${{ steps.set-url.outputs.preview_url }}
+      backend_url: ${{ steps.set-url.outputs.backend_url }}
 
     steps:
       - name: Check kill switch
@@ -263,7 +264,9 @@ jobs:
           ISSUE_NUM: ${{ inputs.issue_number }}
         run: |
           PREVIEW_URL="https://preview-${ISSUE_NUM}.pscx.ai"
+          BACKEND_URL="https://preview-${ISSUE_NUM}.api.pscx.ai"
           echo "preview_url=$PREVIEW_URL" >> "$GITHUB_OUTPUT"
+          echo "backend_url=$BACKEND_URL" >> "$GITHUB_OUTPUT"
 
       - name: Verify preview is reachable
         run: |
@@ -366,10 +369,10 @@ jobs:
     if: |
       always() && !cancelled() &&
       needs.deploy-preview.result == 'success' &&
-      needs.deploy-preview.outputs.preview_url != ''
+      needs.deploy-preview.outputs.backend_url != ''
     uses: ./.github/workflows/reusable-validate.yml
     with:
-      preview_url: ${{ needs.deploy-preview.outputs.preview_url }}
+      preview_url: ${{ needs.deploy-preview.outputs.backend_url }}
       target_env: ${{ inputs.base == 'main' && 'production' || 'dev' }}
       issue_number: ${{ inputs.issue_number }}
     secrets:
