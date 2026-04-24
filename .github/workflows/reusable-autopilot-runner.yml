@@ -83,6 +83,7 @@ jobs:
       build_command: ${{ steps.config.outputs.build_command }}
       lint_command: ${{ steps.config.outputs.lint_command }}
       test_command: ${{ steps.config.outputs.test_command }}
+      app_test_command: ${{ steps.config.outputs.app_test_command }}
       db_migrate_command: ${{ steps.config.outputs.db_migrate_command }}
       health_endpoint: ${{ steps.config.outputs.health_endpoint }}
       preview_deploy: ${{ steps.config.outputs.preview_deploy }}
@@ -106,6 +107,11 @@ jobs:
             echo "build_command=$(echo "$CONFIG" | jq -r '.buildCommand // ""')" >> "$GITHUB_OUTPUT"
             echo "lint_command=$(echo "$CONFIG" | jq -r '.lintCommand // ""')" >> "$GITHUB_OUTPUT"
             echo "test_command=$(echo "$CONFIG" | jq -r '.testCommand // ""')" >> "$GITHUB_OUTPUT"
+            # Multi-line command (may contain && or newlines) — emit via heredoc.
+            APP_TEST_CMD=$(echo "$CONFIG" | jq -r '.appTestCommand // ""')
+            echo "app_test_command<<APP_TEST_EOF" >> "$GITHUB_OUTPUT"
+            echo "$APP_TEST_CMD" >> "$GITHUB_OUTPUT"
+            echo "APP_TEST_EOF" >> "$GITHUB_OUTPUT"
             echo "db_migrate_command=$(echo "$CONFIG" | jq -r '.dbMigrateCommand // ""')" >> "$GITHUB_OUTPUT"
             echo "health_endpoint=$(echo "$CONFIG" | jq -r '.healthEndpoint // "/api/v1/health"')" >> "$GITHUB_OUTPUT"
             echo "preview_deploy=$(echo "$CONFIG" | jq -r '.previewDeploy // false')" >> "$GITHUB_OUTPUT"
@@ -119,6 +125,7 @@ jobs:
             echo "build_command=" >> "$GITHUB_OUTPUT"
             echo "lint_command=" >> "$GITHUB_OUTPUT"
             echo "test_command=" >> "$GITHUB_OUTPUT"
+            echo "app_test_command=" >> "$GITHUB_OUTPUT"
             echo "db_migrate_command=" >> "$GITHUB_OUTPUT"
             echo "health_endpoint=/api/v1/health" >> "$GITHUB_OUTPUT"
             echo "preview_deploy=false" >> "$GITHUB_OUTPUT"
@@ -364,7 +371,7 @@ jobs:
   # ── Job 7: Teardown preview ────────────────────────────────────────
   teardown-preview:
     name: "Teardown Preview (#${{ inputs.issue_number }})"
-    needs: [read-config, deploy-preview, test, validate-api]
+    needs: [read-config, deploy-preview, test, validate-api, app-tests]
     if: always() && needs.deploy-preview.result != 'skipped'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -409,10 +416,116 @@ jobs:
       E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
       E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
 
+  # ── Job 7.6: Application test suite (advisory) ─────────────────────
+  # Runs the app's own E2E/integration tests against the live preview.
+  # Advisory — a failure surfaces in the PR body but does not gate merge.
+  # Opt-in per app via `.autopilot/config.json → appTestCommand`.
+  app-tests:
+    name: "App Tests (#${{ inputs.issue_number }})"
+    needs: [read-config, deploy-preview]
+    if: |
+      always() && !cancelled() &&
+      needs.deploy-preview.result == 'success' &&
+      needs.read-config.outputs.app_test_command != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    outputs:
+      app_tests_passed: ${{ steps.result.outputs.app_tests_passed }}
+
+    steps:
+      - name: Checkout fix branch
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.head }}
+          token: ${{ secrets.WORKFLOW_PAT }}
+
+      - name: Fallback to base
+        if: steps.checkout.outcome != 'success'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Node dependencies
+        run: |
+          if [ -f package.json ]; then npm ci; fi
+
+      - name: Install Playwright browsers
+        run: |
+          if [ -f package.json ] && grep -q '"@playwright/test"' package.json 2>/dev/null; then
+            npx --yes playwright install --with-deps chromium
+          fi
+
+      - name: Setup Python
+        if: needs.read-config.outputs.runtime == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ needs.read-config.outputs.python_version }}
+          cache: pip
+
+      - name: Install Python dependencies
+        if: needs.read-config.outputs.runtime == 'python'
+        env:
+          REQS: ${{ needs.read-config.outputs.python_requirements }}
+        run: |
+          if [ -f "$REQS" ]; then
+            python -m pip install --upgrade pip
+            pip install -r "$REQS"
+          fi
+          pip install httpx pytest pytest-asyncio
+
+      - name: Run app test suite
+        id: app-tests
+        continue-on-error: true
+        env:
+          SENTINEL_BASE_URL: ${{ needs.deploy-preview.outputs.backend_url }}
+          TEST_BASE_URL: ${{ needs.deploy-preview.outputs.preview_url }}
+          E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
+          E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+          TEST_USER_EMAIL: ${{ secrets.E2E_EMAIL }}
+          TEST_USER_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+          BROWSERBASE_LOCAL: 'true'
+          CI: 'true'
+          APP_TEST_CMD: ${{ needs.read-config.outputs.app_test_command }}
+        run: |
+          set -o pipefail
+          mkdir -p /tmp/app-tests
+          echo "Running: $APP_TEST_CMD"
+          bash -c "$APP_TEST_CMD" 2>&1 | tee /tmp/app-tests/run.log
+
+      - name: Parse results
+        id: result
+        if: always()
+        run: |
+          if [ "${{ steps.app-tests.outcome }}" = "success" ]; then
+            echo "app_tests_passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "app_tests_passed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload app-test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-tests-${{ inputs.issue_number }}
+          path: |
+            /tmp/app-tests/
+            playwright-report/
+            test-results/
+          retention-days: 90
+          if-no-files-found: ignore
+
   # ── Job 8: Upsert PR and update labels ─────────────────────────────
   finalize:
     name: "Finalize (#${{ inputs.issue_number }})"
-    needs: [rlm-fix, read-config, validate, preflight, test, validate-api]
+    needs: [rlm-fix, read-config, validate, preflight, test, validate-api, app-tests]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -473,6 +586,7 @@ jobs:
           VALIDATION_RESULT: ${{ needs.validate.outputs.validation_passed || 'skipped' }}
           API_VALIDATION_RESULT: ${{ needs.validate-api.outputs.api_validation_passed || 'skipped' }}
           API_VERDICT: ${{ needs.validate-api.outputs.verdict || 'skipped' }}
+          APP_TESTS_RESULT: ${{ needs.app-tests.outputs.app_tests_passed || 'skipped' }}
         run: |
           EXISTING_PR=$(gh pr list --head "$ISSUE_HEAD" --base "$ISSUE_BASE" --json number --jq '.[0].number' 2>/dev/null || echo "")
 
@@ -492,7 +606,8 @@ jobs:
           - Preflight: ${PREFLIGHT_RESULT}
           - Validation (bundle): ${VALIDATION_RESULT}
           - Validation (API — Sentinel): ${API_VALIDATION_RESULT} (verdict: ${API_VERDICT})
-          - Tests: ${TESTS_RESULT}
+          - Tests (unit): ${TESTS_RESULT}
+          - App tests (E2E, advisory): ${APP_TESTS_RESULT}
           - [ ] Human review complete
           PRBODY
           )"
