@@ -432,6 +432,7 @@ jobs:
 
     outputs:
       app_tests_passed: ${{ steps.result.outputs.app_tests_passed }}
+      app_tests_has_regressions: ${{ steps.compare.outputs.has_regressions }}
 
     steps:
       - name: Checkout fix branch
@@ -447,6 +448,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.base }}
+
+      - name: Fetch shared scripts
+        run: |
+          git clone --depth 1 https://x-access-token:${{ secrets.WORKFLOW_PAT }}@github.com/cloudwarriors-ai/.github.git /tmp/org-github
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -508,6 +513,62 @@ jobs:
             echo "app_tests_passed=true" >> "$GITHUB_OUTPUT"
           else
             echo "app_tests_passed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compare against baseline
+        id: compare
+        if: always()
+        continue-on-error: true
+        run: |
+          BASELINE_FILE="tests/sentinel/baseline.json"
+          if [ ! -f "$BASELINE_FILE" ]; then
+            echo "::notice::No baseline at $BASELINE_FILE — first run or baseline not yet committed"
+            echo "has_regressions=false" >> "$GITHUB_OUTPUT"
+            echo "has_report=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ ! -f /tmp/app-tests/pytest.xml ] || [ ! -f /tmp/app-tests/run.log ]; then
+            echo "::warning::Run artifacts missing at /tmp/app-tests/ — skipping comparison"
+            echo "has_regressions=false" >> "$GITHUB_OUTPUT"
+            echo "has_report=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 /tmp/org-github/scripts/autopilot/compare-app-tests.py \
+            --baseline "$BASELINE_FILE" \
+            --pytest-xml /tmp/app-tests/pytest.xml \
+            --playwright-log /tmp/app-tests/run.log \
+            --output /tmp/app-tests/regression-report.md \
+            --step-summary "$GITHUB_STEP_SUMMARY" \
+            --regressions-out /tmp/app-tests/has-regressions.txt
+          echo "has_report=true" >> "$GITHUB_OUTPUT"
+          HAS_REGS=$(cat /tmp/app-tests/has-regressions.txt)
+          echo "has_regressions=${HAS_REGS}" >> "$GITHUB_OUTPUT"
+
+      - name: Post or update regression comment
+        if: always() && steps.compare.outputs.has_regressions == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          HEAD_REF: ${{ inputs.head }}
+          BASE_REF: ${{ inputs.base }}
+        run: |
+          set -euo pipefail
+          PR=$(gh pr list --head "$HEAD_REF" --base "$BASE_REF" --json number --jq '.[0].number' 2>/dev/null || echo "")
+          if [ -z "$PR" ]; then
+            echo "::notice::No open PR for head=$HEAD_REF base=$BASE_REF — regression comment skipped"
+            exit 0
+          fi
+          MARKER="<!-- app-tests-regression-report -->"
+          REPORT_BODY="$(cat /tmp/app-tests/regression-report.md)"
+          BODY="$(printf '%s\n%s' "$MARKER" "$REPORT_BODY")"
+          EXISTING=$(gh api "repos/$GITHUB_REPOSITORY/issues/${PR}/comments" --paginate \
+            --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" | head -n 1 || echo "")
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING" \
+              -f body="$BODY" >/dev/null
+            echo "Updated existing regression comment (id=$EXISTING)"
+          else
+            gh pr comment "$PR" --body "$BODY"
+            echo "Posted new regression comment on PR #$PR"
           fi
 
       - name: Upload app-test artifacts
@@ -587,6 +648,7 @@ jobs:
           API_VALIDATION_RESULT: ${{ needs.validate-api.outputs.api_validation_passed || 'skipped' }}
           API_VERDICT: ${{ needs.validate-api.outputs.verdict || 'skipped' }}
           APP_TESTS_RESULT: ${{ needs.app-tests.outputs.app_tests_passed || 'skipped' }}
+          APP_TESTS_REGRESSIONS: ${{ needs.app-tests.outputs.app_tests_has_regressions || 'n/a' }}
         run: |
           EXISTING_PR=$(gh pr list --head "$ISSUE_HEAD" --base "$ISSUE_BASE" --json number --jq '.[0].number' 2>/dev/null || echo "")
 
@@ -607,7 +669,7 @@ jobs:
           - Validation (bundle): ${VALIDATION_RESULT}
           - Validation (API — Sentinel): ${API_VALIDATION_RESULT} (verdict: ${API_VERDICT})
           - Tests (unit): ${TESTS_RESULT}
-          - App tests (E2E, advisory): ${APP_TESTS_RESULT}
+          - App tests (E2E, advisory): ${APP_TESTS_RESULT} (regressions vs baseline: ${APP_TESTS_REGRESSIONS})
           - [ ] Human review complete
           PRBODY
           )"
