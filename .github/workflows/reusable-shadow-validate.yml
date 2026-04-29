@@ -1,0 +1,249 @@
+name: Shadow Validate (Reusable)
+
+# Validates a shadow fix branch before upstream PR promotion.
+# Exports the shadow fix to a temporary branch on the source repo, deploys an
+# ephemeral preview on the VPS, runs Sentinel API scenarios, tears down, and
+# cleans up the temp branch — producing a sentinel-validation-* attestation
+# artifact that reusable-shadow-upstream-pr.yml verifies before opening an
+# upstream PR.
+#
+# Caller contract:
+#   - shadow_repo must carry .shadow/config.json with sourceRepo + issueMap
+#   - source repo must carry .autopilot/validation.json + validation/scenarios/
+#   - VPS_SSH_HOST, VPS_SSH_USER org vars; VPS_SSH_KEY, WORKFLOW_PAT secrets
+
+on:
+  workflow_call:
+    inputs:
+      shadow_repo:
+        description: 'Full shadow repo name (e.g. cloudwarriors-ai/project-pulse-shadow)'
+        type: string
+        required: true
+      shadow_branch:
+        description: 'Shadow fix branch (e.g. fix/issue-26)'
+        type: string
+        required: true
+      shadow_pr_number:
+        description: 'Shadow PR number (used to fetch the exact PR head commit)'
+        type: number
+        required: true
+    secrets:
+      WORKFLOW_PAT:
+        required: false
+      VALIDATION_ATTESTATION_KEY:
+        required: false
+      VPS_SSH_KEY:
+        required: false
+      E2E_EMAIL:
+        required: false
+      E2E_PASSWORD:
+        required: false
+    outputs:
+      verdict:
+        description: 'Sentinel verdict: unchanged | expected-diff | new-behavior | regression | skipped'
+        value: ${{ jobs.validate.outputs.verdict }}
+      api_validation_passed:
+        description: 'false only when verdict is regression'
+        value: ${{ jobs.validate.outputs.api_validation_passed }}
+
+jobs:
+  # ── Job 1: Export shadow fix → source temp branch → deploy preview ──────────
+  prepare-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    outputs:
+      shadow_issue_number: ${{ steps.prepare.outputs.shadow_issue_number }}
+      source_issue_number: ${{ steps.prepare.outputs.source_issue_number }}
+      source_repo:          ${{ steps.prepare.outputs.source_repo }}
+      upstream_branch:      ${{ steps.prepare.outputs.upstream_branch }}
+      preview_url:          ${{ steps.health.outputs.preview_url }}
+      exported:             ${{ steps.export.outputs.exported }}
+
+    steps:
+      - name: Prepare mapping
+        id: prepare
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const [shadowOwner, shadowRepoName] = '${{ inputs.shadow_repo }}'.split('/');
+            const shadowBranch = '${{ inputs.shadow_branch }}';
+
+            const branchMatch = shadowBranch.match(/fix\/issue-(\d+)/);
+            if (!branchMatch) {
+              core.setFailed(`Branch ${shadowBranch} does not match fix/issue-N pattern`);
+              return;
+            }
+            const shadowIssueNumber = parseInt(branchMatch[1], 10);
+
+            const { data: configFile } = await github.rest.repos.getContent({
+              owner: shadowOwner,
+              repo: shadowRepoName,
+              path: '.shadow/config.json',
+            });
+            const config = JSON.parse(Buffer.from(configFile.content, 'base64').toString());
+            const sourceRepo = config.sourceRepo;
+            const [sourceOwner, sourceRepoName] = sourceRepo.split('/');
+
+            const reverseMap = Object.fromEntries(
+              Object.entries(config.issueMap || {}).map(([src, shad]) => [String(shad), Number(src)])
+            );
+            const sourceIssueNumber = reverseMap[String(shadowIssueNumber)] || shadowIssueNumber;
+
+            const { data: sourceRepoData } = await github.rest.repos.get({
+              owner: sourceOwner,
+              repo: sourceRepoName,
+            });
+            const defaultBranch = sourceRepoData.default_branch;
+
+            core.setOutput('shadow_issue_number', String(shadowIssueNumber));
+            core.setOutput('source_issue_number', String(sourceIssueNumber));
+            core.setOutput('source_repo', sourceRepo);
+            core.setOutput('source_owner', sourceOwner);
+            core.setOutput('source_repo_name', sourceRepoName);
+            core.setOutput('default_branch', defaultBranch);
+            // Use a distinct prefix so teardown can safely delete without touching
+            // real fix branches that might be open on the source repo.
+            core.setOutput('upstream_branch', `shadow-validate-${sourceIssueNumber}`);
+
+      - name: Export shadow fix to temp validation branch on source
+        id: export
+        if: steps.prepare.outputs.source_repo != ''
+        env:
+          WORKFLOW_PAT:        ${{ secrets.WORKFLOW_PAT || github.token }}
+          SOURCE_OWNER:        ${{ steps.prepare.outputs.source_owner }}
+          SOURCE_REPO:         ${{ steps.prepare.outputs.source_repo_name }}
+          UPSTREAM_BRANCH:     ${{ steps.prepare.outputs.upstream_branch }}
+          DEFAULT_BRANCH:      ${{ steps.prepare.outputs.default_branch }}
+          SOURCE_ISSUE_NUMBER: ${{ steps.prepare.outputs.source_issue_number }}
+        run: |
+          set -euo pipefail
+          git config --global user.name  "Shadow Validator"
+          git config --global user.email "claude-bot@anthropic.com"
+
+          git clone --no-tags --branch "$DEFAULT_BRANCH" \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/${SOURCE_OWNER}/${SOURCE_REPO}.git" source
+          git clone --no-tags \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/${{ inputs.shadow_repo }}.git" shadow
+
+          git -C shadow fetch origin main
+          git -C shadow fetch origin "pull/${{ inputs.shadow_pr_number }}/head:shadow-pr-head"
+          git -C source checkout -b "$UPSTREAM_BRANCH" "origin/$DEFAULT_BRANCH"
+
+          git -C shadow diff --binary "origin/main...shadow-pr-head" \
+            -- . \
+            ':(exclude).shadow' \
+            ':(exclude).github/workflows/claude-ci.yml' > /tmp/shadow-fix.patch
+
+          if [ ! -s /tmp/shadow-fix.patch ]; then
+            echo "::warning::No source-app changes to export — skipping preview deploy"
+            echo "exported=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git -C source apply --index --3way /tmp/shadow-fix.patch
+
+          if [ -z "$(git -C source status --porcelain)" ]; then
+            echo "::warning::Patch applied but produced no diff — skipping preview deploy"
+            echo "exported=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git -C source commit -m "chore: temp shadow-validate branch for source #${SOURCE_ISSUE_NUMBER}"
+          git -C source push origin "HEAD:${UPSTREAM_BRANCH}" --force-with-lease
+          echo "exported=true" >> "$GITHUB_OUTPUT"
+          echo "Exported fix to ${SOURCE_OWNER}/${SOURCE_REPO}:${UPSTREAM_BRANCH}"
+
+      - name: Deploy preview on VPS
+        id: deploy
+        if: steps.export.outputs.exported == 'true'
+        uses: appleboy/ssh-action@v1
+        env:
+          DEPLOY_HEAD:  ${{ steps.prepare.outputs.upstream_branch }}
+          DEPLOY_ISSUE: ${{ steps.prepare.outputs.shadow_issue_number }}
+          VPS_PATH:     ${{ vars.VPS_REPO_PATH }}
+        with:
+          host:     ${{ vars.VPS_SSH_HOST }}
+          username: ${{ vars.VPS_SSH_USER }}
+          key:      ${{ secrets.VPS_SSH_KEY }}
+          envs:     DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH
+          script: |
+            cd "$VPS_PATH"
+            git fetch origin "$DEPLOY_HEAD"
+            "$VPS_PATH/scripts/preview-deploy.sh" "$DEPLOY_HEAD" "$DEPLOY_ISSUE"
+
+      - name: Wait for preview healthy
+        id: health
+        if: steps.deploy.outcome == 'success'
+        run: |
+          set -euo pipefail
+          ISSUE="${{ steps.prepare.outputs.shadow_issue_number }}"
+          HEALTH_URL="https://preview-${ISSUE}.pscx.ai/api/v1/health"
+          echo "Polling ${HEALTH_URL} for up to 150 seconds..."
+          for i in $(seq 1 30); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "${HEALTH_URL}" 2>/dev/null || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              echo "Preview healthy after $((i * 5))s"
+              echo "preview_url=https://preview-${ISSUE}.pscx.ai" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Preview not healthy after 150s — aborting validation"
+          exit 1
+
+  # ── Job 2: Validate — Sentinel API-driven scenarios ──────────────────────
+  validate:
+    name: Sentinel validation
+    needs: prepare-and-deploy
+    if: needs.prepare-and-deploy.outputs.preview_url != ''
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-validate.yml@main
+    with:
+      preview_url:   ${{ needs.prepare-and-deploy.outputs.preview_url }}
+      manifest_repo: ${{ needs.prepare-and-deploy.outputs.source_repo }}
+      issue_number:  ${{ needs.prepare-and-deploy.outputs.shadow_issue_number }}
+    secrets:
+      WORKFLOW_PAT:               ${{ secrets.WORKFLOW_PAT }}
+      VALIDATION_ATTESTATION_KEY: ${{ secrets.VALIDATION_ATTESTATION_KEY }}
+      E2E_EMAIL:                  ${{ secrets.E2E_EMAIL }}
+      E2E_PASSWORD:               ${{ secrets.E2E_PASSWORD }}
+
+  # ── Job 3: Teardown — always runs to clean up preview + temp branch ──────
+  teardown:
+    name: Teardown preview
+    needs: [prepare-and-deploy, validate]
+    if: always() && needs.prepare-and-deploy.outputs.exported == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Teardown preview on VPS
+        uses: appleboy/ssh-action@v1
+        env:
+          DEPLOY_ISSUE: ${{ needs.prepare-and-deploy.outputs.shadow_issue_number }}
+          VPS_PATH:     ${{ vars.VPS_REPO_PATH }}
+        with:
+          host:     ${{ vars.VPS_SSH_HOST }}
+          username: ${{ vars.VPS_SSH_USER }}
+          key:      ${{ secrets.VPS_SSH_KEY }}
+          envs:     DEPLOY_ISSUE,VPS_PATH
+          script: |
+            cd "$VPS_PATH"
+            "$VPS_PATH/scripts/preview-teardown.sh" "$DEPLOY_ISSUE" 2>/dev/null || true
+
+      - name: Delete temp validation branch from source repo
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const sourceRepo = '${{ needs.prepare-and-deploy.outputs.source_repo }}';
+            const upstreamBranch = '${{ needs.prepare-and-deploy.outputs.upstream_branch }}';
+            if (!sourceRepo || !upstreamBranch.startsWith('shadow-validate-')) return;
+            const [owner, repo] = sourceRepo.split('/');
+            try {
+              await github.rest.git.deleteRef({ owner, repo, ref: `heads/${upstreamBranch}` });
+              console.log(`Deleted temp branch ${upstreamBranch} from ${sourceRepo}`);
+            } catch (e) {
+              console.log(`Could not delete temp branch (may not exist): ${e.message}`);
+            }
