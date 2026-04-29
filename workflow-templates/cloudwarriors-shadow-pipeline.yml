@@ -19,7 +19,7 @@ on:
     - cron: '15 * * * *'
 
   pull_request:
-    types: [closed]
+    types: [closed, opened, synchronize, reopened]
 
   workflow_dispatch:
     inputs:
@@ -89,4 +89,42 @@ jobs:
       shadow_branch: ${{ github.event.pull_request.head.ref }}
       source_issue_notification_mode: 'comment'
       source_pr_review_mode: 'advisory'
+    secrets: inherit
+
+  # Resolve shadow issue → source issue mapping for PR validation trigger
+  resolve-for-validate:
+    if: >
+      github.event_name == 'pull_request' &&
+      (github.event.action == 'opened' ||
+       github.event.action == 'synchronize' ||
+       github.event.action == 'reopened') &&
+      startsWith(github.event.pull_request.head.ref, 'fix/issue-')
+    runs-on: ubuntu-latest
+    outputs:
+      shadow_issue_number: ${{ steps.resolve.outputs.shadow_issue_number }}
+    steps:
+      - name: Resolve issue number from branch
+        id: resolve
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const branch = '${{ github.event.pull_request.head.ref }}';
+            const match = branch.match(/fix\/issue-(\d+)/);
+            if (!match) {
+              core.setFailed(`Cannot extract issue number from branch: ${branch}`);
+              return;
+            }
+            core.setOutput('shadow_issue_number', match[1]);
+
+  # Deploy preview + Sentinel validation → produces sentinel-validation-* attestation
+  # that reusable-shadow-upstream-pr.yml verifies before opening upstream PR.
+  validate-fix:
+    needs: resolve-for-validate
+    if: needs.resolve-for-validate.result == 'success'
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-shadow-validate.yml@main
+    with:
+      shadow_repo:      ${{ github.repository }}
+      shadow_branch:    ${{ github.event.pull_request.head.ref }}
+      shadow_pr_number: ${{ github.event.pull_request.number }}
     secrets: inherit
