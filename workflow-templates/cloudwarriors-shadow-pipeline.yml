@@ -7,6 +7,8 @@ name: Shadow Pipeline
 # - New source issues sync into shadow but do not auto-run unless one of those triggers is used.
 # - Nothing is pushed back to the source repo until a shadow fix PR merges.
 # - A merged shadow fix opens an upstream source PR, comments on the source issue, and can run advisory PR review.
+# - When a fix/issue-N PR merges, validate-fix runs FIRST (deploy preview + Sentinel), then upstream-pr
+#   runs in the same workflow run — so the attestation artifact is always findable by upstream-pr's lookup.
 
 on:
   issues:
@@ -19,7 +21,7 @@ on:
     - cron: '15 * * * *'
 
   pull_request:
-    types: [closed, opened, synchronize, reopened]
+    types: [closed]
 
   workflow_dispatch:
     inputs:
@@ -75,29 +77,13 @@ jobs:
       shadow_repo: ${{ github.repository }}
     secrets: inherit
 
-  # Open upstream PR when fix/issue-N merges into the shadow default branch.
-  upstream-pr:
+  # Resolve shadow issue number from the merged fix branch name.
+  # Runs on the same closed+merged event as validate-fix and upstream-pr.
+  resolve-for-validate:
     if: >
       github.event_name == 'pull_request' &&
       github.event.action == 'closed' &&
       github.event.pull_request.merged == true &&
-      startsWith(github.event.pull_request.head.ref, 'fix/issue-')
-    uses: cloudwarriors-ai/.github/.github/workflows/reusable-shadow-upstream-pr.yml@main
-    with:
-      shadow_repo: ${{ github.repository }}
-      shadow_pr_number: ${{ github.event.pull_request.number }}
-      shadow_branch: ${{ github.event.pull_request.head.ref }}
-      source_issue_notification_mode: 'comment'
-      source_pr_review_mode: 'advisory'
-    secrets: inherit
-
-  # Resolve shadow issue → source issue mapping for PR validation trigger
-  resolve-for-validate:
-    if: >
-      github.event_name == 'pull_request' &&
-      (github.event.action == 'opened' ||
-       github.event.action == 'synchronize' ||
-       github.event.action == 'reopened') &&
       startsWith(github.event.pull_request.head.ref, 'fix/issue-')
     runs-on: ubuntu-latest
     outputs:
@@ -117,8 +103,10 @@ jobs:
             }
             core.setOutput('shadow_issue_number', match[1]);
 
-  # Deploy preview + Sentinel validation → produces sentinel-validation-* attestation
-  # that reusable-shadow-upstream-pr.yml verifies before opening upstream PR.
+  # Deploy preview + Sentinel validation on the merged fix — produces the
+  # sentinel-validation-* attestation artifact that upstream-pr verifies.
+  # Runs in the same workflow run as upstream-pr so the artifact is immediately
+  # findable via listWorkflowRunArtifacts on this run's ID.
   validate-fix:
     needs: resolve-for-validate
     if: needs.resolve-for-validate.result == 'success'
@@ -127,4 +115,24 @@ jobs:
       shadow_repo:      ${{ github.repository }}
       shadow_branch:    ${{ github.event.pull_request.head.ref }}
       shadow_pr_number: ${{ github.event.pull_request.number }}
+    secrets: inherit
+
+  # Open upstream PR after validate-fix completes.
+  # upstream-pr's attestation lookup will find the artifact from validate-fix
+  # (same run → same head_sha → artifact visible via listWorkflowRunArtifacts).
+  upstream-pr:
+    needs: [validate-fix]
+    if: >
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'fix/issue-') &&
+      (needs.validate-fix.result == 'success' || needs.validate-fix.result == 'failure')
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-shadow-upstream-pr.yml@main
+    with:
+      shadow_repo: ${{ github.repository }}
+      shadow_pr_number: ${{ github.event.pull_request.number }}
+      shadow_branch: ${{ github.event.pull_request.head.ref }}
+      source_issue_notification_mode: 'comment'
+      source_pr_review_mode: 'advisory'
     secrets: inherit
