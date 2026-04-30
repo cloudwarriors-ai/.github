@@ -117,17 +117,20 @@ jobs:
       shadow_pr_number: ${{ github.event.pull_request.number }}
     secrets: inherit
 
-  # Open upstream PR after validate-fix completes.
+  # Open upstream PR after validate-fix completes (success or failure).
   # upstream-pr's attestation lookup will find the artifact from validate-fix
   # (same run → same head_sha → artifact visible via listWorkflowRunArtifacts).
+  # Uses always() so it runs even when validate-fix fails — the attestation
+  # check inside reusable-shadow-upstream-pr.yml is the fail-closed gate.
   upstream-pr:
-    needs: [validate-fix]
-    if: >
+    needs: [resolve-for-validate, validate-fix]
+    if: |
+      always() &&
       github.event_name == 'pull_request' &&
       github.event.action == 'closed' &&
       github.event.pull_request.merged == true &&
       startsWith(github.event.pull_request.head.ref, 'fix/issue-') &&
-      (needs.validate-fix.result == 'success' || needs.validate-fix.result == 'failure')
+      needs.resolve-for-validate.result == 'success'
     uses: cloudwarriors-ai/.github/.github/workflows/reusable-shadow-upstream-pr.yml@main
     with:
       shadow_repo: ${{ github.repository }}
