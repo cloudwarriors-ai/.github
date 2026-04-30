@@ -83,7 +83,7 @@ jobs:
               owner: 'cloudwarriors-ai',
               repo: '.github',
               path: 'workflow-templates/cloudwarriors-shadow-pipeline.yml',
-              ref: '${{ steps.meta.outputs.workflow_repo_ref }}',
+              ref: 'main',
             });
 
             fs.writeFileSync(
@@ -140,7 +140,7 @@ jobs:
               owner: 'cloudwarriors-ai',
               repo: '.github',
               workflow_id: 'reusable-shadow-detect-runtime.yml',
-              ref: '${{ steps.meta.outputs.workflow_repo_ref }}',
+              ref: 'main',
               inputs: {
                 shadow_repo: '${{ inputs.shadow_repo }}',
                 shadow_repo_ref: '${{ steps.meta.outputs.shadow_default_branch }}',
