@@ -262,7 +262,30 @@ jobs:
           echo "state=$STATE" >> "$GITHUB_OUTPUT"
           echo "run=$RUN" >> "$GITHUB_OUTPUT"
 
-      # ── 7. Run Sentinel against localhost:9002 ────────────────────────────
+      # ── 7. Ensure manifest has required fields (bootstrap compat) ───────────
+      - name: Patch manifest bootstrap fields
+        if: steps.state.outputs.run == 'true'
+        env:
+          MANIFEST_PATH: source/.autopilot/validation.json
+          PREVIEW_URL: http://localhost:9002
+        run: |
+          python3 - "$MANIFEST_PATH" "$PREVIEW_URL" << 'PY'
+          import json, sys, pathlib
+          path = pathlib.Path(sys.argv[1])
+          url = sys.argv[2]
+          m = json.loads(path.read_text())
+          changed = False
+          if not m.get("baseUrlTemplate"):
+              m["baseUrlTemplate"] = url
+              changed = True
+          if changed:
+              path.write_text(json.dumps(m, indent=2) + "\n")
+              print(f"Patched manifest: added baseUrlTemplate={url}")
+          else:
+              print("Manifest already has baseUrlTemplate")
+          PY
+
+      # ── 8. Run Sentinel against localhost:9002 ────────────────────────────
       - name: Run Sentinel validation
         id: run
         if: steps.state.outputs.run == 'true'
@@ -367,3 +390,4 @@ jobs:
         run: |
           echo "::error::Sentinel verdict=${{ steps.emit.outputs.verdict }} — upstream PR blocked"
           exit 1
+
