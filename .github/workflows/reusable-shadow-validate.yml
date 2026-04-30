@@ -152,33 +152,36 @@ jobs:
         id: start-app
         if: steps.patch.outputs.patched == 'true'
         working-directory: source
-        env:
-          HOST_UID: ${{ '0' }}
-          HOST_GID: ${{ '0' }}
-          CI: "true"
-          POSTGRES_USER: projectpulse
-          POSTGRES_PASSWORD: projectpulse_dev_pass
-          POSTGRES_DB: projectpulse_ci
-          DATABASE_URL: postgresql://projectpulse:projectpulse_dev_pass@postgres:5432/projectpulse_ci
-          BOOTSTRAP_MODE: auto
-          BOOTSTRAP_BUILD: auto
-          BOOTSTRAP_DB_PUSH: "false"
-          BOOTSTRAP_DB_SYNC_MODE: migrate-deploy
-          BOOTSTRAP_WAIT_FOR_DB: "true"
-          AUTH_USE_SECURE_COOKIES: "false"
-          AUTH_SECRET: shadow-validate-ci-secret
-          NEXTAUTH_URL: http://localhost:9002
-          NEXTAUTH_URL_INTERNAL: http://localhost:9002
-          AUTH_URL: http://localhost:9002
-          SURVEY_LINK_SIGNING_SECRET: shadow-validate-survey-secret
-          RATE_LIMIT_DEV_MODE: "true"
-          COMPOSE_PROJECT_NAME: shadow-validate-${{ github.run_id }}
         run: |
+          set -euo pipefail
           mkdir -p .cache/docker/node_modules .cache/docker/next .cache/npm
-          # Start postgres + app in background (no PULSE_RUN_CMD = server mode)
+
+          export HOST_UID="$(id -u)"
+          export HOST_GID="$(id -g)"
+          export CI="true"
+          export POSTGRES_USER="projectpulse"
+          export POSTGRES_PASSWORD="projectpulse_dev_pass"
+          export POSTGRES_DB="projectpulse_ci"
+          export DATABASE_URL="postgresql://projectpulse:projectpulse_dev_pass@postgres:5432/projectpulse_ci"
+          export BOOTSTRAP_MODE="auto"
+          export BOOTSTRAP_BUILD="auto"
+          export BOOTSTRAP_DB_PUSH="false"
+          export BOOTSTRAP_DB_SYNC_MODE="migrate-deploy"
+          export BOOTSTRAP_WAIT_FOR_DB="true"
+          export AUTH_USE_SECURE_COOKIES="false"
+          export AUTH_SECRET="shadow-validate-ci-secret"
+          export NEXTAUTH_SECRET="shadow-validate-ci-secret"
+          export NEXTAUTH_URL="http://localhost:9002"
+          export NEXTAUTH_URL_INTERNAL="http://localhost:9002"
+          export AUTH_URL="http://localhost:9002"
+          export SURVEY_LINK_SIGNING_SECRET="shadow-validate-survey-secret"
+          export RATE_LIMIT_DEV_MODE="true"
+          export COMPOSE_PROJECT_NAME="shadow-validate-${{ github.run_id }}"
+          # Keep the server running after bootstrap — do not run tests
+          export PULSE_RUN_CMD="node .next/standalone/server.js"
+
           docker compose -f docker-compose.dev.yml --profile ci \
             up -d --build pulse-dev postgres
-          echo "compose_project=shadow-validate-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
 
       # ── 4. Wait for the app to be healthy at localhost:9002 ──────────────
       - name: Wait for app healthy
