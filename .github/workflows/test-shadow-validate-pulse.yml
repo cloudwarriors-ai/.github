@@ -1,0 +1,28 @@
+name: "Test: Shadow Validate Project-Pulse (manual dispatch)"
+
+# Temporary dispatch workflow to test reusable-shadow-validate.yml
+# against project-pulse-shadow without requiring a PR merge.
+# Delete after Task #39 validation exercise is complete.
+
+on:
+  workflow_dispatch:
+    inputs:
+      shadow_branch:
+        description: "Shadow fix branch to validate"
+        required: true
+        type: string
+        default: "fix/issue-35"
+      shadow_pr_number:
+        description: "PR number for the shadow fix branch"
+        required: true
+        type: string
+        default: "124"
+
+jobs:
+  validate-fix:
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-shadow-validate.yml@main
+    with:
+      shadow_repo: cloudwarriors-ai/project-pulse-shadow
+      shadow_branch: ${{ inputs.shadow_branch }}
+      shadow_pr_number: ${{ fromJSON(inputs.shadow_pr_number) }}
+    secrets: inherit
