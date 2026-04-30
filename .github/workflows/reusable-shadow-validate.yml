@@ -96,12 +96,22 @@ jobs:
             });
             const defaultBranch = sourceRepoData.default_branch;
 
+            // Fetch the PR's base SHA so we diff only what the PR changed —
+            // not the entire divergence between shadow's main and upstream/main.
+            const { data: prData } = await github.rest.pulls.get({
+              owner: shadowOwner,
+              repo: shadowRepoName,
+              pull_number: ${{ inputs.shadow_pr_number }},
+            });
+            const prBaseSha = prData.base.sha;
+
             core.setOutput('shadow_issue_number', String(shadowIssueNumber));
             core.setOutput('source_issue_number', String(sourceIssueNumber));
             core.setOutput('source_repo', sourceRepo);
             core.setOutput('source_owner', sourceOwner);
             core.setOutput('source_repo_name', sourceRepoName);
             core.setOutput('default_branch', defaultBranch);
+            core.setOutput('pr_base_sha', prBaseSha);
             // Use a distinct prefix so teardown can safely delete without touching
             // real fix branches that might be open on the source repo.
             core.setOutput('upstream_branch', `shadow-validate-${sourceIssueNumber}`);
@@ -116,6 +126,7 @@ jobs:
           UPSTREAM_BRANCH:     ${{ steps.prepare.outputs.upstream_branch }}
           DEFAULT_BRANCH:      ${{ steps.prepare.outputs.default_branch }}
           SOURCE_ISSUE_NUMBER: ${{ steps.prepare.outputs.source_issue_number }}
+          PR_BASE_SHA:         ${{ steps.prepare.outputs.pr_base_sha }}
         run: |
           set -euo pipefail
           git config --global user.name  "Shadow Validator"
@@ -123,14 +134,17 @@ jobs:
 
           git clone --no-tags --branch "$DEFAULT_BRANCH" \
             "https://x-access-token:${WORKFLOW_PAT}@github.com/${SOURCE_OWNER}/${SOURCE_REPO}.git" source
+          # Clone default branch (upstream/main) so PR_BASE_SHA is already present
           git clone --no-tags \
             "https://x-access-token:${WORKFLOW_PAT}@github.com/${{ inputs.shadow_repo }}.git" shadow
 
-          git -C shadow fetch origin main
+          # Fetch the exact PR head commit
           git -C shadow fetch origin "pull/${{ inputs.shadow_pr_number }}/head:shadow-pr-head"
           git -C source checkout -b "$UPSTREAM_BRANCH" "origin/$DEFAULT_BRANCH"
 
-          git -C shadow diff --binary "origin/main...shadow-pr-head" \
+          # Diff from the PR's actual base SHA — captures only what the PR changed,
+          # not the entire divergence between shadow's main and upstream/main branches.
+          git -C shadow diff --binary "${PR_BASE_SHA}...shadow-pr-head" \
             -- . \
             ':(exclude).shadow' \
             ':(exclude).github/workflows/claude-ci.yml' > /tmp/shadow-fix.patch
