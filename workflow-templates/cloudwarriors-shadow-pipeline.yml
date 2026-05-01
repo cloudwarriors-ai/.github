@@ -3,13 +3,14 @@ name: Shadow Pipeline
 # Installed in cloudwarriors-ai shadow repos.
 #
 # Operator contract:
-# - AUTOFIX: Ready on a shadow issue is the automation trigger (added by sync when AUTOQUEUE_ENABLED=true,
-#   or manually added by a human/agent).
+# - AUTOFIX: Ready on a shadow issue triggers the autopilot pipeline.
 # - Source repo does NOT execute autofix — shadow repo is the sole execution path.
-# - Sentinel validation runs PRE-merge (Docker-based, no VPS required).
-# - A shadow fix PR merges only after Sentinel passes.
-# - After merge, upstream-pr opens a PR on the source repo from the validated diff.
-# - Source issue is updated with shadow issue, shadow PR, validation status, and upstream PR links.
+# - Shadow runner runs the full pipeline: RLM fix, validate, preflight, preview deploy,
+#   Sentinel (validate-api), and finalize. PR is only opened when required gates pass.
+# - autoMerge: true in .autopilot/config.json causes the runner to auto-merge the
+#   shadow fix PR immediately after opening it (all gates already passed in-runner).
+# - After merge, upstream-pr promotes the validated diff to the source repo.
+# - Source issue is updated with shadow issue, shadow PR, and upstream PR links.
 #
 # AUTOQUEUE_ENABLED repo variable (set in shadow repo Settings → Actions → Variables):
 #   true  — issue sync automatically stamps AUTOFIX: Ready on shadow issues where source has it
@@ -26,7 +27,7 @@ on:
     - cron: '15 * * * *'
 
   pull_request:
-    types: [opened, synchronize, closed]
+    types: [closed]
 
   workflow_dispatch:
     inputs:
@@ -39,6 +40,9 @@ jobs:
 
   # ── Autofix trigger ──────────────────────────────────────────────────────────
   # AUTOFIX: Ready label → intake resolves context and dispatches autopilot-runner.yml.
+  # The runner runs the full pipeline: fix, validate, preflight, preview deploy,
+  # Sentinel validation, finalize. PR is opened only when required gates pass.
+  # autoMerge: true in config causes the runner to merge the PR immediately after.
   # Manual @claude comment is also accepted for one-off runs.
   handle-issue:
     if: >
@@ -83,66 +87,12 @@ jobs:
       autoqueue_enabled: ${{ vars.AUTOQUEUE_ENABLED || 'false' }}
     secrets: inherit
 
-  # ── Pre-merge validation ─────────────────────────────────────────────────────
-  # Runs Sentinel against a Docker preview of the fix before the shadow PR can merge.
-  # Produces the sentinel-validation-* attestation artifact that upstream-pr verifies.
-  # Triggered on PR open and re-run on any new push to the fix branch.
-  shadow-validate:
-    if: >
-      github.event_name == 'pull_request' &&
-      (github.event.action == 'opened' || github.event.action == 'synchronize') &&
-      startsWith(github.event.pull_request.head.ref, 'fix/issue-')
-    uses: cloudwarriors-ai/.github/.github/workflows/reusable-shadow-validate.yml@main
-    with:
-      shadow_repo:      ${{ github.repository }}
-      shadow_branch:    ${{ github.event.pull_request.head.ref }}
-      shadow_pr_number: ${{ github.event.pull_request.number }}
-    secrets: inherit
-
-  # ── Merge shadow PR after Sentinel passes ────────────────────────────────────
-  # Squash-merges the fix PR only when shadow-validate reports api_validation_passed=true.
-  # Skipped verdicts (no app changes, validation exempt) are treated as pass.
-  merge-shadow-pr:
-    needs: shadow-validate
-    if: >
-      always() &&
-      github.event_name == 'pull_request' &&
-      (github.event.action == 'opened' || github.event.action == 'synchronize') &&
-      startsWith(github.event.pull_request.head.ref, 'fix/issue-') &&
-      needs.shadow-validate.result == 'success' &&
-      needs.shadow-validate.outputs.api_validation_passed == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Merge shadow PR
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
-          script: |
-            const pr = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: ${{ github.event.pull_request.number }},
-            });
-
-            if (pr.data.state !== 'open') {
-              console.log(`PR #${{ github.event.pull_request.number }} is already ${pr.data.state} — skipping merge`);
-              return;
-            }
-
-            await github.rest.pulls.merge({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: ${{ github.event.pull_request.number }},
-              merge_method: 'squash',
-              commit_title: `fix: shadow autofix for ${{ github.event.pull_request.head.ref }}`,
-            });
-            console.log(`Shadow PR #${{ github.event.pull_request.number }} merged — Sentinel validation passed`);
-
   # ── Upstream PR promotion ────────────────────────────────────────────────────
-  # After the shadow fix PR merges, export the validated diff to the source repo
-  # as an upstream PR. upstream-pr locates the attestation artifact by head SHA,
-  # so it finds the one produced by shadow-validate (pre-merge, different run).
+  # After the shadow fix PR merges (auto-merged by runner after all gates pass),
+  # export the validated diff to the source repo as an upstream PR.
+  # upstream-pr locates the Sentinel attestation artifact by head SHA — it finds
+  # the one produced by the runner's validate-api job in the same run that opened
+  # and merged the shadow PR.
   upstream-pr:
     if: >
       github.event_name == 'pull_request' &&
