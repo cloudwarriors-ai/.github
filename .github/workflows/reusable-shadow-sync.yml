@@ -87,6 +87,7 @@ jobs:
             };
             await ensureLabel('shadow', '0075ca', 'Issue mirrored from an external source repo');
             await ensureLabel('AUTOFIX: Ready', '2da44e', 'Opt-in automated fix trigger for shadow issues');
+            await ensureLabel('autopilot', '5319e7', 'PR created by autopilot runner');
 
             // ── 3. Fetch all issues from source (paginated) ──────────────────
             let page = 1, allIssues = [];

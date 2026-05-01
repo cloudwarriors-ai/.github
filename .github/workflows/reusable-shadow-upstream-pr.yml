@@ -64,7 +64,7 @@ jobs:
             const shadowPrNumber = ${{ inputs.shadow_pr_number }};
             const shadowBranch = '${{ inputs.shadow_branch }}';
 
-            const branchMatch = shadowBranch.match(/fix\/issue-(\d+)/);
+            const branchMatch = shadowBranch.match(/(?:auto)?fix\/issue-(\d+)/);
             if (!branchMatch) {
               core.warning(`Branch ${shadowBranch} does not match fix/issue-N pattern; skipping upstream PR`);
               return;
