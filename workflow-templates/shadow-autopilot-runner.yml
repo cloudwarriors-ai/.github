@@ -1,0 +1,43 @@
+name: "Autopilot: Runner"
+
+# Deployed into shadow repos by reusable-shadow-code-sync.yml.
+# Receives dispatch from reusable-autopilot-intake.yml and delegates to the
+# shared reusable runner. Shadow repos disable VPS preview deploy via
+# .autopilot/config.json (previewDeploy: false) — Sentinel validation runs
+# pre-merge via the shadow-validate job in the shadow pipeline instead.
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'Issue number to fix'
+        required: true
+        type: string
+      issue_title:
+        description: 'Issue title (for context)'
+        required: false
+        type: string
+        default: ''
+      track:
+        description: 'Track: bugs or features'
+        required: true
+        type: string
+      base:
+        description: 'Base branch'
+        required: true
+        type: string
+      head:
+        description: 'Head branch (autofix/issue-<id>)'
+        required: true
+        type: string
+
+jobs:
+  run:
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-autopilot-runner.yml@main
+    with:
+      issue_number: ${{ github.event.inputs.issue_number }}
+      issue_title:  ${{ github.event.inputs.issue_title }}
+      track:        ${{ github.event.inputs.track }}
+      base:         ${{ github.event.inputs.base }}
+      head:         ${{ github.event.inputs.head }}
+    secrets: inherit
