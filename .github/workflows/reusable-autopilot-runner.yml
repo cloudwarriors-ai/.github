@@ -246,8 +246,11 @@ jobs:
     environment: ${{ inputs.base == 'main' && 'production' || 'dev' }}
 
     outputs:
-      preview_url: ${{ steps.set-url.outputs.preview_url }}
-      backend_url: ${{ steps.set-url.outputs.backend_url }}
+      preview_url:  ${{ steps.set-url.outputs.preview_url }}
+      backend_url:  ${{ steps.set-url.outputs.backend_url }}
+      # source_repo is set on shadow runs; empty on non-shadow. Used by validate-api
+      # to point Sentinel's manifest checkout at the source repo (which has validation.json).
+      source_repo:  ${{ steps.shadow-prep.outputs.source_repo }}
 
     steps:
       - name: Check kill switch
@@ -491,9 +494,13 @@ jobs:
       needs.deploy-preview.outputs.backend_url != ''
     uses: ./.github/workflows/reusable-validate.yml
     with:
-      preview_url: ${{ needs.deploy-preview.outputs.backend_url }}
-      target_env: ${{ inputs.base == 'main' && 'production' || 'dev' }}
-      issue_number: ${{ inputs.issue_number }}
+      preview_url:   ${{ needs.deploy-preview.outputs.backend_url }}
+      target_env:    ${{ inputs.base == 'main' && 'production' || 'dev' }}
+      issue_number:  ${{ inputs.issue_number }}
+      # For shadow runs, the validation manifest lives in the source repo, not the shadow.
+      # source_repo is empty on non-shadow runs, so manifest_repo defaults to caller repo.
+      manifest_repo: ${{ needs.deploy-preview.outputs.source_repo }}
+      manifest_ref:  ${{ inputs.base }}
     secrets:
       WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
       VALIDATION_ATTESTATION_KEY: ${{ secrets.VALIDATION_ATTESTATION_KEY }}
