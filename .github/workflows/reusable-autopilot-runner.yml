@@ -252,6 +252,34 @@ jobs:
           echo "Deploy disabled for this environment"
           exit 1
 
+      - name: Push shadow branch to source repo for VPS deploy
+        id: shadow-prep
+        if: contains(github.repository, '-shadow')
+        env:
+          WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
+          HEAD_BRANCH: ${{ inputs.head }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          git config --global user.name "Claude Code Bot"
+          git config --global user.email "claude-bot@anthropic.com"
+
+          SHADOW_REPO="${{ github.repository }}"
+          SOURCE_REPO="${SHADOW_REPO%-shadow}"
+          PREVIEW_BRANCH="shadow-preview/issue-${ISSUE_NUM}"
+
+          git clone --branch "$HEAD_BRANCH" --depth 1 \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/${SHADOW_REPO}.git" shadow-fix
+
+          cd shadow-fix
+          git remote add source \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/${SOURCE_REPO}.git"
+          git push source "HEAD:refs/heads/${PREVIEW_BRANCH}" --force
+
+          echo "deploy_head=${PREVIEW_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "source_repo=${SOURCE_REPO}" >> "$GITHUB_OUTPUT"
+          echo "Pushed ${HEAD_BRANCH} → ${SOURCE_REPO}:${PREVIEW_BRANCH}"
+
       - name: Deploy preview to VPS
         uses: appleboy/ssh-action@v1
         with:
@@ -267,7 +295,7 @@ jobs:
             "$VPS_PATH/scripts/preview-deploy.sh" "$DEPLOY_HEAD" "$DEPLOY_ISSUE"
         env:
           GITHUB_TOKEN: ${{ secrets.WORKFLOW_PAT }}
-          DEPLOY_HEAD: ${{ inputs.head }}
+          DEPLOY_HEAD: ${{ steps.shadow-prep.outputs.deploy_head || inputs.head }}
           DEPLOY_ISSUE: ${{ inputs.issue_number }}
           VPS_PATH: ${{ vars.VPS_REPO_PATH }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -393,6 +421,20 @@ jobs:
         env:
           DEPLOY_ISSUE: ${{ inputs.issue_number }}
           VPS_PATH: ${{ vars.VPS_REPO_PATH }}
+
+      - name: Delete shadow preview branch from source repo
+        if: contains(github.repository, '-shadow')
+        env:
+          WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
+        run: |
+          SOURCE_REPO="${{ github.repository }}"
+          SOURCE_REPO="${SOURCE_REPO%-shadow}"
+          PREVIEW_BRANCH="shadow-preview/issue-${ISSUE_NUM}"
+          git push \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/${SOURCE_REPO}.git" \
+            --delete "${PREVIEW_BRANCH}" 2>/dev/null || true
+          echo "Cleaned up ${SOURCE_REPO}:${PREVIEW_BRANCH}"
 
   # ── Job 7.5: API-driven behavioral validation ──────────────────────
   # Runs Sentinel scenarios against the deployed preview. Emits a verdict
