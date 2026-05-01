@@ -334,7 +334,9 @@ jobs:
           ISSUE_NUM: ${{ inputs.issue_number }}
         run: |
           PREVIEW_URL="https://preview-${ISSUE_NUM}.pscx.ai"
-          BACKEND_URL="https://preview-${ISSUE_NUM}.api.pscx.ai"
+          # Use flat subdomain (preview-N-api) so the *.pscx.ai wildcard cert covers it;
+          # preview-N.api.pscx.ai is 3rd-level and not covered by *.pscx.ai.
+          BACKEND_URL="https://preview-${ISSUE_NUM}-api.pscx.ai"
           echo "preview_url=$PREVIEW_URL" >> "$GITHUB_OUTPUT"
           echo "backend_url=$BACKEND_URL" >> "$GITHUB_OUTPUT"
 
@@ -350,6 +352,20 @@ jobs:
             sleep 10
           done
           echo "WARNING: Preview not reachable at $URL"
+
+      - name: Verify backend URL is reachable
+        run: |
+          HEALTH="${{ needs.read-config.outputs.health_endpoint }}"
+          URL="${{ steps.set-url.outputs.backend_url }}${HEALTH}"
+          for i in $(seq 1 18); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$URL" 2>/dev/null || echo "000")
+            if [ "$STATUS" != "000" ]; then
+              echo "Backend reachable at $URL (HTTP $STATUS)"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::warning::Backend not reachable at $URL after 180s — Sentinel may fail"
 
   # ── Job 6: Run tests ───────────────────────────────────────────────
   test:
