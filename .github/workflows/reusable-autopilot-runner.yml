@@ -634,7 +634,10 @@ jobs:
             --model "rlm"
 
       - name: Upsert PR
-        if: steps.checkout.outcome == 'success'
+        if: |
+          steps.checkout.outcome == 'success' &&
+          needs.validate.outputs.validation_passed == 'true' &&
+          needs.preflight.outputs.preflight_passed == 'true'
         id: pr
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}

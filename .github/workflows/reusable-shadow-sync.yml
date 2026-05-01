@@ -11,6 +11,11 @@ on:
         description: 'Shadow repo full name (e.g. cloudwarriors-ai/cloudflow-shadow)'
         type: string
         required: true
+      autoqueue_enabled:
+        description: 'When true, AUTOFIX: Ready is stamped on shadow issues where the source issue also has it'
+        type: string
+        required: false
+        default: 'false'
     outputs:
       issues_synced:
         description: 'Number of issues synced'
@@ -22,6 +27,11 @@ on:
         description: 'Shadow repo full name (e.g. cloudwarriors-ai/cloudflow-shadow)'
         type: string
         required: true
+      autoqueue_enabled:
+        description: 'When true, stamp AUTOFIX: Ready on shadow issues where source has it'
+        type: string
+        required: false
+        default: 'false'
 
 jobs:
   sync:
@@ -97,7 +107,15 @@ jobs:
             console.log(`Fetched ${allIssues.length} issues from ${sourceRepo}`);
 
             // ── 4. Upsert each issue in shadow ───────────────────────────────
+            const AUTOQUEUE_ENABLED = '${{ inputs.autoqueue_enabled }}' === 'true';
+            // Labels that indicate a shadow issue is already being processed — do not
+            // re-stamp AUTOFIX: Ready if any of these are present.
+            const processingLabels = new Set([
+              'AUTOFIX: Ready', 'STATUS: In Progress', 'STATUS: In QA',
+              'STATUS: Follow-Up Required', 'claude-working',
+            ]);
             const preservedShadowLabels = new Set(['claude-working']);
+
             let created = 0, updated = 0, preservedClosed = 0;
             let shadowOpenCount = 0, shadowClosedCount = 0;
             for (let i = 0; i < allIssues.length; i++) {
@@ -108,13 +126,16 @@ jobs:
               const sourceState = src.state;
               let effectiveState = sourceState;
 
-              // Mirror source labels, always add the shadow marker, and preserve
-              // only transient system labels that should survive a sync in flight.
+              // Mirror source labels, always add shadow marker.
+              // AUTOFIX: Ready is NOT blindly mirrored — it is stamped conditionally
+              // below based on AUTOQUEUE_ENABLED and shadow issue state.
               const sourceLabels = src.labels.map(l => l.name);
-              let labels = [...new Set([...sourceLabels, 'shadow'])];
+              const sourceHasAutofix = sourceLabels.includes('AUTOFIX: Ready');
+              const filteredSourceLabels = sourceLabels.filter(l => l !== 'AUTOFIX: Ready');
+              let labels = [...new Set([...filteredSourceLabels, 'shadow'])];
 
-              // Ensure all source labels exist in shadow
-              for (const lbl of sourceLabels) {
+              // Ensure all mirrored source labels exist in shadow
+              for (const lbl of filteredSourceLabels) {
                 await ensureLabel(lbl);
               }
 
@@ -131,6 +152,16 @@ jobs:
                   ...labels,
                   ...currentShadowLabels.filter(name => preservedShadowLabels.has(name)),
                 ])];
+
+                // Stamp AUTOFIX: Ready when:
+                //   - source issue has AUTOFIX: Ready
+                //   - AUTOQUEUE_ENABLED is true
+                //   - shadow issue is open and not already in a processing state
+                const shadowAlreadyProcessing = currentShadowLabels.some(l => processingLabels.has(l));
+                if (sourceHasAutofix && AUTOQUEUE_ENABLED && sourceState === 'open' && !shadowAlreadyProcessing) {
+                  labels = [...new Set([...labels, 'AUTOFIX: Ready'])];
+                  console.log(`Stamping AUTOFIX: Ready on shadow issue #${shadowNumber} (autoqueue enabled)`);
+                }
 
                 // Preserve a completed shadow issue while the source issue remains
                 // open and is waiting on upstream review/merge.
@@ -151,7 +182,13 @@ jobs:
                 });
                 updated++;
               } else {
-                // Create new shadow issue
+                // Create new shadow issue — stamp AUTOFIX: Ready immediately if source has
+                // it and autoqueue is enabled (issue is inherently open at creation time).
+                if (sourceHasAutofix && AUTOQUEUE_ENABLED && sourceState === 'open') {
+                  labels = [...new Set([...labels, 'AUTOFIX: Ready'])];
+                  console.log(`Stamping AUTOFIX: Ready on new shadow issue for source #${src.number} (autoqueue enabled)`);
+                }
+
                 const { data: created_issue } = await github.rest.issues.create({
                   owner: shadowOwner,
                   repo: shadowRepoName,

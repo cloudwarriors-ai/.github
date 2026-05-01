@@ -213,9 +213,10 @@ jobs:
       - name: Clone and install Sentinel
         if: steps.health.outcome == 'success'
         run: |
-          git clone --depth 1 \
+          git clone \
             https://x-access-token:${{ secrets.WORKFLOW_PAT || github.token }}@github.com/cloudwarriors-ai/sentinel.git \
             /tmp/sentinel
+          git -C /tmp/sentinel checkout 63b26c141bec2d8ca9a687941faf38e8252c4a02
           pip install -e /tmp/sentinel
 
       - name: Fetch shared scripts
