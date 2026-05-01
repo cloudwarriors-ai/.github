@@ -252,13 +252,14 @@ jobs:
           echo "Deploy disabled for this environment"
           exit 1
 
-      - name: Push shadow branch to source repo for VPS deploy
+      - name: Push shadow fix to source repo for VPS deploy
         id: shadow-prep
         if: contains(github.repository, '-shadow')
         env:
           WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
-          HEAD_BRANCH: ${{ inputs.head }}
           ISSUE_NUM: ${{ inputs.issue_number }}
+          BASE_BRANCH: ${{ inputs.base }}
+          HEAD_BRANCH: ${{ inputs.head }}
         run: |
           set -euo pipefail
           git config --global user.name "Claude Code Bot"
@@ -268,17 +269,36 @@ jobs:
           SOURCE_REPO="${SHADOW_REPO%-shadow}"
           PREVIEW_BRANCH="shadow-preview/issue-${ISSUE_NUM}"
 
-          git clone --branch "$HEAD_BRANCH" --depth 1 \
-            "https://x-access-token:${WORKFLOW_PAT}@github.com/${SHADOW_REPO}.git" shadow-fix
+          # Clone source at base branch and create the preview branch
+          git clone --no-tags --branch "$BASE_BRANCH" \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/${SOURCE_REPO}.git" source
+          git -C source checkout -b "$PREVIEW_BRANCH"
 
-          cd shadow-fix
-          git remote add source \
-            "https://x-access-token:${WORKFLOW_PAT}@github.com/${SOURCE_REPO}.git"
-          git push source "HEAD:refs/heads/${PREVIEW_BRANCH}" --force
+          # Fetch shadow fix branch and extract only application changes
+          git clone --no-tags \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/${SHADOW_REPO}.git" shadow
+          git -C shadow diff --binary \
+            "origin/${BASE_BRANCH}...origin/${HEAD_BRANCH}" \
+            -- . \
+            ':(exclude).shadow' \
+            ':(exclude).github/workflows/claude-ci.yml' \
+            ':(exclude).github/workflows/autopilot-runner.yml' \
+            > /tmp/shadow-preview.patch
+
+          if [ ! -s /tmp/shadow-preview.patch ]; then
+            echo "::warning::No application changes found in shadow fix"
+            echo "deploy_head=${BASE_BRANCH}" >> "$GITHUB_OUTPUT"
+            echo "source_repo=${SOURCE_REPO}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git -C source apply --index --3way /tmp/shadow-preview.patch
+          git -C source commit -m "shadow-preview: autofix for issue #${ISSUE_NUM}"
+          git -C source push origin "HEAD:${PREVIEW_BRANCH}" --force
 
           echo "deploy_head=${PREVIEW_BRANCH}" >> "$GITHUB_OUTPUT"
           echo "source_repo=${SOURCE_REPO}" >> "$GITHUB_OUTPUT"
-          echo "Pushed ${HEAD_BRANCH} → ${SOURCE_REPO}:${PREVIEW_BRANCH}"
+          echo "Pushed shadow diff → ${SOURCE_REPO}:${PREVIEW_BRANCH}"
 
       - name: Deploy preview to VPS
         uses: appleboy/ssh-action@v1
