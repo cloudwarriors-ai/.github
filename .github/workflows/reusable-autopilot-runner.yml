@@ -49,10 +49,6 @@ on:
         required: false
       DATABASE_URL:
         required: false
-      PII_ENCRYPTION_KEY:
-        required: false
-      PII_HMAC_KEY:
-        required: false
 
 concurrency:
   group: autopilot-runner-${{ inputs.issue_number }}-${{ github.repository }}
@@ -311,7 +307,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 15m
-          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY
+          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD
           script: |
             cd "$VPS_PATH"
             git fetch origin dev --depth 1
@@ -325,8 +321,6 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
-          PII_ENCRYPTION_KEY: ${{ secrets.PII_ENCRYPTION_KEY }}
-          PII_HMAC_KEY: ${{ secrets.PII_HMAC_KEY }}
 
       - name: Set preview URL output
         id: set-url
