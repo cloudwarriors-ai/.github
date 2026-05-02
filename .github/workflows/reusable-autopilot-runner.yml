@@ -806,11 +806,17 @@ jobs:
                 issue_number: ${{ inputs.issue_number }}, name: 'STATUS: In Progress',
               });
             } catch {}
-            await github.rest.issues.addLabels({
+            const inQaLabels = await github.rest.issues.listLabelsOnIssue({
               owner: context.repo.owner, repo: context.repo.repo,
               issue_number: ${{ inputs.issue_number }},
-              labels: ['STATUS: In QA'],
             });
+            if (!inQaLabels.data.some(l => l.name === 'STATUS: In QA')) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: ${{ inputs.issue_number }},
+                labels: ['STATUS: In QA'],
+              });
+            }
 
       - name: "On failure: label Follow-Up Required"
         if: |
@@ -826,19 +832,39 @@ jobs:
                 issue_number: ${{ inputs.issue_number }}, name: 'STATUS: In Progress',
               });
             } catch {}
-            await github.rest.issues.addLabels({
+            const followUpLabels = await github.rest.issues.listLabelsOnIssue({
               owner: context.repo.owner, repo: context.repo.repo,
               issue_number: ${{ inputs.issue_number }},
-              labels: ['STATUS: Follow-Up Required'],
             });
-            await github.rest.issues.createComment({
+            if (!followUpLabels.data.some(l => l.name === 'STATUS: Follow-Up Required')) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: ${{ inputs.issue_number }},
+                labels: ['STATUS: Follow-Up Required'],
+              });
+            }
+            const followUpMarker = '<!-- AUTOPILOT_FOLLOWUP -->';
+            const followUpBody = [
+              followUpMarker,
+              '### Autopilot — Follow-Up Required',
+              '',
+              `**Run:** [Workflow](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+              '',
+              'This issue needs human attention. Check the workflow logs for details.',
+            ].join('\n');
+            const followUpComments = await github.rest.issues.listComments({
               owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: ${{ inputs.issue_number }},
-              body: [
-                '### Autopilot — Follow-Up Required',
-                '',
-                `**Run:** [Workflow](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
-                '',
-                'This issue needs human attention. Check the workflow logs for details.',
-              ].join('\n'),
+              issue_number: ${{ inputs.issue_number }}, per_page: 50,
             });
+            const existingFollowUp = followUpComments.data.find(c => c.body && c.body.includes(followUpMarker));
+            if (existingFollowUp) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existingFollowUp.id, body: followUpBody,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: ${{ inputs.issue_number }}, body: followUpBody,
+              });
+            }
