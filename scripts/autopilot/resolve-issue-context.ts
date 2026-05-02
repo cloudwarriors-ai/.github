@@ -61,6 +61,23 @@ export function resolveTrack(labels: string[], title: string): 'bugs' | 'feature
 // --- Base branch resolution ---
 
 export async function resolveBase(owner: string, repo: string, token: string): Promise<string> {
+  // Shadow repos declare their integration branch in .shadow/config.json.
+  // autofix/* must target dev (the integration branch), not main (production).
+  if (repo.endsWith('-shadow')) {
+    try {
+      const res = await fetch(
+        `https://api.github.com/repos/${owner}/${repo}/contents/.shadow/config.json`,
+        { headers: { Authorization: `token ${token}`, Accept: 'application/vnd.github+json' } }
+      );
+      if (res.ok) {
+        const file = await res.json();
+        const config = JSON.parse(Buffer.from(file.content, 'base64').toString());
+        if (config.integrationBranch) return config.integrationBranch;
+      }
+    } catch {}
+    return 'dev';
+  }
+
   try {
     const res = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
       headers: {

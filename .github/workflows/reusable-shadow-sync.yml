@@ -115,7 +115,13 @@ jobs:
               'AUTOFIX: Ready', 'STATUS: In Progress', 'STATUS: In QA',
               'STATUS: Follow-Up Required', 'claude-working',
             ]);
-            const preservedShadowLabels = new Set(['claude-working']);
+            // Autopilot lifecycle labels — sync must never strip these.
+            // Removing and re-adding them fires labeled events that re-trigger intake.
+            const preservedShadowLabels = new Set([
+              'claude-working',
+              'AUTOFIX: Ready', 'AUTOPILOT: Skip',
+              'STATUS: In Progress', 'STATUS: In QA', 'STATUS: Follow-Up Required',
+            ]);
 
             let created = 0, updated = 0, preservedClosed = 0;
             let shadowOpenCount = 0, shadowClosedCount = 0;
@@ -171,17 +177,32 @@ jobs:
                   preservedClosed++;
                 }
 
-                // Update existing shadow issue
-                await github.rest.issues.update({
-                  owner: shadowOwner,
-                  repo: shadowRepoName,
-                  issue_number: shadowNumber,
-                  title,
-                  body,
-                  state: effectiveState,
-                  labels,
-                });
-                updated++;
+                // Only update when something actually changed.
+                // Passing `labels` in the payload fires labeled events for every label
+                // in the array — omit it when labels haven't changed.
+                const currentLabelSet = new Set(currentShadowLabels);
+                const desiredLabelSet = new Set(labels);
+                const labelsChanged =
+                  currentLabelSet.size !== desiredLabelSet.size ||
+                  [...desiredLabelSet].some(l => !currentLabelSet.has(l)) ||
+                  [...currentLabelSet].some(l => !desiredLabelSet.has(l));
+                const metaChanged =
+                  shadowIssue.title !== title ||
+                  shadowIssue.body !== body ||
+                  shadowIssue.state !== effectiveState;
+
+                if (metaChanged || labelsChanged) {
+                  await github.rest.issues.update({
+                    owner: shadowOwner,
+                    repo: shadowRepoName,
+                    issue_number: shadowNumber,
+                    title,
+                    body,
+                    state: effectiveState,
+                    ...(labelsChanged ? { labels } : {}),
+                  });
+                  updated++;
+                }
               } else {
                 // Create new shadow issue — stamp AUTOFIX: Ready immediately if source has
                 // it and autoqueue is enabled (issue is inherently open at creation time).

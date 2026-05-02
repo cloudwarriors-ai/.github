@@ -63,15 +63,17 @@ jobs:
                   .replace('refs/tags/', '')
               : 'main';
 
+            const branchSync = config.branchSync || [
+              { source: sourceRepo.default_branch, shadow: shadowRepo.default_branch }
+            ];
+
             core.setOutput('source_repo', config.sourceRepo);
             core.setOutput('source_default_branch', sourceRepo.default_branch);
             core.setOutput('shadow_default_branch', shadowRepo.default_branch);
             core.setOutput('workflow_repo_ref', workflowRepoRef || 'main');
+            core.setOutput('branch_sync_json', JSON.stringify(branchSync));
 
-            console.log(
-              `Syncing ${config.sourceRepo}:${sourceRepo.default_branch} -> ` +
-              `${shadowOwner}/${shadowRepoName}:${shadowRepo.default_branch}`
-            );
+            console.log(`Branch sync pairs: ${JSON.stringify(branchSync)}`);
 
       - name: Fetch shadow control-plane templates
         uses: actions/github-script@v7
@@ -102,46 +104,77 @@ jobs:
               Buffer.from(runnerFile.content, 'base64').toString('utf8')
             );
 
-      - name: Sync source code into shadow default branch
+      - name: Sync source code into shadow branches
         id: sync
         env:
           WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
           SHADOW_REPO: ${{ inputs.shadow_repo }}
-          SHADOW_DEFAULT_BRANCH: ${{ steps.meta.outputs.shadow_default_branch }}
           SOURCE_REPO: ${{ steps.meta.outputs.source_repo }}
-          SOURCE_DEFAULT_BRANCH: ${{ steps.meta.outputs.source_default_branch }}
+          BRANCH_SYNC_JSON: ${{ steps.meta.outputs.branch_sync_json }}
         run: |
           set -euo pipefail
           git config --global user.name "Claude Code Bot"
           git config --global user.email "claude-bot@anthropic.com"
 
-          git clone --no-tags --branch "$SHADOW_DEFAULT_BRANCH" \
-            "https://x-access-token:${WORKFLOW_PAT}@github.com/${SHADOW_REPO}.git" shadow
-          git clone --depth=1 --branch "$SOURCE_DEFAULT_BRANCH" \
-            "https://x-access-token:${WORKFLOW_PAT}@github.com/${SOURCE_REPO}.git" source
+          ANY_CHANGED=false
 
-          rsync -a --delete \
-            --exclude '.git/' \
-            --exclude '.shadow/' \
-            --exclude '.github/workflows/claude-ci.yml' \
-            --exclude '.github/workflows/autopilot-intake.yml' \
-            --exclude '.github/workflows/autopilot-runner.yml' \
-            source/ shadow/
+          # Parse branch pairs and sync each one
+          node -e "
+            JSON.parse(process.env.BRANCH_SYNC_JSON).forEach(p =>
+              process.stdout.write(p.source + ':' + p.shadow + '\n')
+            );
+          " | while IFS=':' read -r SOURCE_BRANCH SHADOW_BRANCH; do
+            echo "=== Syncing ${SOURCE_REPO}:${SOURCE_BRANCH} → ${SHADOW_REPO}:${SHADOW_BRANCH} ==="
 
-          mkdir -p shadow/.github/workflows
-          cp /tmp/shadow-caller.yml shadow/.github/workflows/claude-ci.yml
-          cp /tmp/shadow-autopilot-runner.yml shadow/.github/workflows/autopilot-runner.yml
+            # Clone shadow branch (create if missing)
+            if git clone --no-tags --branch "$SHADOW_BRANCH" \
+                "https://x-access-token:${WORKFLOW_PAT}@github.com/${SHADOW_REPO}.git" \
+                "shadow-${SHADOW_BRANCH}" 2>/dev/null; then
+              echo "Cloned existing shadow branch ${SHADOW_BRANCH}"
+            else
+              git clone --no-tags \
+                "https://x-access-token:${WORKFLOW_PAT}@github.com/${SHADOW_REPO}.git" \
+                "shadow-${SHADOW_BRANCH}"
+              git -C "shadow-${SHADOW_BRANCH}" checkout -b "$SHADOW_BRANCH" \
+                || git -C "shadow-${SHADOW_BRANCH}" checkout "$SHADOW_BRANCH"
+              echo "Created new shadow branch ${SHADOW_BRANCH}"
+            fi
 
-          cd shadow
-          if [ -n "$(git status --porcelain)" ]; then
-            git add -A
-            git commit -m "chore: shadow code sync [${SOURCE_DEFAULT_BRANCH}]"
-            git pull --rebase origin "$SHADOW_DEFAULT_BRANCH"
-            git push origin "$SHADOW_DEFAULT_BRANCH"
+            # Clone source at the specified branch
+            git clone --depth=1 --branch "$SOURCE_BRANCH" \
+              "https://x-access-token:${WORKFLOW_PAT}@github.com/${SOURCE_REPO}.git" \
+              "source-${SOURCE_BRANCH}"
+
+            rsync -a --delete \
+              --exclude '.git/' \
+              --exclude '.shadow/' \
+              --exclude '.github/workflows/claude-ci.yml' \
+              --exclude '.github/workflows/autopilot-intake.yml' \
+              --exclude '.github/workflows/autopilot-runner.yml' \
+              "source-${SOURCE_BRANCH}/" "shadow-${SHADOW_BRANCH}/"
+
+            mkdir -p "shadow-${SHADOW_BRANCH}/.github/workflows"
+            cp /tmp/shadow-caller.yml "shadow-${SHADOW_BRANCH}/.github/workflows/claude-ci.yml"
+            cp /tmp/shadow-autopilot-runner.yml "shadow-${SHADOW_BRANCH}/.github/workflows/autopilot-runner.yml"
+
+            cd "shadow-${SHADOW_BRANCH}"
+            if [ -n "$(git status --porcelain)" ]; then
+              git add -A
+              git commit -m "chore: shadow code sync [${SOURCE_BRANCH}]"
+              git pull --rebase origin "$SHADOW_BRANCH"
+              git push origin "$SHADOW_BRANCH"
+              ANY_CHANGED=true
+              echo "Synced ${SHADOW_BRANCH}"
+            else
+              echo "No changes for ${SHADOW_BRANCH}"
+            fi
+            cd ..
+          done
+
+          if [ "$ANY_CHANGED" = "true" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "Shadow repo already matches source code"
           fi
 
       - name: Trigger runtime detection after code sync
