@@ -773,42 +773,42 @@ jobs:
           esac
 
           PR_BODY="$(cat <<PRBODY
-## Autopilot Fix for Issue #${ISSUE_NUM}
+          ## Autopilot Fix for Issue #${ISSUE_NUM}
 
-**Track:** ${ISSUE_TRACK} | **Base:** ${ISSUE_BASE} | **Head:** ${ISSUE_HEAD}
+          **Track:** ${ISSUE_TRACK} | **Base:** ${ISSUE_BASE} | **Head:** ${ISSUE_HEAD}
 
-### Issue
-**${ISSUE_TITLE}**
+          ### Issue
+          **${ISSUE_TITLE}**
 
-${ISSUE_BODY_PREVIEW}
+          ${ISSUE_BODY_PREVIEW}
 
-### What Changed
-| File | Status | Additions | Deletions |
-|------|--------|-----------|-----------|
-${DIFF_TABLE}
+          ### What Changed
+          | File | Status | Additions | Deletions |
+          |------|--------|-----------|-----------|
+          ${DIFF_TABLE}
 
-${DIFF_SUMMARY}
+          ${DIFF_SUMMARY}
 
-### Fix Description
-${COMMIT_MSG}
+          ### Fix Description
+          ${COMMIT_MSG}
 
-### Validation Gates
-| Gate | Result |
-|------|--------|
-| Preflight | ${PREFLIGHT_RESULT} |
-| Bundle validation | ${VALIDATION_RESULT} |
-| Sentinel API — ${VERDICT_LABEL} | ${API_VALIDATION_RESULT} |
-| Unit tests | ${TESTS_RESULT} |
-| App tests (E2E) | ${APP_TESTS_RESULT} (regressions: ${APP_TESTS_REGRESSIONS}) |
+          ### Validation Gates
+          | Gate | Result |
+          |------|--------|
+          | Preflight | ${PREFLIGHT_RESULT} |
+          | Bundle validation | ${VALIDATION_RESULT} |
+          | Sentinel API — ${VERDICT_LABEL} | ${API_VALIDATION_RESULT} |
+          | Unit tests | ${TESTS_RESULT} |
+          | App tests (E2E) | ${APP_TESTS_RESULT} (regressions: ${APP_TESTS_REGRESSIONS}) |
 
-**Preview:** ${BACKEND_URL}
-[View workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})
+          **Preview:** ${BACKEND_URL}
+          [View workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})
 
----
-Closes #${ISSUE_NUM}
-- [ ] Human review complete
-PRBODY
-)"
+          ---
+          Closes #${ISSUE_NUM}
+          - [ ] Human review complete
+          PRBODY
+          )"
 
           if [ -n "$EXISTING_PR" ]; then
             gh pr edit "$EXISTING_PR" --body "$PR_BODY"
