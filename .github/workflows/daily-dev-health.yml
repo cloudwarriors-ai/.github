@@ -284,7 +284,7 @@ jobs:
         run: |
           TODAY=$(date -u +%Y-%m-%d)
           CONTENT_B64=$(base64 -w 0 /tmp/dev-health/daily-snapshot.json)
-          CURRENT_SHA=$(gh api "repos/${SHADOW_REPO}/contents/tests/sentinel/daily-snapshot.json" \
+          CURRENT_SHA=$(gh api "repos/${SHADOW_REPO}/contents/tests/sentinel/daily-snapshot.json?ref=dev" \
             --jq '.sha' 2>/dev/null || echo "")
 
           if [ -n "$CURRENT_SHA" ]; then
@@ -292,14 +292,16 @@ jobs:
               -X PUT \
               -f message="chore(baseline): update daily snapshot (${TODAY})" \
               -f content="$CONTENT_B64" \
-              -f sha="$CURRENT_SHA" > /dev/null
+              -f sha="$CURRENT_SHA" \
+              -f branch=dev > /dev/null
           else
             gh api "repos/${SHADOW_REPO}/contents/tests/sentinel/daily-snapshot.json" \
               -X PUT \
               -f message="chore(baseline): add daily snapshot (${TODAY})" \
-              -f content="$CONTENT_B64" > /dev/null
+              -f content="$CONTENT_B64" \
+              -f branch=dev > /dev/null
           fi
-          echo "daily-snapshot.json committed to ${SHADOW_REPO}"
+          echo "daily-snapshot.json committed to ${SHADOW_REPO}@dev"
 
       - name: Update static baseline
         if: inputs.update_static_baseline == true && steps.snapshot.outcome == 'success'
