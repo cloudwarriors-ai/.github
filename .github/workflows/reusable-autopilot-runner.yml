@@ -622,16 +622,21 @@ jobs:
             exit 0
           fi
 
-          # Prefer daily-snapshot.json if it exists and is < 24 hours old.
+          # Prefer daily-snapshot.json fetched from shadow dev branch (not local
+          # checkout — fix branches don't inherit it, and sync would delete it).
           BASELINE_FILE=""
           BASELINE_LABEL=""
-          if [ -f "$DAILY_SNAPSHOT" ]; then
-            GENERATED_AT=$(python3 -c "import json,sys; d=json.load(open('$DAILY_SNAPSHOT')); print(d.get('generated_at',''))" 2>/dev/null || echo "")
+          SHADOW_REPO="${{ inputs.shadow_repo != '' && inputs.shadow_repo || github.repository }}"
+          SNAPSHOT_CONTENT=$(gh api "repos/${SHADOW_REPO}/contents/tests/sentinel/daily-snapshot.json?ref=dev" \
+            --jq '.content' 2>/dev/null || echo "")
+          if [ -n "$SNAPSHOT_CONTENT" ]; then
+            echo "$SNAPSHOT_CONTENT" | base64 -d > /tmp/app-tests/daily-snapshot.json
+            GENERATED_AT=$(python3 -c "import json; d=json.load(open('/tmp/app-tests/daily-snapshot.json')); print(d.get('generated_at',''))" 2>/dev/null || echo "")
             if [ -n "$GENERATED_AT" ]; then
               SNAPSHOT_AGE=$(python3 -c "from datetime import datetime,timezone; t=datetime.fromisoformat('${GENERATED_AT}'.replace('Z','+00:00')); print(int((datetime.now(timezone.utc)-t).total_seconds()))" 2>/dev/null || echo "999999")
               if [ "$SNAPSHOT_AGE" -lt 86400 ]; then
                 SNAPSHOT_DATE=$(python3 -c "from datetime import datetime; t=datetime.fromisoformat('${GENERATED_AT}'.replace('Z','+00:00')); print(t.strftime('%Y-%m-%d %H:%M UTC'))" 2>/dev/null || echo "$GENERATED_AT")
-                BASELINE_FILE="$DAILY_SNAPSHOT"
+                BASELINE_FILE="/tmp/app-tests/daily-snapshot.json"
                 BASELINE_LABEL="daily snapshot (${SNAPSHOT_DATE})"
                 echo "::notice::Using daily snapshot from ${SNAPSHOT_DATE}"
               else
@@ -650,7 +655,8 @@ jobs:
             fi
             STATIC_DATE=$(python3 -c "import json; d=json.load(open('$STATIC_BASELINE')); print(d.get('generated_at','unknown')[:10])" 2>/dev/null || echo "unknown")
             BASELINE_FILE="$STATIC_BASELINE"
-            if [ -f "$DAILY_SNAPSHOT" ]; then
+            SNAPSHOT_EXISTS=$([ -n "$SNAPSHOT_CONTENT" ] && echo "true" || echo "false")
+            if [ "$SNAPSHOT_EXISTS" = "true" ]; then
               BASELINE_LABEL="static baseline (${STATIC_DATE}) ⚠️ daily snapshot stale"
             else
               BASELINE_LABEL="static baseline (${STATIC_DATE})"

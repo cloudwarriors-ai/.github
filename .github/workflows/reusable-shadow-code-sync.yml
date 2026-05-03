@@ -152,6 +152,7 @@ jobs:
               --exclude '.github/workflows/autopilot-intake.yml' \
               --exclude '.github/workflows/autopilot-runner.yml' \
               --exclude '.github/workflows/daily-dev-health.yml' \
+              --exclude 'tests/sentinel/daily-snapshot.json' \
               "source-${SOURCE_BRANCH}/" "shadow-${SHADOW_BRANCH}/"
 
             mkdir -p "shadow-${SHADOW_BRANCH}/.github/workflows"
