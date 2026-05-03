@@ -611,6 +611,8 @@ jobs:
         id: compare
         if: always()
         continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
         run: |
           STATIC_BASELINE="tests/sentinel/baseline.json"
           DAILY_SNAPSHOT="tests/sentinel/daily-snapshot.json"
