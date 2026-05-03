@@ -14,18 +14,35 @@ name: Daily Dev Health
 #   Actions → Daily Dev Health → Run workflow → check "Update static baseline"
 
 on:
-  schedule:
-    - cron: '0 6 * * *'  # 6am UTC daily
-  workflow_dispatch:
+  workflow_call:
     inputs:
       shadow_repo:
-        description: 'Shadow repo to check (owner/repo)'
+        description: 'Shadow repo to check (owner/repo) — defaults to the calling repo'
         type: string
-        default: 'cloudwarriors-ai/scopely-shadow'
+        default: ''
       update_static_baseline:
         description: 'Update baseline.json with today''s results (intentional — only when new feature ships and tests are green)'
         type: boolean
         default: false
+    secrets:
+      WORKFLOW_PAT:
+        required: true
+      SSH_HOST:
+        required: false
+      SSH_USER:
+        required: false
+      SSH_PRIVATE_KEY:
+        required: false
+      DATABASE_URL:
+        required: false
+      E2E_EMAIL:
+        required: false
+      E2E_PASSWORD:
+        required: false
+      PII_ENCRYPTION_KEY:
+        required: false
+      PII_HMAC_KEY:
+        required: false
 
 jobs:
   dev-health:
@@ -37,7 +54,7 @@ jobs:
       - name: Checkout shadow repo at dev
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.shadow_repo || 'cloudwarriors-ai/scopely-shadow' }}
+          repository: ${{ inputs.shadow_repo != '' && inputs.shadow_repo || github.repository }}
           ref: dev
           token: ${{ secrets.WORKFLOW_PAT }}
 
@@ -52,7 +69,7 @@ jobs:
         run: |
           CONFIG=".autopilot/config.json"
           if [ ! -f "$CONFIG" ]; then
-            echo "::error::No .autopilot/config.json found in ${{ inputs.shadow_repo || 'cloudwarriors-ai/scopely-shadow' }}"
+            echo "::error::No .autopilot/config.json found in ${{ inputs.shadow_repo != '' && inputs.shadow_repo || github.repository }}"
             exit 1
           fi
           node -e "
@@ -217,7 +234,7 @@ jobs:
         if: always() && steps.compare.outputs.has_regressions == 'true'
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
-          SHADOW_REPO: ${{ inputs.shadow_repo || 'cloudwarriors-ai/scopely-shadow' }}
+          SHADOW_REPO: ${{ inputs.shadow_repo != '' && inputs.shadow_repo || github.repository }}
         run: |
           TODAY=$(date -u +%Y-%m-%d)
           TITLE="⚠️ Dev branch health: regressions vs baseline (${TODAY})"
@@ -244,7 +261,7 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
-          SHADOW_REPO: ${{ inputs.shadow_repo || 'cloudwarriors-ai/scopely-shadow' }}
+          SHADOW_REPO: ${{ inputs.shadow_repo != '' && inputs.shadow_repo || github.repository }}
         run: |
           EXISTING=$(gh api "repos/${SHADOW_REPO}/issues?state=open&labels=dev-health&per_page=10" \
             --jq '[.[] | select(.title | startswith("⚠️ Dev branch health:"))] | .[0].number // empty' \
@@ -265,7 +282,7 @@ jobs:
         if: always() && steps.snapshot.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
-          SHADOW_REPO: ${{ inputs.shadow_repo || 'cloudwarriors-ai/scopely-shadow' }}
+          SHADOW_REPO: ${{ inputs.shadow_repo != '' && inputs.shadow_repo || github.repository }}
         run: |
           TODAY=$(date -u +%Y-%m-%d)
           CONTENT_B64=$(base64 -w 0 /tmp/dev-health/daily-snapshot.json)
@@ -290,7 +307,7 @@ jobs:
         if: inputs.update_static_baseline == true && steps.snapshot.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
-          SHADOW_REPO: ${{ inputs.shadow_repo || 'cloudwarriors-ai/scopely-shadow' }}
+          SHADOW_REPO: ${{ inputs.shadow_repo != '' && inputs.shadow_repo || github.repository }}
         run: |
           TODAY=$(date -u +%Y-%m-%d)
           python3 - <<'PYEOF'
