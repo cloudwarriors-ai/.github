@@ -1,0 +1,355 @@
+name: Daily Dev Health
+
+# Deploys the shadow repo's dev branch to a fixed preview slot, runs the full
+# app test suite, and saves a daily-snapshot.json that the autopilot runner uses
+# for fix-attribution comparisons.
+#
+# Two separate signals:
+#   1. Compare against baseline.json  →  "Is dev drifting from the golden standard?"
+#      Reports via a GitHub issue on the shadow repo (opened/updated/closed automatically).
+#   2. daily-snapshot.json committed  →  "What was passing on dev this morning?"
+#      The autopilot runner compares fix branches against this, not the stale static file.
+#
+# To intentionally update baseline.json (after a feature ships and tests are green):
+#   Actions → Daily Dev Health → Run workflow → check "Update static baseline"
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # 6am UTC daily
+  workflow_dispatch:
+    inputs:
+      shadow_repo:
+        description: 'Shadow repo to check (owner/repo)'
+        type: string
+        default: 'cloudwarriors-ai/scopely-shadow'
+      update_static_baseline:
+        description: 'Update baseline.json with today''s results (intentional — only when new feature ships and tests are green)'
+        type: boolean
+        default: false
+
+jobs:
+  dev-health:
+    name: Dev Health Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout shadow repo at dev
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.shadow_repo || 'cloudwarriors-ai/scopely-shadow' }}
+          ref: dev
+          token: ${{ secrets.WORKFLOW_PAT }}
+
+      - name: Fetch shared scripts
+        run: |
+          git clone --depth 1 \
+            https://x-access-token:${{ secrets.WORKFLOW_PAT }}@github.com/cloudwarriors-ai/.github.git \
+            /tmp/org-github
+
+      - name: Read config
+        id: config
+        run: |
+          CONFIG=".autopilot/config.json"
+          if [ ! -f "$CONFIG" ]; then
+            echo "::error::No .autopilot/config.json found in ${{ inputs.shadow_repo || 'cloudwarriors-ai/scopely-shadow' }}"
+            exit 1
+          fi
+          node -e "
+            const c = JSON.parse(require('fs').readFileSync('$CONFIG', 'utf8'));
+            const fs = require('fs');
+            const out = process.env.GITHUB_OUTPUT;
+            fs.appendFileSync(out, 'app_test_command<<APP_TEST_EOF\n' + (c.appTestCommand || '') + '\nAPP_TEST_EOF\n');
+            fs.appendFileSync(out, 'health_endpoint=' + (c.healthEndpoint || '/api/v1/health') + '\n');
+            fs.appendFileSync(out, 'runtime=' + (c.runtime || '') + '\n');
+            fs.appendFileSync(out, 'python_version=' + (c.pythonVersion || '3.11') + '\n');
+            fs.appendFileSync(out, 'python_requirements=' + (c.pythonRequirements || 'service/requirements.txt') + '\n');
+          "
+
+      - name: Deploy dev to baseline slot
+        if: steps.config.outputs.app_test_command != ''
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          command_timeout: 15m
+          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY
+          script: |
+            cd "$VPS_PATH"
+            git fetch origin dev --depth 1
+            git checkout origin/dev -- scripts/ .autopilot/
+            "$VPS_PATH/scripts/preview-deploy.sh" "$DEPLOY_HEAD" "$DEPLOY_ISSUE"
+        env:
+          GITHUB_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          DEPLOY_HEAD: dev
+          DEPLOY_ISSUE: ${{ vars.BASELINE_DEPLOY_ISSUE || '0' }}
+          VPS_PATH: ${{ vars.VPS_REPO_PATH }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
+          E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+          PII_ENCRYPTION_KEY: ${{ secrets.PII_ENCRYPTION_KEY }}
+          PII_HMAC_KEY: ${{ secrets.PII_HMAC_KEY }}
+
+      - name: Set baseline URLs
+        id: urls
+        if: steps.config.outputs.app_test_command != ''
+        env:
+          SLOT: ${{ vars.BASELINE_DEPLOY_ISSUE || '0' }}
+        run: |
+          echo "preview_url=https://preview-${SLOT}.pscx.ai" >> "$GITHUB_OUTPUT"
+          echo "backend_url=https://preview-${SLOT}-api.pscx.ai" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for health check
+        if: steps.config.outputs.app_test_command != ''
+        run: |
+          HEALTH="${{ steps.config.outputs.health_endpoint }}"
+          URL="${{ steps.urls.outputs.backend_url }}${HEALTH}"
+          for i in $(seq 1 30); do
+            if curl -sf --max-time 5 "$URL" > /dev/null 2>&1; then
+              echo "Baseline reachable at $URL"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::warning::Baseline not reachable at $URL after 5 minutes — tests may fail"
+
+      - name: Setup Node.js
+        if: steps.config.outputs.app_test_command != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Node dependencies
+        if: steps.config.outputs.app_test_command != ''
+        run: |
+          if [ -f package.json ]; then npm ci; fi
+
+      - name: Install Playwright browsers
+        if: steps.config.outputs.app_test_command != ''
+        run: |
+          if [ -f package.json ] && grep -q '"@playwright/test"' package.json 2>/dev/null; then
+            npx --yes playwright install --with-deps chromium
+          fi
+
+      - name: Setup Python
+        if: steps.config.outputs.app_test_command != '' && steps.config.outputs.runtime == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.config.outputs.python_version }}
+          cache: pip
+
+      - name: Install Python dependencies
+        if: steps.config.outputs.app_test_command != '' && steps.config.outputs.runtime == 'python'
+        env:
+          REQS: ${{ steps.config.outputs.python_requirements }}
+        run: |
+          if [ -f "$REQS" ]; then
+            python -m pip install --upgrade pip
+            pip install -r "$REQS"
+          fi
+          pip install httpx pytest pytest-asyncio
+
+      - name: Run app test suite
+        id: app-tests
+        if: steps.config.outputs.app_test_command != ''
+        continue-on-error: true
+        env:
+          SENTINEL_BASE_URL: ${{ steps.urls.outputs.backend_url }}
+          TEST_BASE_URL: ${{ steps.urls.outputs.preview_url }}
+          E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
+          E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+          TEST_USER_EMAIL: ${{ secrets.E2E_EMAIL }}
+          TEST_USER_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+          BROWSERBASE_LOCAL: 'true'
+          CI: 'true'
+          APP_TEST_CMD: ${{ steps.config.outputs.app_test_command }}
+        run: |
+          set -o pipefail
+          mkdir -p /tmp/dev-health
+          echo "Running: $APP_TEST_CMD"
+          bash -c "$APP_TEST_CMD" 2>&1 | tee /tmp/dev-health/run.log || true
+          if [ -f pytest.xml ]; then
+            cp pytest.xml /tmp/dev-health/pytest.xml
+          else
+            echo "::warning::No pytest.xml found — creating empty placeholder"
+            echo '<?xml version="1.0"?><testsuites></testsuites>' > /tmp/dev-health/pytest.xml
+          fi
+
+      - name: Generate daily snapshot
+        id: snapshot
+        if: steps.app-tests.outcome != 'skipped'
+        continue-on-error: true
+        env:
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 /tmp/org-github/scripts/autopilot/generate-snapshot.py \
+            --pytest-xml /tmp/dev-health/pytest.xml \
+            --playwright-log /tmp/dev-health/run.log \
+            --output /tmp/dev-health/daily-snapshot.json \
+            --git-ref dev \
+            --workflow-url "$WORKFLOW_URL"
+
+      - name: Compare against static baseline
+        id: compare
+        if: steps.app-tests.outcome != 'skipped'
+        continue-on-error: true
+        run: |
+          STATIC_BASELINE="tests/sentinel/baseline.json"
+          if [ ! -f "$STATIC_BASELINE" ]; then
+            echo "::notice::No static baseline found — skipping drift check"
+            echo "has_regressions=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          TODAY=$(date -u +%Y-%m-%d)
+          python3 /tmp/org-github/scripts/autopilot/compare-app-tests.py \
+            --baseline "$STATIC_BASELINE" \
+            --baseline-label "static baseline (dev health check ${TODAY})" \
+            --pytest-xml /tmp/dev-health/pytest.xml \
+            --playwright-log /tmp/dev-health/run.log \
+            --output /tmp/dev-health/drift-report.md \
+            --step-summary "$GITHUB_STEP_SUMMARY" \
+            --regressions-out /tmp/dev-health/has-regressions.txt
+          HAS_REGS=$(cat /tmp/dev-health/has-regressions.txt 2>/dev/null || echo "false")
+          echo "has_regressions=${HAS_REGS}" >> "$GITHUB_OUTPUT"
+
+      - name: Report dev drift via GitHub issue
+        if: always() && steps.compare.outputs.has_regressions == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          SHADOW_REPO: ${{ inputs.shadow_repo || 'cloudwarriors-ai/scopely-shadow' }}
+        run: |
+          TODAY=$(date -u +%Y-%m-%d)
+          TITLE="⚠️ Dev branch health: regressions vs baseline (${TODAY})"
+          REPORT="$(cat /tmp/dev-health/drift-report.md 2>/dev/null || echo 'Report unavailable')"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          BODY="$(printf '<!-- dev-health-report -->\n\n%s\n\n[View run](%s)' "$REPORT" "$RUN_URL")"
+
+          EXISTING=$(gh api "repos/${SHADOW_REPO}/issues?state=open&labels=dev-health&per_page=10" \
+            --jq '[.[] | select(.title | startswith("⚠️ Dev branch health:"))] | .[0].number // empty' \
+            2>/dev/null || echo "")
+
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/${SHADOW_REPO}/issues/${EXISTING}" \
+              -f title="$TITLE" -f body="$BODY" > /dev/null
+            echo "Updated dev health issue #${EXISTING}"
+          else
+            gh api "repos/${SHADOW_REPO}/issues" \
+              -f title="$TITLE" -f body="$BODY" -f "labels[]=dev-health" > /dev/null
+            echo "Created dev health issue"
+          fi
+
+      - name: Close dev health issue if clean
+        if: always() && steps.compare.outputs.has_regressions == 'false'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          SHADOW_REPO: ${{ inputs.shadow_repo || 'cloudwarriors-ai/scopely-shadow' }}
+        run: |
+          EXISTING=$(gh api "repos/${SHADOW_REPO}/issues?state=open&labels=dev-health&per_page=10" \
+            --jq '[.[] | select(.title | startswith("⚠️ Dev branch health:"))] | .[0].number // empty' \
+            2>/dev/null || echo "")
+          if [ -n "$EXISTING" ]; then
+            TODAY=$(date -u +%Y-%m-%d)
+            PREV_BODY=$(gh api "repos/${SHADOW_REPO}/issues/${EXISTING}" --jq '.body' 2>/dev/null || echo "")
+            gh api -X PATCH "repos/${SHADOW_REPO}/issues/${EXISTING}" \
+              -f state=closed \
+              -f body="${PREV_BODY}
+
+---
+✅ Dev health restored on ${TODAY} — closing." > /dev/null
+            echo "Closed dev health issue #${EXISTING} (clean run)"
+          fi
+
+      - name: Commit daily-snapshot.json
+        if: always() && steps.snapshot.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          SHADOW_REPO: ${{ inputs.shadow_repo || 'cloudwarriors-ai/scopely-shadow' }}
+        run: |
+          TODAY=$(date -u +%Y-%m-%d)
+          CONTENT_B64=$(base64 -w 0 /tmp/dev-health/daily-snapshot.json)
+          CURRENT_SHA=$(gh api "repos/${SHADOW_REPO}/contents/tests/sentinel/daily-snapshot.json" \
+            --jq '.sha' 2>/dev/null || echo "")
+
+          if [ -n "$CURRENT_SHA" ]; then
+            gh api "repos/${SHADOW_REPO}/contents/tests/sentinel/daily-snapshot.json" \
+              -X PUT \
+              -f message="chore(baseline): update daily snapshot (${TODAY})" \
+              -f content="$CONTENT_B64" \
+              -f sha="$CURRENT_SHA" > /dev/null
+          else
+            gh api "repos/${SHADOW_REPO}/contents/tests/sentinel/daily-snapshot.json" \
+              -X PUT \
+              -f message="chore(baseline): add daily snapshot (${TODAY})" \
+              -f content="$CONTENT_B64" > /dev/null
+          fi
+          echo "daily-snapshot.json committed to ${SHADOW_REPO}"
+
+      - name: Update static baseline
+        if: inputs.update_static_baseline == true && steps.snapshot.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          SHADOW_REPO: ${{ inputs.shadow_repo || 'cloudwarriors-ai/scopely-shadow' }}
+        run: |
+          TODAY=$(date -u +%Y-%m-%d)
+          python3 - <<'PYEOF'
+import json
+from pathlib import Path
+
+snap = json.loads(Path('/tmp/dev-health/daily-snapshot.json').read_text())
+snap['note'] = (
+    'Known-good test set as of this SHA. A test missing from these lists that fails '
+    'in a future run is a regression. Tests listed as known_failing or known_flaky are '
+    'NOT regressions when they fail — update them deliberately as the app stabilizes. '
+    'Updated intentionally via daily-dev-health.yml with update_static_baseline=true.'
+)
+Path('/tmp/dev-health/new-baseline.json').write_text(json.dumps(snap, indent=2) + '\n')
+PYEOF
+
+          CONTENT_B64=$(base64 -w 0 /tmp/dev-health/new-baseline.json)
+          CURRENT_SHA=$(gh api "repos/${SHADOW_REPO}/contents/tests/sentinel/baseline.json" \
+            --jq '.sha' 2>/dev/null || echo "")
+
+          if [ -n "$CURRENT_SHA" ]; then
+            gh api "repos/${SHADOW_REPO}/contents/tests/sentinel/baseline.json" \
+              -X PUT \
+              -f message="chore(baseline): update static baseline — intentional update from daily health check (${TODAY})" \
+              -f content="$CONTENT_B64" \
+              -f sha="$CURRENT_SHA" > /dev/null
+          else
+            gh api "repos/${SHADOW_REPO}/contents/tests/sentinel/baseline.json" \
+              -X PUT \
+              -f message="chore(baseline): add static baseline from daily health check (${TODAY})" \
+              -f content="$CONTENT_B64" > /dev/null
+          fi
+          echo "baseline.json updated in ${SHADOW_REPO}"
+
+      - name: Teardown baseline slot
+        if: always() && steps.config.outputs.app_test_command != ''
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: DEPLOY_ISSUE,VPS_PATH
+          script: |
+            cd "$VPS_PATH"
+            git fetch origin dev --depth 1
+            git checkout origin/dev -- scripts/ .autopilot/
+            "$VPS_PATH/scripts/preview-teardown.sh" "$DEPLOY_ISSUE"
+        env:
+          DEPLOY_ISSUE: ${{ vars.BASELINE_DEPLOY_ISSUE || '0' }}
+          VPS_PATH: ${{ vars.VPS_REPO_PATH }}
+
+      - name: Upload dev-health artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-health-${{ github.run_id }}
+          path: |
+            /tmp/dev-health/
+            playwright-report/
+            test-results/
+          retention-days: 30
+          if-no-files-found: ignore

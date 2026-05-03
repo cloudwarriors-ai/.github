@@ -517,6 +517,7 @@ jobs:
     outputs:
       app_tests_passed: ${{ steps.result.outputs.app_tests_passed }}
       app_tests_has_regressions: ${{ steps.compare.outputs.has_regressions }}
+      baseline_label: ${{ steps.compare.outputs.baseline_label }}
 
     steps:
       - name: Checkout fix branch
@@ -604,21 +605,71 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          BASELINE_FILE="tests/sentinel/baseline.json"
-          if [ ! -f "$BASELINE_FILE" ]; then
-            echo "::notice::No baseline at $BASELINE_FILE — first run or baseline not yet committed"
-            echo "has_regressions=false" >> "$GITHUB_OUTPUT"
-            echo "has_report=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          STATIC_BASELINE="tests/sentinel/baseline.json"
+          DAILY_SNAPSHOT="tests/sentinel/daily-snapshot.json"
+
           if [ ! -f /tmp/app-tests/pytest.xml ] || [ ! -f /tmp/app-tests/run.log ]; then
             echo "::warning::Run artifacts missing at /tmp/app-tests/ — skipping comparison"
             echo "has_regressions=false" >> "$GITHUB_OUTPUT"
             echo "has_report=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+
+          # Prefer daily-snapshot.json if it exists and is < 24 hours old.
+          BASELINE_FILE=""
+          BASELINE_LABEL=""
+          if [ -f "$DAILY_SNAPSHOT" ]; then
+            GENERATED_AT=$(python3 -c "import json,sys; d=json.load(open('$DAILY_SNAPSHOT')); print(d.get('generated_at',''))" 2>/dev/null || echo "")
+            if [ -n "$GENERATED_AT" ]; then
+              SNAPSHOT_AGE=$(python3 -c "
+from datetime import datetime, timezone
+import sys
+try:
+    t = datetime.fromisoformat('$GENERATED_AT'.replace('Z', '+00:00'))
+    age = (datetime.now(timezone.utc) - t).total_seconds()
+    print(int(age))
+except Exception as e:
+    print(999999)
+" 2>/dev/null || echo "999999")
+              if [ "$SNAPSHOT_AGE" -lt 86400 ]; then
+                SNAPSHOT_DATE=$(python3 -c "
+from datetime import datetime
+try:
+    t = datetime.fromisoformat('$GENERATED_AT'.replace('Z', '+00:00'))
+    print(t.strftime('%Y-%m-%d %H:%M UTC'))
+except Exception:
+    print('$GENERATED_AT')
+" 2>/dev/null || echo "$GENERATED_AT")
+                BASELINE_FILE="$DAILY_SNAPSHOT"
+                BASELINE_LABEL="daily snapshot (${SNAPSHOT_DATE})"
+                echo "::notice::Using daily snapshot from ${SNAPSHOT_DATE}"
+              else
+                SNAPSHOT_HOURS=$(( SNAPSHOT_AGE / 3600 ))
+                echo "::warning::Daily snapshot is ${SNAPSHOT_HOURS}h old — falling back to static baseline"
+              fi
+            fi
+          fi
+
+          if [ -z "$BASELINE_FILE" ]; then
+            if [ ! -f "$STATIC_BASELINE" ]; then
+              echo "::notice::No baseline found — first run or baseline not yet committed"
+              echo "has_regressions=false" >> "$GITHUB_OUTPUT"
+              echo "has_report=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            STATIC_DATE=$(python3 -c "import json; d=json.load(open('$STATIC_BASELINE')); print(d.get('generated_at','unknown')[:10])" 2>/dev/null || echo "unknown")
+            BASELINE_FILE="$STATIC_BASELINE"
+            if [ -f "$DAILY_SNAPSHOT" ]; then
+              BASELINE_LABEL="static baseline (${STATIC_DATE}) ⚠️ daily snapshot stale"
+            else
+              BASELINE_LABEL="static baseline (${STATIC_DATE})"
+            fi
+            echo "::notice::Using static baseline from ${STATIC_DATE}"
+          fi
+
           python3 /tmp/org-github/scripts/autopilot/compare-app-tests.py \
             --baseline "$BASELINE_FILE" \
+            --baseline-label "$BASELINE_LABEL" \
             --pytest-xml /tmp/app-tests/pytest.xml \
             --playwright-log /tmp/app-tests/run.log \
             --output /tmp/app-tests/regression-report.md \
@@ -627,6 +678,7 @@ jobs:
           echo "has_report=true" >> "$GITHUB_OUTPUT"
           HAS_REGS=$(cat /tmp/app-tests/has-regressions.txt)
           echo "has_regressions=${HAS_REGS}" >> "$GITHUB_OUTPUT"
+          echo "baseline_label=${BASELINE_LABEL}" >> "$GITHUB_OUTPUT"
 
       - name: Post or update regression comment
         if: always() && steps.compare.outputs.has_regressions == 'true'
@@ -736,6 +788,7 @@ jobs:
           API_VERDICT: ${{ needs.validate-api.outputs.verdict || 'skipped' }}
           APP_TESTS_RESULT: ${{ needs.app-tests.outputs.app_tests_passed || 'skipped' }}
           APP_TESTS_REGRESSIONS: ${{ needs.app-tests.outputs.app_tests_has_regressions || 'n/a' }}
+          APP_TESTS_BASELINE_LABEL: ${{ needs.app-tests.outputs.baseline_label || '' }}
         run: |
           EXISTING_PR=$(gh pr list --head "$ISSUE_HEAD" --base "$ISSUE_BASE" --json number --jq '.[0].number' 2>/dev/null || echo "")
           BACKEND_URL="https://preview-${ISSUE_NUM}-api.pscx.ai"
@@ -765,6 +818,14 @@ jobs:
             *)             VERDICT_LABEL="${API_VERDICT}" ;;
           esac
 
+          if [ "$APP_TESTS_RESULT" = "skipped" ]; then
+            APP_TESTS_GATE="skipped"
+          elif [ "$APP_TESTS_REGRESSIONS" = "true" ]; then
+            APP_TESTS_GATE="⚠️ regression vs ${APP_TESTS_BASELINE_LABEL:-baseline} — see PR comment"
+          else
+            APP_TESTS_GATE="✅ no regressions vs ${APP_TESTS_BASELINE_LABEL:-baseline}"
+          fi
+
           PR_BODY="$(cat <<PRBODY
           ## Autopilot Fix for Issue #${ISSUE_NUM}
 
@@ -792,7 +853,7 @@ jobs:
           | Bundle validation | ${VALIDATION_RESULT} |
           | Sentinel API — ${VERDICT_LABEL} | ${API_VALIDATION_RESULT} |
           | Unit tests | ${TESTS_RESULT} |
-          | App tests (E2E) | ${APP_TESTS_RESULT} (regressions: ${APP_TESTS_REGRESSIONS}) |
+          | App tests (E2E) | ${APP_TESTS_GATE} |
 
           **Preview:** ${BACKEND_URL}
           [View workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})

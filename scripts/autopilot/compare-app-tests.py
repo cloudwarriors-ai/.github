@@ -190,6 +190,7 @@ def render_report(
     baseline_meta: dict,
     pytest_diff: SuiteDiff,
     playwright_diff: SuiteDiff,
+    baseline_label: str = "baseline",
 ) -> tuple[str, bool]:
     """Return (markdown, has_regressions)."""
     has_regressions = bool(pytest_diff.regressions or playwright_diff.regressions)
@@ -201,9 +202,10 @@ def render_report(
     baseline_sha = (baseline_meta.get("git_sha") or "")[:7]
 
     lines: list[str] = ["## App Tests vs Baseline", ""]
+    lines.append(f"**Compared against:** {baseline_label}")
     if baseline_url and baseline_sha:
-        lines.append(f"**Baseline:** [{baseline_sha}]({baseline_url})")
-        lines.append("")
+        lines.append(f"**Source:** [{baseline_sha}]({baseline_url})")
+    lines.append("")
 
     # Counts table.
     pt_cur_pass = len(pytest_diff.current_pass)
@@ -296,6 +298,8 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--step-summary", type=Path, default=None)
     parser.add_argument("--regressions-out", type=Path, default=None)
+    parser.add_argument("--baseline-label", default="baseline",
+                        help="Human label shown in report header (e.g. 'daily snapshot (2026-05-02)')")
     args = parser.parse_args()
 
     for label, path in [
@@ -325,7 +329,7 @@ def main() -> int:
         baseline.get("playwright", {}), playwright_cur, "playwright"
     )
 
-    report, has_regressions = render_report(baseline, pytest_diff, playwright_diff)
+    report, has_regressions = render_report(baseline, pytest_diff, playwright_diff, args.baseline_label)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(report)
