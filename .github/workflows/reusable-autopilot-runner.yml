@@ -628,25 +628,9 @@ jobs:
           if [ -f "$DAILY_SNAPSHOT" ]; then
             GENERATED_AT=$(python3 -c "import json,sys; d=json.load(open('$DAILY_SNAPSHOT')); print(d.get('generated_at',''))" 2>/dev/null || echo "")
             if [ -n "$GENERATED_AT" ]; then
-              SNAPSHOT_AGE=$(python3 -c "
-from datetime import datetime, timezone
-import sys
-try:
-    t = datetime.fromisoformat('$GENERATED_AT'.replace('Z', '+00:00'))
-    age = (datetime.now(timezone.utc) - t).total_seconds()
-    print(int(age))
-except Exception as e:
-    print(999999)
-" 2>/dev/null || echo "999999")
+              SNAPSHOT_AGE=$(python3 -c "from datetime import datetime,timezone; t=datetime.fromisoformat('${GENERATED_AT}'.replace('Z','+00:00')); print(int((datetime.now(timezone.utc)-t).total_seconds()))" 2>/dev/null || echo "999999")
               if [ "$SNAPSHOT_AGE" -lt 86400 ]; then
-                SNAPSHOT_DATE=$(python3 -c "
-from datetime import datetime
-try:
-    t = datetime.fromisoformat('$GENERATED_AT'.replace('Z', '+00:00'))
-    print(t.strftime('%Y-%m-%d %H:%M UTC'))
-except Exception:
-    print('$GENERATED_AT')
-" 2>/dev/null || echo "$GENERATED_AT")
+                SNAPSHOT_DATE=$(python3 -c "from datetime import datetime; t=datetime.fromisoformat('${GENERATED_AT}'.replace('Z','+00:00')); print(t.strftime('%Y-%m-%d %H:%M UTC'))" 2>/dev/null || echo "$GENERATED_AT")
                 BASELINE_FILE="$DAILY_SNAPSHOT"
                 BASELINE_LABEL="daily snapshot (${SNAPSHOT_DATE})"
                 echo "::notice::Using daily snapshot from ${SNAPSHOT_DATE}"
