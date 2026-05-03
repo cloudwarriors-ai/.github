@@ -273,7 +273,7 @@ jobs:
               -f state=closed \
               -f body="${PREV_BODY}
 
----
+___
 ✅ Dev health restored on ${TODAY} — closing." > /dev/null
             echo "Closed dev health issue #${EXISTING} (clean run)"
           fi
