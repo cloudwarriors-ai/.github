@@ -269,12 +269,10 @@ jobs:
           if [ -n "$EXISTING" ]; then
             TODAY=$(date -u +%Y-%m-%d)
             PREV_BODY=$(gh api "repos/${SHADOW_REPO}/issues/${EXISTING}" --jq '.body' 2>/dev/null || echo "")
+            CLOSE_BODY=$(printf '%s\n\n___\n✅ Dev health restored on %s — closing.' "$PREV_BODY" "$TODAY")
             gh api -X PATCH "repos/${SHADOW_REPO}/issues/${EXISTING}" \
               -f state=closed \
-              -f body="${PREV_BODY}
-
-___
-✅ Dev health restored on ${TODAY} — closing." > /dev/null
+              -f body="$CLOSE_BODY" > /dev/null
             echo "Closed dev health issue #${EXISTING} (clean run)"
           fi
 
