@@ -33,6 +33,8 @@ def _load_parsers():
     )
     assert spec is not None and spec.loader is not None, "Could not load compare-app-tests.py"
     mod = importlib.util.module_from_spec(spec)
+    # Must register before exec so @dataclass can resolve cls.__module__
+    sys.modules["compare_app_tests"] = mod
     spec.loader.exec_module(mod)  # type: ignore[union-attr]
     return mod.parse_pytest_xml, mod.parse_playwright_log
 
