@@ -308,19 +308,8 @@ jobs:
           SHADOW_REPO: ${{ inputs.shadow_repo != '' && inputs.shadow_repo || github.repository }}
         run: |
           TODAY=$(date -u +%Y-%m-%d)
-          python3 - <<'PYEOF'
-import json
-from pathlib import Path
-
-snap = json.loads(Path('/tmp/dev-health/daily-snapshot.json').read_text())
-snap['note'] = (
-    'Known-good test set as of this SHA. A test missing from these lists that fails '
-    'in a future run is a regression. Tests listed as known_failing or known_flaky are '
-    'NOT regressions when they fail — update them deliberately as the app stabilizes. '
-    'Updated intentionally via daily-dev-health.yml with update_static_baseline=true.'
-)
-Path('/tmp/dev-health/new-baseline.json').write_text(json.dumps(snap, indent=2) + '\n')
-PYEOF
+          NOTE="Known-good test set as of this SHA. A test missing from these lists that fails in a future run is a regression. Tests listed as known_failing or known_flaky are NOT regressions when they fail — update them deliberately as the app stabilizes. Updated intentionally via daily-dev-health.yml with update_static_baseline=true."
+          jq --arg note "$NOTE" '.note = $note' /tmp/dev-health/daily-snapshot.json > /tmp/dev-health/new-baseline.json
 
           CONTENT_B64=$(base64 -w 0 /tmp/dev-health/new-baseline.json)
           CURRENT_SHA=$(gh api "repos/${SHADOW_REPO}/contents/tests/sentinel/baseline.json" \
