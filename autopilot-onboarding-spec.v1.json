@@ -1,0 +1,823 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "specId": "autopilot-onboarding-spec",
+  "version": "1.1.0",
+  "updated": "2026-05-11",
+  "description": "Machine-readable specification for onboarding an application to the CloudWarriors autopilot pipeline. All required files, fields, and infrastructure must be present and correctly configured before autopilot can operate reliably.",
+  "canonicalReference": "cloudwarriors-ai/project-pulse (Path A — direct execution) and cloudwarriors-ai/scopely (Path B — shadow-first execution with Sentinel validation)",
+
+  "executionPaths": {
+    "path_a_direct": {
+      "id": "path_a_direct",
+      "description": "Autopilot runs directly on the source repo. SHADOW_ENABLED=false (or unset). Fix branch created from dev, preview deployed, Sentinel validates, PR opened targeting dev.",
+      "requiredLayers": ["layer_1_app_config", "layer_2_source_workflows", "layer_4_preview_deploy", "layer_5_secrets_and_labels"]
+    },
+    "path_b_shadow_first": {
+      "id": "path_b_shadow_first",
+      "description": "Autopilot runs on the shadow repo first. SHADOW_ENABLED=true on source repo blocks direct execution and routes via shadow. After shadow fix merges, shadow CI promotes an upstream PR to the source repo.",
+      "requiredLayers": ["layer_1_app_config", "layer_2_source_workflows", "layer_3_shadow_repo", "layer_4_preview_deploy", "layer_5_secrets_and_labels"]
+    }
+  },
+
+  "layers": {
+
+    "layer_1_app_config": {
+      "id": "layer_1_app_config",
+      "title": "App Config (.autopilot/)",
+      "description": "Per-app configuration directory consumed by the reusable-autopilot-runner and Sentinel validator. Must exist at repo root.",
+      "rootDir": ".autopilot/",
+      "requiredFiles": [
+        {
+          "file": ".autopilot/config.json",
+          "description": "Primary runtime config consumed by reusable-autopilot-runner.yml to drive CI behaviour, build/test commands, and preview deploy settings.",
+          "schema": {
+            "type": "object",
+            "required": ["name", "runtime", "buildCommand", "lintCommand", "testCommand", "appTestCommand", "dbMigrateCommand", "healthEndpoint", "containerName", "previewDeploy", "mergeRequirements", "validation"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Repo slug, no spaces. Must match the GitHub repo name exactly.",
+                "example": "project-pulse"
+              },
+              "runtime": {
+                "type": "string",
+                "enum": ["node", "python"],
+                "description": "Primary application runtime. Drives which install/build paths the runner uses.",
+                "example": "node"
+              },
+              "packageManager": {
+                "type": "string",
+                "enum": ["npm", "yarn", "pnpm", "pip", "uv"],
+                "description": "Package manager. Required for python runtime (pip or uv). Optional for node (defaults to npm).",
+                "requiredWhen": "runtime == 'python'"
+              },
+              "buildCommand": {
+                "type": "string",
+                "description": "Command to produce a production build artifact. Runner runs this to verify the fix compiles.",
+                "example": "npm run build"
+              },
+              "lintCommand": {
+                "type": "string",
+                "description": "Lint/typecheck command. Runner runs this after applying a fix. Exit code 0 = pass.",
+                "example": "npm run lint"
+              },
+              "testCommand": {
+                "type": "string",
+                "description": "Unit/integration test command. Scoped to fast tests — not E2E. Runner executes this against the fix branch.",
+                "example": "npm run test"
+              },
+              "appTestCommand": {
+                "type": "string",
+                "description": "App-level smoke/E2E test command run against the preview container. May include playwright or pytest sentinel tests. Must exit 0 on success.",
+                "example": "npm run test:e2e:smoke"
+              },
+              "dbMigrateCommand": {
+                "type": "string",
+                "description": "Database migration command run inside the preview container on startup. Must be safe to run repeatedly (idempotent).",
+                "examples": ["npx prisma migrate deploy", "python manage.py migrate --noinput"]
+              },
+              "testPatterns": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "File glob patterns identifying test files. Used by runner to scope changes. Empty array is valid — runner uses assertionPatterns as fallback.",
+                "example": []
+              },
+              "assertionPatterns": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Strings that indicate assertion lines in test files. Used to validate that test files contain real assertions.",
+                "example": ["expect(", "assert"]
+              },
+              "healthEndpoint": {
+                "type": "string",
+                "description": "HTTP path checked by Sentinel and runner to confirm the preview container is alive. Must return HTTP 200 when healthy.",
+                "example": "/api/v1/health"
+              },
+              "containerName": {
+                "type": "string",
+                "description": "Name of the primary application service in docker-compose.preview.yml. Used by runner to exec into the container.",
+                "example": "app"
+              },
+              "dbContainer": {
+                "type": "string",
+                "description": "Name of the database service in docker-compose.preview.yml, if separate exec is needed. Empty string if not used.",
+                "example": ""
+              },
+              "previewDeploy": {
+                "type": "boolean",
+                "description": "Whether to spin up a preview container for this fix. Must be true for Sentinel validation to work.",
+                "example": true
+              },
+              "mergeRequirements": {
+                "type": "object",
+                "required": ["autoMerge"],
+                "properties": {
+                  "autoMerge": {
+                    "type": "boolean",
+                    "description": "Whether autopilot auto-merges the fix PR after all checks pass. False = human review required.",
+                    "example": false
+                  },
+                  "requireE2EPass": {
+                    "type": "boolean",
+                    "description": "Gate merge on appTestCommand passing. Defaults to true when previewDeploy=true.",
+                    "example": true
+                  },
+                  "requirePreviewDeploy": {
+                    "type": "boolean",
+                    "description": "Gate merge on preview container successfully starting. Defaults to true when previewDeploy=true.",
+                    "example": true
+                  }
+                }
+              },
+              "validation": {
+                "type": "object",
+                "required": ["state"],
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "enum": ["active", "inactive", "pending"],
+                    "description": "Whether Sentinel API-driven validation is active for this app.",
+                    "example": "active"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "description": "Human note explaining why validation is in its current state.",
+                    "example": "Phase 4 onboarding — second app on the Sentinel API-driven validation harness"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "file": ".autopilot/validation.json",
+          "description": "Sentinel API-driven validation configuration. Defines how Sentinel connects to the preview container, which endpoints to test, golden fixture paths, and verdict policy.",
+          "schema": {
+            "type": "object",
+            "required": ["name", "schemaVersion", "baseUrlTemplate", "healthEndpoint", "auth", "scenarios", "goldens", "endpointAllowlist", "volatility", "writeAudit", "verdictPolicy"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Must match config.json name field exactly.",
+                "example": "project-pulse"
+              },
+              "schemaVersion": {
+                "type": "string",
+                "const": "1",
+                "description": "Sentinel schema version. Always '1' for current harness."
+              },
+              "baseUrlTemplate": {
+                "type": "string",
+                "description": "URL template for preview containers. {issue} is substituted with the issue number. Must match Traefik router rule in docker-compose.preview.yml.",
+                "examples": [
+                  "https://preview-{issue}.api.pscx.ai",
+                  "http://{env}.scopely.internal"
+                ]
+              },
+              "healthEndpoint": {
+                "type": "string",
+                "description": "Health check path. Must match config.json healthEndpoint. Must return HTTP 200.",
+                "example": "/api/v1/health"
+              },
+              "auth": {
+                "type": "object",
+                "required": ["style"],
+                "properties": {
+                  "style": {
+                    "type": "string",
+                    "enum": ["none", "jwt_bearer", "api_key", "cookie"],
+                    "description": "How Sentinel authenticates to the preview container. Use 'none' for unauthenticated public endpoints.",
+                    "example": "none"
+                  },
+                  "loginEndpoint": {
+                    "type": "string",
+                    "description": "Login endpoint path. Required when style != 'none'.",
+                    "example": "/api/v1/auth/login/"
+                  },
+                  "credentialEnv": {
+                    "type": "object",
+                    "description": "Maps credential fields to GitHub Actions secret names. Required when style != 'none'.",
+                    "example": { "email": "E2E_EMAIL", "password": "E2E_PASSWORD" }
+                  },
+                  "tokenPath": {
+                    "type": "string",
+                    "description": "JSON path in the login response where the token lives.",
+                    "example": "access"
+                  },
+                  "header": {
+                    "type": "string",
+                    "description": "HTTP header name for the auth token.",
+                    "example": "Authorization"
+                  },
+                  "headerFormat": {
+                    "type": "string",
+                    "description": "Header value format. {token} is substituted with the resolved token.",
+                    "example": "Bearer {token}"
+                  },
+                  "lifecycle": {
+                    "type": "string",
+                    "enum": ["per_run", "per_request"],
+                    "description": "How often Sentinel re-authenticates.",
+                    "example": "per_run"
+                  }
+                }
+              },
+              "scenarios": {
+                "type": "object",
+                "required": ["dir", "include"],
+                "properties": {
+                  "dir": {
+                    "type": "string",
+                    "description": "Directory containing YAML scenario files, relative to repo root.",
+                    "const": "validation/scenarios"
+                  },
+                  "include": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Glob patterns for scenario files to include.",
+                    "example": ["**/*.yml"]
+                  },
+                  "exclude": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Glob patterns for scenario files to exclude."
+                  }
+                }
+              },
+              "goldens": {
+                "type": "object",
+                "required": ["dir"],
+                "properties": {
+                  "dir": {
+                    "type": "string",
+                    "description": "Directory where Sentinel writes and reads golden response fixtures.",
+                    "const": "validation/fixtures/golden"
+                  }
+                }
+              },
+              "endpointAllowlist": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Exhaustive list of METHOD /path patterns Sentinel is allowed to call. Sentinel rejects any scenario step not on this list. Required for all apps — empty array blocks all validation.",
+                "example": [
+                  "GET /api/v1/health",
+                  "GET /api/v1/public/surveys/context"
+                ]
+              },
+              "volatility": {
+                "type": "object",
+                "required": ["ignorePathsByPattern", "idFields", "timestampRegex"],
+                "description": "Rules for ignoring non-deterministic fields when comparing golden vs actual response.",
+                "properties": {
+                  "ignorePathsByPattern": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Regex patterns matching JSON path strings that Sentinel ignores in diff. Cover timestamps, request IDs, and other volatile fields.",
+                    "example": [".*\\['timestamp'\\]$", ".*\\['request_id'\\]$"]
+                  },
+                  "idFields": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Field names treated as stable IDs (not ignored, but diff-normalized).",
+                    "example": ["id", "uuid"]
+                  },
+                  "timestampRegex": {
+                    "type": "string",
+                    "description": "Regex matching timestamp strings for automatic volatility suppression.",
+                    "example": "^\\d{4}-\\d{2}-\\d{2}[T ]\\d{2}:\\d{2}:\\d{2}"
+                  }
+                }
+              },
+              "writeAudit": {
+                "type": "object",
+                "required": ["environmentsAllowingWrites", "tagHeader", "tagValue", "maxRequestsPerRun", "maxRps"],
+                "description": "Write-safety guardrails. Sentinel only performs writes (POST/PUT/PATCH/DELETE) in listed environments.",
+                "properties": {
+                  "environmentsAllowingWrites": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Only these environment names allow non-GET requests. Preview containers use 'dev'.",
+                    "example": ["dev"]
+                  },
+                  "tagHeader": {
+                    "type": "string",
+                    "const": "x-sentinel-shadow",
+                    "description": "HTTP header Sentinel adds to all write requests for auditability."
+                  },
+                  "tagValue": {
+                    "type": "string",
+                    "const": "true"
+                  },
+                  "maxRequestsPerRun": {
+                    "type": "integer",
+                    "description": "Hard cap on total requests per Sentinel run. Prevents runaway API hammering.",
+                    "example": 50
+                  },
+                  "maxRps": {
+                    "type": "number",
+                    "description": "Requests per second rate limit applied by Sentinel.",
+                    "example": 2.0
+                  }
+                }
+              },
+              "verdictPolicy": {
+                "type": "object",
+                "required": ["regressionBlocks", "newBehaviorRequiresApproval", "overrideLabel"],
+                "properties": {
+                  "regressionBlocks": {
+                    "type": "boolean",
+                    "description": "Whether a Sentinel regression (golden mismatch) blocks the PR merge.",
+                    "const": true
+                  },
+                  "newBehaviorRequiresApproval": {
+                    "type": "boolean",
+                    "description": "Whether new (no existing golden) responses require a human to approve before becoming the new golden.",
+                    "const": true
+                  },
+                  "overrideLabel": {
+                    "type": "string",
+                    "description": "GitHub issue label that bypasses Sentinel verdict blocks. Must also exist in issue labels config.",
+                    "const": "validation-override"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "file": ".autopilot/claude-prompt.md",
+          "description": "RLM (Reasoning Language Model) engine context injected into every Claude run for this application. Must include: tech stack summary, git flow (which branch autopilot targets), port, key file paths, API response contract, auth/roles, database conventions, E2E critical rules, and code style.",
+          "required": true,
+          "requiredSections": [
+            "Tech Stack",
+            "Git Flow",
+            "Key File Paths",
+            "API Response Contract",
+            "Auth & Roles",
+            "Database Conventions",
+            "E2E Testing",
+            "Code Style",
+            "Common Mistakes to Avoid"
+          ],
+          "notes": "This file is the single source of truth the RLM uses when generating fixes. Stale or missing content leads to broken PRs. Update whenever conventions change."
+        }
+      ],
+      "optionalFiles": [
+        {
+          "file": ".autopilot/seed-preview.sh",
+          "description": "Shell script that seeds the preview database with fixture data after migrations run. Required only for apps that need pre-populated state to pass E2E tests. Must be idempotent and exit 0.",
+          "requiredWhen": "App E2E tests depend on seed data that doesn't exist in schema defaults"
+        }
+      ]
+    },
+
+    "layer_2_source_workflows": {
+      "id": "layer_2_source_workflows",
+      "title": "Source Repo Workflows (.github/workflows/)",
+      "description": "GitHub Actions workflows in the source (non-shadow) repo that drive the autopilot pipeline. Two are required; one is required for shadow-enabled apps.",
+      "requiredFiles": [
+        {
+          "file": ".github/workflows/autopilot-intake.yml",
+          "description": "Intake workflow: validates the issue, resolves track (bug/feature) and base branch, dispatches autopilot-runner, updates issue labels. Must implement shadow guard.",
+          "requiredTriggers": {
+            "issues": { "types": ["labeled"] },
+            "issue_comment": { "types": ["created"] },
+            "workflow_dispatch": { "inputs": ["issue_number"] }
+          },
+          "requiredConcurrency": {
+            "group": "autopilot-intake-{issue_number}",
+            "cancelInProgress": false
+          },
+          "requiredPermissions": {
+            "contents": "read",
+            "pull-requests": "read",
+            "issues": "write",
+            "actions": "read"
+          },
+          "requiredSteps": [
+            {
+              "id": "shadow_guard",
+              "name": "Check shadow guard",
+              "description": "Reads SHADOW_ENABLED repo variable. Sets output 'blocked' to 'true'/'false'. All downstream steps must gate on this output.",
+              "implementation": "actions/github-script@v7",
+              "envVar": "SHADOW_ENABLED_VAR",
+              "envSource": "${{ vars.SHADOW_ENABLED }}"
+            },
+            {
+              "id": "exit_if_shadow",
+              "name": "Exit if shadow-enabled",
+              "condition": "steps.shadow_guard.outputs.blocked == 'true'",
+              "description": "Posts a dedup-guarded comment (marker: <!-- AUTOPILOT_SHADOW_GUARD -->) and fails the job. Prevents execution on source repo when shadow routing is active."
+            },
+            {
+              "id": "killswitch",
+              "name": "Check kill switch",
+              "condition": "steps.shadow_guard.outputs.blocked != 'true'",
+              "description": "Three checks: (1) global kill via AUTOPILOT: Disabled label on any open issue, (2) per-issue skip via AUTOPILOT: Skip label, (3) rate limit of max 5 concurrent autopilot runs."
+            },
+            {
+              "id": "exit_if_disabled",
+              "name": "Exit if disabled",
+              "condition": "steps.shadow_guard.outputs.blocked != 'true' && steps.killswitch.outputs.disabled == 'true'",
+              "description": "Posts dedup-guarded comment (marker: <!-- AUTOPILOT_DISABLED -->) with kill reason and fails the job."
+            },
+            {
+              "id": "context",
+              "name": "Resolve issue context",
+              "condition": "steps.shadow_guard.outputs.blocked != 'true' && steps.killswitch.outputs.disabled != 'true'",
+              "description": "Resolves track (bugs/features) from TRACK: Bug/Feature labels or title prefix. Resolves base branch from ENV: Dev/Prod labels (default: dev). Sets head branch as autofix/issue-{number}. Fails if track unresolvable."
+            },
+            {
+              "id": "dispatch_runner",
+              "name": "Dispatch runner",
+              "condition": "steps.shadow_guard.outputs.blocked != 'true' && steps.killswitch.outputs.disabled != 'true'",
+              "description": "Calls github.rest.actions.createWorkflowDispatch targeting autopilot-runner.yml on the resolved base branch.",
+              "requiredSecret": "WORKFLOW_PAT"
+            },
+            {
+              "id": "set_status_label",
+              "name": "Set STATUS label",
+              "condition": "steps.shadow_guard.outputs.blocked != 'true' && steps.killswitch.outputs.disabled != 'true'",
+              "description": "Removes all STATUS:* labels and adds STATUS: In Progress."
+            },
+            {
+              "id": "post_progress_comment",
+              "name": "Post progress comment",
+              "condition": "steps.shadow_guard.outputs.blocked != 'true' && steps.killswitch.outputs.disabled != 'true'",
+              "description": "Upserts a progress comment (marker: <!-- AUTOPILOT_V2 -->) with track, base, head, and workflow run link."
+            }
+          ],
+          "criticalNote": "Every step after shadow_guard MUST include the shadow guard condition: steps.shadow_guard.outputs.blocked != 'true'. Missing this causes autopilot to run on the source repo even when shadow routing is active."
+        },
+        {
+          "file": ".github/workflows/autopilot-runner.yml",
+          "description": "Runner workflow: thin caller that passes inputs to the shared reusable-autopilot-runner.yml. SHA-pinned to ensure reproducibility across deployments.",
+          "requiredTriggers": {
+            "workflow_dispatch": {
+              "inputs": ["issue_number", "issue_title", "track", "base", "head"]
+            }
+          },
+          "requiredJobStructure": {
+            "job": "run",
+            "uses": "cloudwarriors-ai/.github/.github/workflows/reusable-autopilot-runner.yml@{SHA}",
+            "shaComment": "Pin format: @{40-char-sha}  # main YYYY-MM-DD",
+            "currentPinnedSha": "dd7c014a3b154dbe50f4220af748e0c6c2a77bfd",
+            "currentPinnedDate": "2026-04-24",
+            "passedInputs": ["issue_number", "issue_title", "track", "base", "head", "max_claude_turns", "max_rlm_cost"],
+            "secrets": "inherit"
+          },
+          "recommendedLimits": {
+            "max_claude_turns": 10,
+            "max_rlm_cost": 2
+          }
+        },
+        {
+          "file": ".github/workflows/shadow-code-sync.yml",
+          "description": "Code sync workflow: pushes code changes from main/dev to the shadow repo. Without this, shadow runs against stale code. REQUIRED when path_b_shadow_first is used.",
+          "requiredWhen": "executionPath == 'path_b_shadow_first'",
+          "requiredTriggers": {
+            "push": { "branches": ["main", "dev"] }
+          },
+          "requiredJobStructure": {
+            "uses": "cloudwarriors-ai/.github/.github/workflows/reusable-shadow-code-sync.yml@main",
+            "with": {
+              "shadow_repo": "cloudwarriors-ai/{name}-shadow"
+            },
+            "secrets": "inherit"
+          }
+        }
+      ]
+    },
+
+    "layer_3_shadow_repo": {
+      "id": "layer_3_shadow_repo",
+      "title": "Shadow Repo",
+      "description": "A separate GitHub repo (cloudwarriors-ai/{name}-shadow) where autopilot runs first when Path B is active. Code is kept in sync via layer_2_source_workflows/shadow-code-sync.yml.",
+      "requiredWhen": "executionPath == 'path_b_shadow_first'",
+      "namingConvention": "cloudwarriors-ai/{source-repo-name}-shadow",
+      "requiredFiles": [
+        {
+          "file": ".github/workflows/claude-ci.yml",
+          "description": "Shadow repo intake + autopilot dispatcher. Uses the centralized reusable-autopilot-intake.yml from cloudwarriors-ai/.github. Handles: (1) hourly cron issue sync, (2) AUTOFIX: Ready label trigger, (3) code sync reception, (4) upstream PR promotion after shadow fix merges.",
+          "requiredTriggers": ["issue_comment", "issues.labeled", "schedule (hourly)", "workflow_dispatch"],
+          "reusableWorkflow": "cloudwarriors-ai/.github/.github/workflows/reusable-autopilot-intake.yml@main"
+        }
+      ],
+      "syncedFromSource": [
+        ".autopilot/config.json",
+        ".autopilot/validation.json",
+        ".autopilot/claude-prompt.md",
+        "docker-compose.preview.yml",
+        "validation/scenarios/",
+        "validation/fixtures/golden/"
+      ],
+      "sourceIssueCommentLifecycle": {
+        "description": "When Path B is active, the platform automatically cross-posts status updates to the source issue. No onboarder action required — this is handled by the reusable-autopilot-intake and reusable-autopilot-runner platform workflows.",
+        "comments": [
+          {
+            "marker": "<!-- AUTOPILOT_SHADOW_GUARD -->",
+            "postedBy": "source repo autopilot-intake.yml (shadow guard step)",
+            "when": "AUTOFIX: Ready label applied to source issue and SHADOW_ENABLED=true",
+            "content": "One-time notice. Includes link to shadow repo issues page (derived as cloudwarriors-ai/shadow-{owner}-{repo}). Posted once; not updated."
+          },
+          {
+            "marker": "<!-- SHADOW_RUN_ACTIVE -->",
+            "postedBy": "reusable-autopilot-intake.yml (cross-post step, runs in shadow repo context)",
+            "when": "Shadow intake dispatches the runner",
+            "content": "Created with shadow issue link + workflow run link + 'In Progress' status. Updated by reusable-autopilot-runner.yml finalize job with shadow PR link ('Fix Ready') or follow-up notice ('Follow-Up Required')."
+          },
+          {
+            "marker": "<!-- SHADOW_RESOLUTION -->",
+            "postedBy": "reusable-shadow-upstream-pr.yml",
+            "when": "Shadow fix PR merges and upstream PR is created on source repo",
+            "content": "Final state comment with shadow issue link, shadow PR link, and upstream source PR link."
+          }
+        ]
+      },
+      "notes": "Shadow repo .autopilot/ config is NOT manually maintained — it is overwritten by shadow-code-sync on every push to main/dev in the source repo. Never manually edit shadow repo app config files."
+    },
+
+    "layer_4_preview_deploy": {
+      "id": "layer_4_preview_deploy",
+      "title": "Preview Deploy",
+      "description": "Docker Compose setup that runs the application in a preview container for each autopilot fix. Sentinel targets the preview container URL for API-driven validation.",
+      "requiredFiles": [
+        {
+          "file": "docker-compose.preview.yml",
+          "description": "Defines the preview container stack. Required services: app (the application) and a database if the app needs one. Must expose the app via Traefik with the correct domain pattern.",
+          "requiredEnvVars": [
+            { "name": "PREVIEW_ID", "source": "runtime", "description": "Issue number (e.g. 'issue-42'). Set by the runner at deploy time." },
+            { "name": "PREVIEW_DOMAIN", "source": "runtime", "description": "FQDN for this preview (e.g. 'preview-42.pscx.ai')." },
+            { "name": "PREVIEW_AUTH_SECRET", "source": "secret", "description": "Auth secret passed to the app container (AUTH_SECRET / NEXTAUTH_SECRET equivalent)." }
+          ],
+          "requiredTraefikLabels": {
+            "description": "App service must have Traefik labels exposing both the frontend domain and the API alias domain.",
+            "frontendRouter": "preview-${PREVIEW_ID}",
+            "apiAliasRouter": "preview-${PREVIEW_ID}-api",
+            "apiAliasHost": "preview-${PREVIEW_ID}.api.pscx.ai",
+            "note": "The api alias host pattern must match validation.json baseUrlTemplate with {issue} substituted."
+          },
+          "requiredHealthCheck": {
+            "path": "Must match config.json healthEndpoint",
+            "example": "wget --no-verbose --tries=1 --spider http://localhost:{PORT}/api/v1/health",
+            "retries": 12,
+            "startPeriod": "90s"
+          },
+          "forbiddenConfig": [
+            {
+              "env": "SKIP_MIGRATIONS",
+              "reason": "Prevents database migrations from running in the preview container. Must be absent or set to false. The runner expects migrations to run automatically on container start via the entrypoint script."
+            }
+          ]
+        },
+        {
+          "file": "scripts/docker-entrypoint.sh",
+          "description": "Container entrypoint script. Must run the dbMigrateCommand (from config.json) before starting the application. Presence of SKIP_MIGRATIONS env var in docker-compose.preview.yml must not block this.",
+          "requiredBehavior": "Run migrations → start app. Must be idempotent."
+        }
+      ],
+      "requiredDirectories": [
+        {
+          "path": "validation/scenarios/",
+          "description": "Directory for Sentinel YAML scenario files. Must exist. May be empty initially — Sentinel discovers files here.",
+          "mustExist": true,
+          "contentRequired": false
+        },
+        {
+          "path": "validation/fixtures/golden/",
+          "description": "Directory where Sentinel writes and reads golden response fixtures. Must exist in git (use .gitkeep if empty). Without this, Sentinel cannot write goldens on first run.",
+          "mustExist": true,
+          "ensureWithGitkeep": true
+        }
+      ]
+    },
+
+    "layer_5_secrets_and_labels": {
+      "id": "layer_5_secrets_and_labels",
+      "title": "Secrets, Variables & Labels",
+      "description": "GitHub Actions secrets, repository variables, and issue labels required for the autopilot pipeline to function.",
+      "requiredSecrets": [
+        {
+          "name": "WORKFLOW_PAT",
+          "description": "GitHub Personal Access Token with workflow scope. Used by autopilot-intake.yml to dispatch autopilot-runner.yml. Without this, dispatch fails with 403.",
+          "scope": "workflow",
+          "usedIn": ["autopilot-intake.yml (Dispatch runner step)"]
+        },
+        {
+          "name": "ANTHROPIC_API_KEY",
+          "description": "Anthropic API key for Claude. Consumed by reusable-autopilot-runner.yml. Must have sufficient quota for the max_rlm_cost configured in runner.",
+          "scope": "anthropic_api",
+          "usedIn": ["reusable-autopilot-runner.yml (via secrets: inherit)"]
+        },
+        {
+          "name": "PREVIEW_AUTH_SECRET",
+          "description": "Secret used as AUTH_SECRET / NEXTAUTH_SECRET (or equivalent) in the preview container. Must be a non-empty string — any random value is acceptable for preview.",
+          "scope": "preview_deploy",
+          "usedIn": ["docker-compose.preview.yml"]
+        },
+        {
+          "name": "SHADOW_PAT",
+          "description": "GitHub PAT with repo scope to push code to the shadow repo. Required only when path_b_shadow_first is used.",
+          "scope": "repo",
+          "requiredWhen": "executionPath == 'path_b_shadow_first'",
+          "usedIn": ["shadow-code-sync.yml (via reusable-shadow-code-sync)"]
+        }
+      ],
+      "requiredVariables": [
+        {
+          "name": "SHADOW_ENABLED",
+          "type": "repository_variable",
+          "description": "Repo variable (not secret) that toggles shadow routing. When 'true', autopilot-intake.yml blocks direct execution and routes to shadow repo. When 'false' or unset, Path A (direct) runs.",
+          "validValues": ["true", "false"],
+          "default": "false (unset = false)",
+          "location": "GitHub → Settings → Secrets and variables → Actions → Variables"
+        }
+      ],
+      "requiredLabels": [
+        {
+          "name": "AUTOFIX: Ready",
+          "description": "Triggers autopilot-intake.yml when applied to an issue. Primary trigger label.",
+          "color": "suggested: #0075ca"
+        },
+        {
+          "name": "TRACK: Bug",
+          "description": "Routes the issue to the 'bugs' track in autopilot. Sets track=bugs in runner dispatch.",
+          "color": "suggested: #d93f0b"
+        },
+        {
+          "name": "TRACK: Feature",
+          "description": "Routes the issue to the 'features' track in autopilot. Sets track=features in runner dispatch.",
+          "color": "suggested: #0e8a16"
+        },
+        {
+          "name": "STATUS: In Progress",
+          "description": "Applied by autopilot-intake when runner is dispatched. Replaced by STATUS: Done or STATUS: Failed by the runner on completion.",
+          "color": "suggested: #fbca04"
+        },
+        {
+          "name": "STATUS: Done",
+          "description": "Applied by runner when fix PR is successfully created and all checks pass.",
+          "color": "suggested: #0e8a16"
+        },
+        {
+          "name": "STATUS: Failed",
+          "description": "Applied by runner when it cannot produce a passing fix.",
+          "color": "suggested: #d93f0b"
+        },
+        {
+          "name": "AUTOPILOT: Disabled",
+          "description": "Global kill switch. When any open issue has this label, autopilot-intake blocks ALL new runs.",
+          "color": "suggested: #e4e669"
+        },
+        {
+          "name": "AUTOPILOT: Skip",
+          "description": "Per-issue kill switch. When the target issue has this label, autopilot-intake skips it.",
+          "color": "suggested: #e4e669"
+        },
+        {
+          "name": "ENV: Dev",
+          "description": "Signals that the fix should target the dev branch. Default when neither ENV label is present.",
+          "color": "suggested: #bfd4f2"
+        },
+        {
+          "name": "ENV: Prod",
+          "description": "Signals that the fix should target the main branch. Use for hotfixes only.",
+          "color": "suggested: #bfd4f2"
+        },
+        {
+          "name": "validation-override",
+          "description": "Bypasses Sentinel verdict blocks (regression or new-behavior approval gate). Must match validation.json verdictPolicy.overrideLabel exactly.",
+          "color": "suggested: #e4e669"
+        }
+      ]
+    }
+  },
+
+  "onboardingChecklist": {
+    "description": "Ordered checklist for onboarding a new app. Complete all items before triggering autopilot for the first time.",
+    "phases": [
+      {
+        "phase": 1,
+        "name": "Scaffold App Config",
+        "items": [
+          { "id": "1.1", "task": "Create .autopilot/config.json with all required fields", "layer": "layer_1_app_config" },
+          { "id": "1.2", "task": "Create .autopilot/validation.json with correct baseUrlTemplate matching Traefik router rule", "layer": "layer_1_app_config" },
+          { "id": "1.3", "task": "Create .autopilot/claude-prompt.md covering all required sections", "layer": "layer_1_app_config" },
+          { "id": "1.4", "task": "Create validation/scenarios/ directory (empty is OK)", "layer": "layer_4_preview_deploy" },
+          { "id": "1.5", "task": "Create validation/fixtures/golden/.gitkeep", "layer": "layer_4_preview_deploy" }
+        ]
+      },
+      {
+        "phase": 2,
+        "name": "Configure Workflows",
+        "items": [
+          { "id": "2.1", "task": "Create or update .github/workflows/autopilot-intake.yml with shadow guard block on all steps", "layer": "layer_2_source_workflows" },
+          { "id": "2.2", "task": "Create or update .github/workflows/autopilot-runner.yml SHA-pinned to current reusable runner SHA", "layer": "layer_2_source_workflows" },
+          { "id": "2.3", "task": "Create .github/workflows/shadow-code-sync.yml (required for Path B only)", "layer": "layer_2_source_workflows", "pathB": true }
+        ]
+      },
+      {
+        "phase": 3,
+        "name": "Fix Preview Deploy",
+        "items": [
+          { "id": "3.1", "task": "Verify docker-compose.preview.yml has no SKIP_MIGRATIONS env var", "layer": "layer_4_preview_deploy" },
+          { "id": "3.2", "task": "Verify Traefik api-alias router rule matches validation.json baseUrlTemplate pattern", "layer": "layer_4_preview_deploy" },
+          { "id": "3.3", "task": "Verify docker-entrypoint.sh runs migrations before app start", "layer": "layer_4_preview_deploy" }
+        ]
+      },
+      {
+        "phase": 4,
+        "name": "Secrets & Labels",
+        "items": [
+          { "id": "4.1", "task": "Add WORKFLOW_PAT to GitHub repo secrets", "layer": "layer_5_secrets_and_labels" },
+          { "id": "4.2", "task": "Add ANTHROPIC_API_KEY to GitHub repo secrets", "layer": "layer_5_secrets_and_labels" },
+          { "id": "4.3", "task": "Add PREVIEW_AUTH_SECRET to GitHub repo secrets", "layer": "layer_5_secrets_and_labels" },
+          { "id": "4.4", "task": "Create SHADOW_ENABLED repo variable (set to 'false' for Path A, 'true' for Path B)", "layer": "layer_5_secrets_and_labels" },
+          { "id": "4.5", "task": "Create all required issue labels in GitHub repo", "layer": "layer_5_secrets_and_labels" }
+        ]
+      },
+      {
+        "phase": 5,
+        "name": "Shadow Repo Setup (Path B only)",
+        "pathBOnly": true,
+        "items": [
+          { "id": "5.1", "task": "Create shadow repo: cloudwarriors-ai/{name}-shadow", "layer": "layer_3_shadow_repo" },
+          { "id": "5.2", "task": "Add claude-ci.yml using reusable-autopilot-intake.yml to shadow repo", "layer": "layer_3_shadow_repo" },
+          { "id": "5.3", "task": "Add SHADOW_PAT to source repo secrets", "layer": "layer_5_secrets_and_labels" },
+          { "id": "5.4", "task": "Push to source repo main/dev to trigger first code sync", "layer": "layer_3_shadow_repo" },
+          { "id": "5.5", "task": "Set SHADOW_ENABLED=true on source repo", "layer": "layer_5_secrets_and_labels" }
+        ]
+      },
+      {
+        "phase": 6,
+        "name": "First Run Validation",
+        "items": [
+          { "id": "6.1", "task": "Create a test issue with TRACK: Bug and AUTOFIX: Ready labels", "layer": null },
+          { "id": "6.2", "task": "Verify autopilot-intake runs without error (check Actions tab)", "layer": null },
+          { "id": "6.3", "task": "Verify autopilot-runner dispatches and preview container starts", "layer": null },
+          { "id": "6.4", "task": "Verify Sentinel can reach baseUrlTemplate (health check passes)", "layer": null },
+          { "id": "6.5", "task": "Verify golden fixtures are written to validation/fixtures/golden/ on first run", "layer": null }
+        ]
+      }
+    ]
+  },
+
+  "complianceCheckerHints": {
+    "description": "Machine-readable hints for automated compliance checking tools. Checks prefixed 'check_platform_' target cloudwarriors-ai/.github reusable workflows and are verified against that repo, not onboarded app repos.",
+    "checks": [
+      {
+        "id": "check_config_json_fields",
+        "description": "All required fields present in .autopilot/config.json",
+        "requiredFields": ["name", "runtime", "buildCommand", "lintCommand", "testCommand", "appTestCommand", "dbMigrateCommand", "healthEndpoint", "containerName", "previewDeploy", "mergeRequirements", "validation"]
+      },
+      {
+        "id": "check_validation_json_base_url",
+        "description": "baseUrlTemplate in validation.json contains {issue} placeholder",
+        "pattern": "\\{issue\\}"
+      },
+      {
+        "id": "check_shadow_guard_in_intake",
+        "description": "autopilot-intake.yml (source repo) contains shadow guard step, exit-if-shadow step, and all downstream steps gate on shadow_guard.outputs.blocked. The guard comment now includes a dynamic link to the shadow repo issues page.",
+        "requiredStrings": ["SHADOW_ENABLED_VAR", "shadow_guard.outputs.blocked", "<!-- AUTOPILOT_SHADOW_GUARD -->", "shadow repo"],
+        "note": "The guard comment body is dynamic (includes derived shadow repo URL). Check for the marker string and 'shadow repo' text rather than the full message."
+      },
+      {
+        "id": "check_runner_sha_pinned",
+        "description": "autopilot-runner.yml uses SHA-pinned reference to reusable-autopilot-runner.yml",
+        "pattern": "reusable-autopilot-runner\\.yml@[0-9a-f]{40}"
+      },
+      {
+        "id": "check_no_skip_migrations",
+        "description": "docker-compose.preview.yml does not contain SKIP_MIGRATIONS=true",
+        "forbiddenString": "SKIP_MIGRATIONS=true"
+      },
+      {
+        "id": "check_golden_dir_exists",
+        "description": "validation/fixtures/golden/ directory exists in repo",
+        "requiredPath": "validation/fixtures/golden"
+      },
+      {
+        "id": "check_traefik_api_alias",
+        "description": "docker-compose.preview.yml has api-alias Traefik router matching preview-{PREVIEW_ID}.api.pscx.ai pattern",
+        "requiredString": "api.pscx.ai"
+      },
+      {
+        "id": "check_claude_prompt_sections",
+        "description": ".autopilot/claude-prompt.md contains all required section headers",
+        "requiredSections": ["Tech Stack", "Git Flow", "Key File Paths", "API Response Contract", "Auth", "Database", "E2E", "Code Style"]
+      },
+      {
+        "id": "check_platform_shadow_crosspost_intake",
+        "description": "Platform check (cloudwarriors-ai/.github): reusable-autopilot-intake.yml contains cross-post step that writes <!-- SHADOW_RUN_ACTIVE --> to source issue when running in shadow repo.",
+        "targetFile": "cloudwarriors-ai/.github/.github/workflows/reusable-autopilot-intake.yml",
+        "requiredStrings": ["<!-- SHADOW_RUN_ACTIVE -->", "Cross-post shadow run to source issue", ".shadow/config.json", "endsWith('-shadow')"]
+      },
+      {
+        "id": "check_platform_shadow_crosspost_runner",
+        "description": "Platform check (cloudwarriors-ai/.github): reusable-autopilot-runner.yml finalize job contains cross-post step that updates <!-- SHADOW_RUN_ACTIVE --> with shadow PR link or follow-up status.",
+        "targetFile": "cloudwarriors-ai/.github/.github/workflows/reusable-autopilot-runner.yml",
+        "requiredStrings": ["<!-- SHADOW_RUN_ACTIVE -->", "Cross-post shadow status to source issue", "endsWith('-shadow')", "if: always()"]
+      }
+    ]
+  }
+}
