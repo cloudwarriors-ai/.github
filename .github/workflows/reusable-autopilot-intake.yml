@@ -99,9 +99,8 @@ jobs:
             });
 
             if (!comments.data.some(c => c.body.includes(marker))) {
-              const shadowRepoName = `shadow-${context.repo.owner}-${context.repo.repo}`
-                .toLowerCase().replace(/[^a-z0-9-]/g, '-');
-              const shadowIssuesUrl = `https://github.com/cloudwarriors-ai/${shadowRepoName}/issues`;
+              const shadowRepoName = `${context.repo.repo}-shadow`;
+              const shadowIssuesUrl = `https://github.com/${context.repo.owner}/${shadowRepoName}/issues`;
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -466,10 +465,29 @@ jobs:
 
             const [sourceOwner, sourceRepoName] = config.sourceRepo.split('/');
             const shadowIssueNumber = ${{ inputs.issue_number }};
+
+            // Primary: reverse-map from config. May miss on brand-new issues due to
+            // a race where the sync stamps AUTOFIX:Ready before writing config.json.
             const reverseMap = Object.fromEntries(
               Object.entries(config.issueMap || {}).map(([src, shad]) => [String(shad), Number(src)])
             );
-            const sourceIssueNumber = reverseMap[String(shadowIssueNumber)];
+            let sourceIssueNumber = reverseMap[String(shadowIssueNumber)];
+
+            // Fallback: parse shadow issue body for "Shadow of [owner/repo#N]" footer.
+            if (!sourceIssueNumber) {
+              try {
+                const { data: shadowIssue } = await github.rest.issues.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: shadowIssueNumber,
+                });
+                const m = (shadowIssue.body || '').match(/Shadow of \[.*?#(\d+)\]/);
+                if (m) sourceIssueNumber = Number(m[1]);
+              } catch (e) {
+                core.warning(`Could not fetch shadow issue body: ${e.message}`);
+              }
+            }
+
             if (!sourceIssueNumber) {
               core.warning(`No source issue mapping found for shadow issue #${shadowIssueNumber}`);
               return;
