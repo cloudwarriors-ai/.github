@@ -116,6 +116,11 @@ jobs:
               repo: sourceRepoName,
             });
             const defaultBranch = sourceRepoData.default_branch;
+            // Use the shadow PR's base branch as the upstream target so that
+            // shadow-dev → source-dev (not source-main). Falls back to default
+            // branch only when the shadow base is 'main' (direct-to-main repos).
+            const shadowBase = shadowPr.base.ref || 'main';
+            const upstreamTarget = shadowBase === 'main' ? defaultBranch : shadowBase;
 
             core.setOutput('source_repo', sourceRepo);
             core.setOutput('source_owner', sourceOwner);
@@ -124,9 +129,10 @@ jobs:
             core.setOutput('shadow_issue_number', String(shadowIssueNumber));
             core.setOutput('shadow_issue_url', `https://github.com/${shadowOwner}/${shadowRepoName}/issues/${shadowIssueNumber}`);
             core.setOutput('shadow_pr_url', shadowPr.html_url);
-            core.setOutput('shadow_base_branch', shadowPr.base.ref || 'main');
+            core.setOutput('shadow_base_branch', shadowBase);
             core.setOutput('upstream_branch', `shadow-fix-${sourceIssueNumber}`);
             core.setOutput('default_branch', defaultBranch);
+            core.setOutput('upstream_target', upstreamTarget);
 
       - name: Export fix branch to source repo
         id: export
@@ -137,6 +143,7 @@ jobs:
           SOURCE_REPO: ${{ steps.prepare.outputs.source_repo_name }}
           SHADOW_BASE_BRANCH: ${{ steps.prepare.outputs.shadow_base_branch }}
           UPSTREAM_BRANCH: ${{ steps.prepare.outputs.upstream_branch }}
+          UPSTREAM_TARGET: ${{ steps.prepare.outputs.upstream_target }}
           DEFAULT_BRANCH: ${{ steps.prepare.outputs.default_branch }}
           SOURCE_ISSUE_NUMBER: ${{ steps.prepare.outputs.source_issue_number }}
         run: |
@@ -144,7 +151,7 @@ jobs:
           git config --global user.name "Claude Code Bot"
           git config --global user.email "claude-bot@anthropic.com"
 
-          git clone --no-tags --branch "$DEFAULT_BRANCH" \
+          git clone --no-tags --branch "$UPSTREAM_TARGET" \
             "https://x-access-token:${WORKFLOW_PAT}@github.com/${SOURCE_OWNER}/${SOURCE_REPO}.git" source
           git clone --no-tags \
             "https://x-access-token:${WORKFLOW_PAT}@github.com/${{ inputs.shadow_repo }}.git" shadow
@@ -173,7 +180,7 @@ jobs:
 
           git -C shadow fetch origin "$SHADOW_BASE_BRANCH"
           git -C shadow fetch origin "pull/${{ inputs.shadow_pr_number }}/head:shadow-pr-head"
-          git -C source checkout -b "$UPSTREAM_BRANCH" "origin/$DEFAULT_BRANCH"
+          git -C source checkout -b "$UPSTREAM_BRANCH" "origin/$UPSTREAM_TARGET"
 
           git -C shadow diff --binary "origin/$SHADOW_BASE_BRANCH...shadow-pr-head" \
             -- . \
@@ -304,7 +311,7 @@ jobs:
             const sourceOwner = '${{ steps.prepare.outputs.source_owner }}';
             const sourceRepoName = '${{ steps.prepare.outputs.source_repo_name }}';
             const upstreamBranch = '${{ steps.prepare.outputs.upstream_branch }}';
-            const defaultBranch = '${{ steps.prepare.outputs.default_branch }}';
+            const upstreamTarget = '${{ steps.prepare.outputs.upstream_target }}';
             const sourceIssueNumber = '${{ steps.prepare.outputs.source_issue_number }}';
             const shadowIssueNumber = '${{ steps.prepare.outputs.shadow_issue_number }}';
             const shadowIssueUrl = '${{ steps.prepare.outputs.shadow_issue_url }}';
@@ -375,7 +382,7 @@ jobs:
               repo: sourceRepoName,
               state: 'open',
               head: `${sourceOwner}:${upstreamBranch}`,
-              base: defaultBranch,
+              base: upstreamTarget,
               per_page: 100,
             });
 
@@ -396,7 +403,7 @@ jobs:
                 repo: sourceRepoName,
                 title: prTitle,
                 head: upstreamBranch,
-                base: defaultBranch,
+                base: upstreamTarget,
                 body: prBody,
               });
               pr = data;
