@@ -83,7 +83,27 @@ jobs:
             const reverseMap = Object.fromEntries(
               Object.entries(config.issueMap || {}).map(([src, shad]) => [String(shad), Number(src)])
             );
-            const sourceIssueNumber = reverseMap[String(shadowIssueNumber)] || shadowIssueNumber;
+            let sourceIssueNumber = reverseMap[String(shadowIssueNumber)];
+
+            // Fallback: parse shadow issue body for "Shadow of [owner/repo#N]" footer.
+            if (!sourceIssueNumber) {
+              try {
+                const { data: shadowIssue } = await github.rest.issues.get({
+                  owner: shadowOwner,
+                  repo: shadowRepoName,
+                  issue_number: shadowIssueNumber,
+                });
+                const m = (shadowIssue.body || '').match(/Shadow of \[.*?#(\d+)\]/);
+                if (m) sourceIssueNumber = Number(m[1]);
+              } catch (e) {
+                core.warning(`Could not fetch shadow issue body: ${e.message}`);
+              }
+            }
+
+            if (!sourceIssueNumber) {
+              core.setFailed(`Cannot resolve source issue for shadow issue #${shadowIssueNumber} — issueMap miss and no body footer found`);
+              return;
+            }
 
             const { data: shadowPr } = await github.rest.pulls.get({
               owner: shadowOwner,
