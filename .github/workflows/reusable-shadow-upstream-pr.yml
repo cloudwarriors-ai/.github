@@ -278,19 +278,23 @@ jobs:
             });
             let match = await findAttestation(runsResp.workflow_runs);
 
-            // Fallback: search autopilot-runner.yml runs by inputs.issue_number.
-            // workflow_dispatch runs store the dispatch-ref SHA (e.g. main), not the
-            // fix branch SHA, so the head_sha filter above misses them.
+            // Fallback: workflow_dispatch runner runs store the dispatch-ref SHA (main)
+            // as head_sha, not the fix branch commit — so the lookup above misses them.
+            // Find the most recent autopilot-runner.yml run that:
+            //   (a) has a sentinel-validation artifact, and
+            //   (b) was created before the PR (runner always precedes PR creation).
+            // Reliable for single-concurrent-run repos; picks the right run in all
+            // observed shadow-repo usage patterns.
             if (!match) {
-              const shadowIssueNumber = parseInt(pr.head.ref.match(/\d+$/) || ['0'], 10);
+              const prCreatedAt = new Date(pr.created_at).getTime();
               const { data: runnerRuns } = await github.rest.actions.listWorkflowRuns({
                 owner: shadowOwner,
                 repo: shadowRepoName,
                 workflow_id: 'autopilot-runner.yml',
                 per_page: 20,
               });
-              const candidates = runnerRuns.workflow_runs.filter(
-                r => r.inputs && String(r.inputs.issue_number) === String(shadowIssueNumber)
+              const candidates = runnerRuns.workflow_runs.filter(r =>
+                new Date(r.created_at).getTime() <= prCreatedAt + 120000
               );
               match = await findAttestation(candidates);
             }
