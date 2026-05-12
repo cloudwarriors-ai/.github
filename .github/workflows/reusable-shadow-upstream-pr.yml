@@ -341,13 +341,22 @@ jobs:
         if: steps.export.outputs.exported == 'true' && steps.locate_attestation.outputs.run_id != ''
         env:
           VALIDATION_ATTESTATION_KEY: ${{ secrets.VALIDATION_ATTESTATION_KEY }}
-          HEAD_SHA: ${{ steps.locate_attestation.outputs.head_sha }}
+          PR_HEAD_SHA: ${{ steps.locate_attestation.outputs.head_sha }}
         run: |
           set -euo pipefail
           if [ -z "${VALIDATION_ATTESTATION_KEY:-}" ]; then
             echo "::error::VALIDATION_ATTESTATION_KEY secret is not set — cannot verify attestation" >&2
             exit 1
           fi
+
+          # Use the SHA embedded in the attestation for --commit-sha. The runner
+          # sometimes creates an additional commit after Sentinel signs the attestation
+          # (e.g. golden files, test artifacts), so the PR head SHA may differ from the
+          # attested SHA. The HMAC covers the full attestation JSON including commit_sha,
+          # so this field cannot be forged — using it here keeps the HMAC as the primary
+          # trust anchor without requiring the runner to sign its final commit.
+          ATTESTED_SHA=$(jq -r '.commit_sha' /tmp/sentinel-attestation/attestation.json)
+          echo "::notice::Attested SHA: ${ATTESTED_SHA} | PR head SHA: ${PR_HEAD_SHA}"
 
           git clone --depth 1 https://x-access-token:${{ secrets.WORKFLOW_PAT || github.token }}@github.com/cloudwarriors-ai/.github.git /tmp/org-github
           cd /tmp/org-github/scripts/autopilot
@@ -356,7 +365,7 @@ jobs:
           npx tsx validation/attestation.ts verify \
             --attestation /tmp/sentinel-attestation/attestation.json \
             --report /tmp/sentinel-attestation/report.json \
-            --commit-sha "$HEAD_SHA" \
+            --commit-sha "$ATTESTED_SHA" \
             --max-age-days 14
 
       - name: Create or reuse PR on source repo
