@@ -34,6 +34,30 @@ on:
       VALIDATION_ATTESTATION_KEY:
         required: false
 
+  # Manual re-trigger for failed upstream-pr runs (e.g. after a fix is deployed).
+  workflow_dispatch:
+    inputs:
+      shadow_repo:
+        description: 'Shadow repo (e.g. cloudwarriors-ai/scopely-shadow)'
+        type: string
+        required: true
+      shadow_pr_number:
+        description: 'Merged shadow PR number'
+        type: number
+        required: true
+      shadow_branch:
+        description: 'Shadow PR head branch (e.g. autofix/issue-281)'
+        type: string
+        required: true
+      source_issue_notification_mode:
+        description: 'comment or none'
+        type: string
+        default: 'comment'
+      source_pr_review_mode:
+        description: 'advisory or none'
+        type: string
+        default: 'advisory'
+
 jobs:
   upstream-pr:
     runs-on: ubuntu-latest
