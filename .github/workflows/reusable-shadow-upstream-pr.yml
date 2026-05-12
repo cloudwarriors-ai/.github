@@ -249,7 +249,19 @@ jobs:
               repo: shadowRepoName,
               pull_number: ${{ inputs.shadow_pr_number }},
             });
-            const headSha = pr.head.sha;
+
+            // pr.head.sha becomes the merge commit SHA after the PR is merged,
+            // not the original branch tip. The attestation is signed against the
+            // branch tip, so use listCommits to get the actual last PR commit.
+            const { data: prCommits } = await github.rest.pulls.listCommits({
+              owner: shadowOwner,
+              repo: shadowRepoName,
+              pull_number: ${{ inputs.shadow_pr_number }},
+              per_page: 100,
+            });
+            const headSha = prCommits.length > 0
+              ? prCommits[prCommits.length - 1].sha
+              : pr.head.sha;
             core.setOutput('head_sha', headSha);
 
             const findAttestation = async (runs) => {
