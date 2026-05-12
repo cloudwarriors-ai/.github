@@ -500,6 +500,12 @@ jobs:
             const shadowPrUrl = '${{ steps.prepare.outputs.shadow_pr_url }}';
             const sourcePrNumber = '${{ steps.create_pr.outputs.pr_number }}';
             const sourcePrUrl = '${{ steps.create_pr.outputs.pr_url }}';
+            const [shadowOwner, shadowRepoName] = '${{ inputs.shadow_repo }}'.split('/');
+            const runnerRunId = '${{ steps.locate_attestation.outputs.run_id }}';
+            const artifactName = '${{ steps.locate_attestation.outputs.artifact_name }}';
+            const runnerRunUrl = runnerRunId
+              ? `https://github.com/${shadowOwner}/${shadowRepoName}/actions/runs/${runnerRunId}`
+              : '';
 
             const body = [
               marker,
@@ -509,10 +515,11 @@ jobs:
               `- **Shadow issue:** [${{ inputs.shadow_repo }}#${shadowIssueNumber}](${shadowIssueUrl})`,
               `- **Shadow PR:** [${{ inputs.shadow_repo }}#${{ inputs.shadow_pr_number }}](${shadowPrUrl})`,
               `- **Upstream PR:** [${sourceOwner}/${sourceRepoName}#${sourcePrNumber}](${sourcePrUrl})`,
+              runnerRunUrl ? `- **Artifacts:** [Runner run](${runnerRunUrl}) — Sentinel attestation (\`${artifactName}\`), validation report, app-test results` : '',
               '- **Status:** shadow fix merged; source PR open for review',
               '',
               'Shadow issue numbers are mapped independently from source issue numbers.',
-            ].join('\n');
+            ].filter(l => l !== '').join('\n');
 
             const comments = await github.paginate(github.rest.issues.listComments, {
               owner: sourceOwner,
