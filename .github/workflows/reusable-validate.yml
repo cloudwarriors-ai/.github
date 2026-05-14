@@ -84,6 +84,9 @@ on:
       report_artifact_name:
         description: 'Artifact name for report.json + attestation.json'
         value: ${{ jobs.validate.outputs.report_artifact_name }}
+      sentinel_failure_reason:
+        description: 'Category of Sentinel failure when api_validation_passed=false: transient-http | preview-unreachable | goldens-drift | regression | sentinel-internal | empty when passed/skipped'
+        value: ${{ jobs.validate.outputs.sentinel_failure_reason }}
 
 permissions:
   contents: read
@@ -100,6 +103,7 @@ jobs:
       verdict: ${{ steps.emit.outputs.verdict }}
       api_validation_passed: ${{ steps.emit.outputs.api_validation_passed }}
       report_artifact_name: ${{ steps.artifact-name.outputs.name }}
+      sentinel_failure_reason: ${{ steps.emit.outputs.sentinel_failure_reason }}
 
     steps:
       - name: Checkout caller repo (default)
@@ -217,30 +221,81 @@ jobs:
 
           mkdir -p /tmp/sentinel-run
 
-          # Don't fail the step on regression — we still need to upload artifacts
-          # and emit outputs. The verdict is checked downstream.
-          set +e
-          sentinel validate-api \
-            --manifest "$MANIFEST_PATH" \
-            --target "$PREVIEW_URL" \
-            --out /tmp/sentinel-run \
-            --json \
-            $FLAGS > /tmp/sentinel-run/summary.json 2> /tmp/sentinel-run/stderr.log
-          EXIT=$?
-          set -e
-          echo "sentinel exit: $EXIT"
-          if [ -s /tmp/sentinel-run/stderr.log ]; then
-            echo '--- sentinel stderr ---'
-            cat /tmp/sentinel-run/stderr.log
-          fi
+          # Retry strategy:
+          #   - Up to 3 attempts with exponential backoff (15s, 60s).
+          #   - Retry ONLY when report.json is missing — that indicates Sentinel
+          #     crashed mid-run (transient HTTP, connection reset, etc.) and no
+          #     real verdict was produced.
+          #   - If report.json exists, the verdict is a real signal (regression,
+          #     expected-diff, unchanged, etc.) and we must NOT retry — doing so
+          #     could mask a real API regression.
+          MAX_ATTEMPTS=3
+          ATTEMPT=1
+          BACKOFFS=(15 60)
+          EXIT=0
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "::group::Sentinel validate-api attempt $ATTEMPT/$MAX_ATTEMPTS"
+            rm -f /tmp/sentinel-run/report.json /tmp/sentinel-run/summary.json /tmp/sentinel-run/stderr.log
+            set +e
+            sentinel validate-api \
+              --manifest "$MANIFEST_PATH" \
+              --target "$PREVIEW_URL" \
+              --out /tmp/sentinel-run \
+              --json \
+              $FLAGS > /tmp/sentinel-run/summary.json 2> /tmp/sentinel-run/stderr.log
+            EXIT=$?
+            set -e
+            echo "sentinel exit: $EXIT"
+            if [ -s /tmp/sentinel-run/stderr.log ]; then
+              echo '--- sentinel stderr ---'
+              cat /tmp/sentinel-run/stderr.log
+            fi
+            echo "::endgroup::"
+
+            if [ -f /tmp/sentinel-run/report.json ]; then
+              # Sentinel produced a report. Real verdict — never retry.
+              break
+            fi
+
+            # report.json missing → transient crash. Retry if attempts remain.
+            if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+              SLEEP=${BACKOFFS[$((ATTEMPT-1))]}
+              echo "::warning::Sentinel produced no report.json on attempt $ATTEMPT — backing off ${SLEEP}s and retrying."
+              sleep "$SLEEP"
+            fi
+            ATTEMPT=$((ATTEMPT+1))
+          done
 
           if [ ! -f /tmp/sentinel-run/report.json ]; then
-            echo "ERROR: report.json missing — sentinel did not produce output" >&2
+            echo "ERROR: report.json missing after $MAX_ATTEMPTS attempts — sentinel did not produce output" >&2
+            # Classify the failure for downstream consumers.
+            # Default category: transient-http. Refined below if stderr indicates otherwise.
+            REASON="transient-http"
+            if grep -qiE "name or service not known|nodename nor servname|getaddrinfo failed|no route to host" /tmp/sentinel-run/stderr.log 2>/dev/null; then
+              REASON="preview-unreachable"
+            elif grep -qiE "connection refused|connection reset" /tmp/sentinel-run/stderr.log 2>/dev/null; then
+              REASON="preview-unreachable"
+            elif grep -qi "RetryExhaustedError\|RemoteProtocolError\|ReadTimeout\|ConnectTimeout\|httpx\." /tmp/sentinel-run/stderr.log 2>/dev/null; then
+              REASON="transient-http"
+            else
+              REASON="sentinel-internal"
+            fi
+            echo "sentinel_failure_reason=$REASON" >> "$GITHUB_OUTPUT"
             exit 2
           fi
 
           VERDICT=$(jq -r .run_verdict /tmp/sentinel-run/report.json)
           echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          # Categorize real verdicts. Only 'regression' should surface as a failure category.
+          if [ "$VERDICT" = "regression" ]; then
+            # Try to detect goldens drift vs assertion failure from the report.
+            DRIFT=$(jq -r '.summary.golden_mismatches // 0' /tmp/sentinel-run/report.json 2>/dev/null || echo 0)
+            if [ "$DRIFT" -gt 0 ] 2>/dev/null; then
+              echo "sentinel_failure_reason=goldens-drift" >> "$GITHUB_OUTPUT"
+            else
+              echo "sentinel_failure_reason=regression" >> "$GITHUB_OUTPUT"
+            fi
+          fi
 
       - name: Sign attestation
         if: steps.state.outputs.run == 'true' && steps.run.outputs.verdict != ''
@@ -267,23 +322,31 @@ jobs:
         env:
           STATE: ${{ steps.state.outputs.state }}
           VERDICT: ${{ steps.run.outputs.verdict }}
+          RUN_FAILURE_REASON: ${{ steps.run.outputs.sentinel_failure_reason }}
         run: |
           if [ "$STATE" = "pending_onboarding" ] || [ "$STATE" = "exempt" ]; then
             echo "verdict=skipped" >> "$GITHUB_OUTPUT"
             echo "api_validation_passed=true" >> "$GITHUB_OUTPUT"
+            echo "sentinel_failure_reason=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ -z "$VERDICT" ]; then
             # validation failed to produce a verdict — fail closed
             echo "verdict=error" >> "$GITHUB_OUTPUT"
             echo "api_validation_passed=false" >> "$GITHUB_OUTPUT"
+            # Forward the categorized failure reason from the run step. If empty
+            # (run step didn't execute), default to sentinel-internal.
+            REASON="${RUN_FAILURE_REASON:-sentinel-internal}"
+            echo "sentinel_failure_reason=$REASON" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
           if [ "$VERDICT" = "regression" ]; then
             echo "api_validation_passed=false" >> "$GITHUB_OUTPUT"
+            echo "sentinel_failure_reason=${RUN_FAILURE_REASON:-regression}" >> "$GITHUB_OUTPUT"
           else
             echo "api_validation_passed=true" >> "$GITHUB_OUTPUT"
+            echo "sentinel_failure_reason=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Upload artifact
