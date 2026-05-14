@@ -777,7 +777,7 @@ jobs:
   # ── Job 8: Upsert PR and update labels ─────────────────────────────
   finalize:
     name: "Finalize (#${{ inputs.issue_number }})"
-    needs: [rlm-fix, read-config, validate, preflight, test, validate-api, app-tests]
+    needs: [rlm-fix, read-config, validate, preflight, deploy-preview, test, validate-api, app-tests]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 10
