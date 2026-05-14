@@ -1044,7 +1044,7 @@ jobs:
               : `❌ **PR not created** — see failures below`;
             const recommendation = (() => {
               if (!prReady) return 'Pipeline halted before PR creation — review workflow logs.';
-              if (apiFailureReason === 'transient-http' || process.env.API_VALIDATION_RESULT === 'false' && process.env.DEPLOY_PREVIEW_STATUS === 'false') {
+              if (apiFailureReason === 'transient-http' || (process.env.API_VALIDATION_RESULT === 'false' && process.env.DEPLOY_PREVIEW_STATUS === 'false')) {
                 return 'Likely infrastructure flake. Consider re-running the API Validate job or merging if the PR diff itself looks good.';
               }
               if (process.env.API_VERDICT === 'regression') {
