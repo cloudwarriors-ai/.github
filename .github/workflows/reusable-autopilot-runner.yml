@@ -1044,10 +1044,19 @@ jobs:
               : `❌ **PR not created** — see failures below`;
             const recommendation = (() => {
               if (!prReady) return 'Pipeline halted before PR creation — review workflow logs.';
+              if (apiFailureReason === 'auth-failed') {
+                return 'Sentinel could not authenticate against the preview (HTTP 401). The E2E_EMAIL / E2E_PASSWORD org secrets may not match the preview environment. PR diff is still reviewable.';
+              }
+              if (apiFailureReason === 'auth-forbidden') {
+                return 'Sentinel authenticated but lacks permission for the validation endpoints (HTTP 403). The E2E user may need permission grants in the preview environment.';
+              }
+              if (apiFailureReason === 'preview-unreachable') {
+                return 'Sentinel could not reach the preview environment. The VPS deploy may have failed or DNS for the preview URL is not propagating. Check Deploy Preview job and the preview URL.';
+              }
               if (apiFailureReason === 'transient-http' || (process.env.API_VALIDATION_RESULT === 'false' && process.env.DEPLOY_PREVIEW_STATUS === 'false')) {
                 return 'Likely infrastructure flake. Consider re-running the API Validate job or merging if the PR diff itself looks good.';
               }
-              if (process.env.API_VERDICT === 'regression') {
+              if (process.env.API_VERDICT === 'regression' || apiFailureReason === 'goldens-drift') {
                 return 'Sentinel detected an API regression — review the validation report before merging.';
               }
               return 'PR exists but one or more gates failed. Review the gate breakdown above before merging.';
