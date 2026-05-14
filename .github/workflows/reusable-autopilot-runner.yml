@@ -251,6 +251,10 @@ jobs:
       # source_repo is set on shadow runs; empty on non-shadow. Used by validate-api
       # to point Sentinel's manifest checkout at the source repo (which has validation.json).
       source_repo:  ${{ steps.shadow-prep.outputs.source_repo }}
+      # preview_deployed reflects whether VPS deploy succeeded (after retries).
+      # false → downstream preview-dependent jobs (validate-api, app-tests) skip,
+      # the job still ends success so finalize runs and can produce a labeled PR.
+      preview_deployed: ${{ steps.deploy-status.outputs.preview_deployed }}
 
     steps:
       - name: Check kill switch
@@ -307,7 +311,13 @@ jobs:
           echo "source_repo=${SOURCE_REPO}" >> "$GITHUB_OUTPUT"
           echo "Pushed shadow diff → ${SOURCE_REPO}:${PREVIEW_BRANCH}"
 
-      - name: Deploy preview to VPS
+      # Deploy preview to VPS — two attempts with backoff. The VPS deploy step is
+      # the second-most common failure surface in historical runs (SSH/network flake
+      # against the preview environment). Each attempt is independently scoped so
+      # transient failures recover without taking down the rest of the pipeline.
+      - name: Deploy preview to VPS (attempt 1)
+        id: deploy-1
+        continue-on-error: true
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -330,6 +340,50 @@ jobs:
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
           PII_ENCRYPTION_KEY: ${{ secrets.PII_ENCRYPTION_KEY }}
           PII_HMAC_KEY: ${{ secrets.PII_HMAC_KEY }}
+
+      - name: Wait before retry
+        if: steps.deploy-1.outcome == 'failure'
+        run: |
+          echo "First deploy attempt failed — waiting 60s before retry."
+          sleep 60
+
+      - name: Deploy preview to VPS (attempt 2)
+        id: deploy-2
+        if: steps.deploy-1.outcome == 'failure'
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          command_timeout: 15m
+          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY
+          script: |
+            cd "$VPS_PATH"
+            git fetch origin dev --depth 1
+            git checkout origin/dev -- scripts/ .autopilot/
+            "$VPS_PATH/scripts/preview-deploy.sh" "$DEPLOY_HEAD" "$DEPLOY_ISSUE"
+        env:
+          GITHUB_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          DEPLOY_HEAD: ${{ steps.shadow-prep.outputs.deploy_head || inputs.head }}
+          DEPLOY_ISSUE: ${{ inputs.issue_number }}
+          VPS_PATH: ${{ vars.VPS_REPO_PATH }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
+          E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+          PII_ENCRYPTION_KEY: ${{ secrets.PII_ENCRYPTION_KEY }}
+          PII_HMAC_KEY: ${{ secrets.PII_HMAC_KEY }}
+
+      - name: Set preview deploy status
+        id: deploy-status
+        run: |
+          if [ "${{ steps.deploy-1.outcome }}" = "success" ] || [ "${{ steps.deploy-2.outcome }}" = "success" ]; then
+            echo "preview_deployed=true" >> "$GITHUB_OUTPUT"
+            echo "Preview deploy succeeded."
+          else
+            echo "preview_deployed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Preview deploy failed after 2 attempts — downstream preview-dependent checks (API Validate, App Tests) will be skipped. PR creation will still proceed if bundle validation and preflight passed."
+          fi
 
       - name: Set preview URL output
         id: set-url
@@ -491,6 +545,7 @@ jobs:
     if: |
       always() && !cancelled() &&
       needs.deploy-preview.result == 'success' &&
+      needs.deploy-preview.outputs.preview_deployed == 'true' &&
       needs.deploy-preview.outputs.backend_url != ''
     uses: ./.github/workflows/reusable-validate.yml
     with:
@@ -517,6 +572,7 @@ jobs:
     if: |
       always() && !cancelled() &&
       needs.deploy-preview.result == 'success' &&
+      needs.deploy-preview.outputs.preview_deployed == 'true' &&
       needs.read-config.outputs.app_test_command != ''
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -725,6 +781,9 @@ jobs:
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      pr_ready: ${{ steps.pr.outputs.pr_ready }}
+      pr_number: ${{ steps.pr.outputs.pr_number }}
 
     steps:
       - name: Checkout fix branch
@@ -866,6 +925,7 @@ jobs:
           if [ -n "$EXISTING_PR" ]; then
             gh pr edit "$EXISTING_PR" --body "$PR_BODY"
             echo "pr_number=$EXISTING_PR" >> "$GITHUB_OUTPUT"
+            echo "pr_ready=true" >> "$GITHUB_OUTPUT"
           else
             PR_URL=$(gh pr create \
               --head "$ISSUE_HEAD" \
@@ -875,6 +935,11 @@ jobs:
               --label "autopilot") || true
             PR_NUM=$(echo "$PR_URL" | grep -oE '[0-9]+$' || echo "")
             echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
+            if [ -n "$PR_NUM" ]; then
+              echo "pr_ready=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "pr_ready=false" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
       # --- Auto-merge if configured and all checks pass ---
@@ -925,6 +990,17 @@ jobs:
           needs.validate.outputs.validation_passed != 'true' ||
           needs.preflight.outputs.preflight_passed != 'true' ||
           (needs.validate-api.result != 'skipped' && needs.validate-api.outputs.api_validation_passed != 'true')
+        env:
+          PR_READY: ${{ steps.pr.outputs.pr_ready || 'false' }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number || '' }}
+          VALIDATION_RESULT: ${{ needs.validate.outputs.validation_passed || 'skipped' }}
+          PREFLIGHT_RESULT: ${{ needs.preflight.outputs.preflight_passed || 'skipped' }}
+          TESTS_RESULT: ${{ needs.test.outputs.tests_passed || 'skipped' }}
+          API_VALIDATION_RESULT: ${{ needs.validate-api.outputs.api_validation_passed || 'skipped' }}
+          API_VERDICT: ${{ needs.validate-api.outputs.verdict || 'skipped' }}
+          API_FAILURE_REASON: ${{ needs.validate-api.outputs.sentinel_failure_reason || '' }}
+          APP_TESTS_RESULT: ${{ needs.app-tests.outputs.app_tests_passed || 'skipped' }}
+          DEPLOY_PREVIEW_STATUS: ${{ needs.deploy-preview.outputs.preview_deployed || 'unknown' }}
         uses: actions/github-script@v7
         with:
           script: |
@@ -945,14 +1021,51 @@ jobs:
                 labels: ['STATUS: Follow-Up Required'],
               });
             }
+            // ── Build a structured per-gate breakdown so the issue comment reflects
+            //    what actually failed, not just "check the logs". This separates the
+            //    "PR ready for review" signal from the "every job green" signal.
+            const prReady = process.env.PR_READY === 'true';
+            const prNumber = process.env.PR_NUMBER;
+            const apiFailureReason = process.env.API_FAILURE_REASON || '';
+            const icon = (v) => v === 'true' ? '✅' : (v === 'false' || v === 'skipped' ? '❌' : '⏭️');
+            const gateRow = (name, raw, extra='') => `| ${name} | ${icon(raw)} ${raw}${extra ? ' — ' + extra : ''} |`;
+            const apiExtra = apiFailureReason ? `reason: \`${apiFailureReason}\`` : (process.env.API_VERDICT && process.env.API_VERDICT !== 'skipped' ? `verdict: ${process.env.API_VERDICT}` : '');
+            const previewExtra = process.env.DEPLOY_PREVIEW_STATUS === 'false' ? 'preview unavailable — preview-dependent checks skipped' : '';
+            const gateRows = [
+              gateRow('Bundle validation', process.env.VALIDATION_RESULT),
+              gateRow('Preflight',          process.env.PREFLIGHT_RESULT),
+              gateRow('Preview deploy',     process.env.DEPLOY_PREVIEW_STATUS, previewExtra),
+              gateRow('Project tests',      process.env.TESTS_RESULT),
+              gateRow('Sentinel API',       process.env.API_VALIDATION_RESULT, apiExtra),
+              gateRow('App tests (E2E)',    process.env.APP_TESTS_RESULT),
+            ].join('\n');
+            const prLine = prReady && prNumber
+              ? `✅ **PR #${prNumber} created** — ready for human review`
+              : `❌ **PR not created** — see failures below`;
+            const recommendation = (() => {
+              if (!prReady) return 'Pipeline halted before PR creation — review workflow logs.';
+              if (apiFailureReason === 'transient-http' || process.env.API_VALIDATION_RESULT === 'false' && process.env.DEPLOY_PREVIEW_STATUS === 'false') {
+                return 'Likely infrastructure flake. Consider re-running the API Validate job or merging if the PR diff itself looks good.';
+              }
+              if (process.env.API_VERDICT === 'regression') {
+                return 'Sentinel detected an API regression — review the validation report before merging.';
+              }
+              return 'PR exists but one or more gates failed. Review the gate breakdown above before merging.';
+            })();
             const followUpMarker = '<!-- AUTOPILOT_FOLLOWUP -->';
             const followUpBody = [
               followUpMarker,
               '### Autopilot — Follow-Up Required',
               '',
-              `**Run:** [Workflow](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+              prLine,
               '',
-              'This issue needs human attention. Check the workflow logs for details.',
+              '| Gate | Result |',
+              '|------|--------|',
+              gateRows,
+              '',
+              `**Recommendation:** ${recommendation}`,
+              '',
+              `**Run:** [Workflow](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
             ].join('\n');
             const followUpComments = await github.rest.issues.listComments({
               owner: context.repo.owner, repo: context.repo.repo,
