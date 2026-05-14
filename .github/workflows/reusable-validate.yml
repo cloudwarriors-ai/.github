@@ -257,6 +257,14 @@ jobs:
               break
             fi
 
+            # Short-circuit: if stderr clearly indicates an auth failure, no
+            # number of retries will recover (credentials are fixed for the run).
+            # Don't burn the ~90s of backoff for a guaranteed-failure case.
+            if grep -qiE "auth failed|status=401|authentication_failed|invalid credentials" /tmp/sentinel-run/stderr.log 2>/dev/null; then
+              echo "::warning::Sentinel auth failed (HTTP 401) — short-circuiting retry loop. Credentials issue is not transient."
+              break
+            fi
+
             # report.json missing → transient crash. Retry if attempts remain.
             if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
               SLEEP=${BACKOFFS[$((ATTEMPT-1))]}
@@ -267,11 +275,15 @@ jobs:
           done
 
           if [ ! -f /tmp/sentinel-run/report.json ]; then
-            echo "ERROR: report.json missing after $MAX_ATTEMPTS attempts — sentinel did not produce output" >&2
+            echo "ERROR: report.json missing after $ATTEMPT attempt(s) — sentinel did not produce output" >&2
             # Classify the failure for downstream consumers.
-            # Default category: transient-http. Refined below if stderr indicates otherwise.
+            # Order matters: most specific patterns first.
             REASON="transient-http"
-            if grep -qiE "name or service not known|nodename nor servname|getaddrinfo failed|no route to host" /tmp/sentinel-run/stderr.log 2>/dev/null; then
+            if grep -qiE "auth failed|status=401|authentication_failed|invalid credentials" /tmp/sentinel-run/stderr.log 2>/dev/null; then
+              REASON="auth-failed"
+            elif grep -qiE "status=403|forbidden|permission_denied" /tmp/sentinel-run/stderr.log 2>/dev/null; then
+              REASON="auth-forbidden"
+            elif grep -qiE "name or service not known|nodename nor servname|getaddrinfo failed|no route to host" /tmp/sentinel-run/stderr.log 2>/dev/null; then
               REASON="preview-unreachable"
             elif grep -qiE "connection refused|connection reset" /tmp/sentinel-run/stderr.log 2>/dev/null; then
               REASON="preview-unreachable"
