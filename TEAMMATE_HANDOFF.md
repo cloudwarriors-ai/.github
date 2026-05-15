@@ -474,12 +474,31 @@ gh issue create --repo cloudwarriors-ai/<shadow-name> \
 
 ### What to expect during the run (read these comments on the issue)
 
-You should see these comments appear over ~10–20 minutes:
+You should see these comments appear over ~10–20 minutes regardless of outcome:
 
 1. `🔍 RLM codebase analysis complete. Starting adversarial fix workflow...`
 2. `✅ Auto-fix complete! Changes pushed to autofix/issue-N targeting dev. PR will be created by the pipeline.`
-3. (If everything passes) The issue gets labeled `STATUS: In QA` and a PR is created
-4. (If anything failed downstream) The issue gets labeled `STATUS: Follow-Up Required` AND a structured comment lands with a per-gate breakdown:
+
+After that, the outcome depends on whether every gate passed.
+
+#### Happy path — everything green (the goal)
+
+If bundle validation + preflight + tests + (preview deploy + Sentinel + app tests if configured) all pass:
+
+- The issue gets labeled **`STATUS: In QA`**
+- A PR is created and linked from the issue
+- **No `AUTOPILOT_FOLLOWUP` comment is posted** (the structured comment only fires on failure)
+- The Actions run conclusion is green
+
+This is what a freshly-configured autopilot looks like against current code. Reference smoke: run [25888968713](https://github.com/cloudwarriors-ai/scopely-shadow/actions/runs/25888968713) on `cloudwarriors-ai/scopely-shadow#284` — all 11 jobs green, PR #286 created, issue labeled `STATUS: In QA`, no Follow-Up comment.
+
+#### Degraded path — something failed but a PR was still created
+
+If bundle validation and preflight passed but a downstream gate (preview deploy, Sentinel, project tests, or app tests) failed:
+
+- The issue gets labeled **`STATUS: Follow-Up Required`**
+- A PR is still created (you can still merge it if you decide the diff is good)
+- An `AUTOPILOT_FOLLOWUP` comment is posted with a per-gate breakdown like:
 
 ```
 ✅ PR #N created — ready for human review
@@ -496,7 +515,18 @@ Recommendation: Sentinel could not authenticate against the preview (HTTP 401).
 The E2E_EMAIL / E2E_PASSWORD org secrets may not match the preview environment.
 ```
 
-The `reason:` tags map to:
+The example above shows a **degraded** run for illustration — it is NOT what a healthy first-run should look like. If your smoke produces this on a known-good preview environment, treat the `reason:` tag as a real diagnostic signal and act on the recommendation.
+
+#### Halted path — pipeline stopped before PR creation
+
+If bundle validation or preflight failed (the autopilot's own code-gen failed in a way that can't proceed):
+
+- No PR is created
+- The issue keeps its `STATUS: In Progress` label or reverts to whatever it had
+- The Actions run conclusion is red
+- This is the only outcome that means the autopilot itself failed (as opposed to downstream infra)
+
+#### `reason:` taxonomy (only appears on degraded path)
 
 | Reason | Meaning | Action |
 |---|---|---|
