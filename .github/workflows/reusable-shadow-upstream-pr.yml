@@ -236,9 +236,25 @@ jobs:
       # fix must carry a valid signed attestation (HMAC-SHA256, sha match, age
       # ≤14d, verdict != regression). This is a verifier — it does NOT re-run
       # validation, preserving the single-validation invariant.
+      - name: Determine validation mode
+        id: validation_mode
+        if: steps.export.outputs.exported == 'true'
+        env:
+          DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED || 'true' }}
+        run: |
+          if [ "${DEPLOY_ENABLED,,}" = "false" ]; then
+            echo "attestation_required=false" >> "$GITHUB_OUTPUT"
+            echo "mode=manual" >> "$GITHUB_OUTPUT"
+            echo "summary=Manual validation required (preview deploy disabled)" >> "$GITHUB_OUTPUT"
+          else
+            echo "attestation_required=true" >> "$GITHUB_OUTPUT"
+            echo "mode=sentinel" >> "$GITHUB_OUTPUT"
+            echo "summary=Shadow-validated" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: "Locate validation attestation (shadow PR head)"
         id: locate_attestation
-        if: steps.export.outputs.exported == 'true'
+        if: steps.export.outputs.exported == 'true' && steps.validation_mode.outputs.attestation_required == 'true'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
@@ -328,7 +344,7 @@ jobs:
             );
 
       - name: Download validation attestation
-        if: steps.export.outputs.exported == 'true' && steps.locate_attestation.outputs.run_id != ''
+        if: steps.export.outputs.exported == 'true' && steps.validation_mode.outputs.attestation_required == 'true' && steps.locate_attestation.outputs.run_id != ''
         uses: actions/download-artifact@v4
         with:
           name: ${{ steps.locate_attestation.outputs.artifact_name }}
@@ -338,7 +354,7 @@ jobs:
           path: /tmp/sentinel-attestation
 
       - name: Verify attestation
-        if: steps.export.outputs.exported == 'true' && steps.locate_attestation.outputs.run_id != ''
+        if: steps.export.outputs.exported == 'true' && steps.validation_mode.outputs.attestation_required == 'true' && steps.locate_attestation.outputs.run_id != ''
         env:
           VALIDATION_ATTESTATION_KEY: ${{ secrets.VALIDATION_ATTESTATION_KEY }}
           PR_HEAD_SHA: ${{ steps.locate_attestation.outputs.head_sha }}
@@ -385,6 +401,11 @@ jobs:
             const shadowPrUrl = '${{ steps.prepare.outputs.shadow_pr_url }}';
             const [shadowOwner, shadowRepoName] = '${{ inputs.shadow_repo }}'.split('/');
             const shadowPrNumber = ${{ inputs.shadow_pr_number }};
+            const validationMode = '${{ steps.validation_mode.outputs.mode }}' || 'sentinel';
+            const validationSummary = '${{ steps.validation_mode.outputs.summary }}' || 'Shadow-validated';
+            const validationDetails = validationMode === 'manual'
+              ? 'Preview deploy and Sentinel validation were disabled for this run. Review the shadow PR gates, then perform manual UAT before merging this source PR.'
+              : 'All pipeline gates passed in the shadow environment before this promotion.';
 
             // Fetch source issue for context (graceful fallback on failure)
             let issueTitle = '';
@@ -418,14 +439,14 @@ jobs:
             const prBody = [
               `## Automated Fix for Issue #${sourceIssueNumber}`,
               ``,
-              `**Promoted from:** ${{ inputs.shadow_repo }}#${shadowPrNumber} | **Shadow-validated** ✅`,
+              `**Promoted from:** ${{ inputs.shadow_repo }}#${shadowPrNumber} | **${validationSummary}**`,
               ``,
               `### Issue`,
               issueTitle ? `**${issueTitle}**` : `**#${sourceIssueNumber}**`,
               ``,
               issueBodyPreview ? `${issueBodyPreview}${issueBodyPreview.length >= 400 ? '...' : ''}` : '',
               `### Shadow Validation`,
-              `All pipeline gates passed in the shadow environment before this promotion.`,
+              validationDetails,
               ``,
               `**Shadow issue:** [${{ inputs.shadow_repo }}#${shadowIssueNumber}](${shadowIssueUrl})`,
               `**Shadow PR:** [${{ inputs.shadow_repo }}#${shadowPrNumber}](${shadowPrUrl})`,
@@ -503,6 +524,7 @@ jobs:
             const [shadowOwner, shadowRepoName] = '${{ inputs.shadow_repo }}'.split('/');
             const runnerRunId = '${{ steps.locate_attestation.outputs.run_id }}';
             const artifactName = '${{ steps.locate_attestation.outputs.artifact_name }}';
+            const validationMode = '${{ steps.validation_mode.outputs.mode }}' || 'sentinel';
             const runnerRunUrl = runnerRunId
               ? `https://github.com/${shadowOwner}/${shadowRepoName}/actions/runs/${runnerRunId}`
               : '';
@@ -516,7 +538,8 @@ jobs:
               `- **Shadow PR:** [${{ inputs.shadow_repo }}#${{ inputs.shadow_pr_number }}](${shadowPrUrl})`,
               `- **Upstream PR:** [${sourceOwner}/${sourceRepoName}#${sourcePrNumber}](${sourcePrUrl})`,
               runnerRunUrl ? `- **Artifacts:** [Runner run](${runnerRunUrl}) — Sentinel attestation (\`${artifactName}\`), validation report, app-test results` : '',
-              '- **Status:** shadow fix merged; source PR open for review',
+              validationMode === 'manual' ? '- **Validation:** preview/Sentinel skipped because `DEPLOY_ENABLED=false`; manual UAT required' : '',
+              validationMode === 'manual' ? '- **Status:** shadow fix merged; source PR open for manual validation and review' : '- **Status:** shadow fix merged; source PR open for review',
               '',
               'Shadow issue numbers are mapped independently from source issue numbers.',
             ].filter(l => l !== '').join('\n');
