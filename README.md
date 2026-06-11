@@ -164,6 +164,7 @@ jobs:
 
 - **Kill switches** — `AUTOPILOT: Disabled` label (global), `AUTOPILOT: Skip` label (per-issue), `DEPLOY_ENABLED=false` (per-environment)
 - **Rate limiting** — Max 5 concurrent autopilot runs per repo
+- **Queue drain** — Shadow repos can hold more than 5 `AUTOFIX: Ready` issues; the queue drain starts the oldest eligible items when runner slots open
 - **Concurrency groups** — One intake and one runner per issue, no overlapping runs
 - **Auto-merge off by default** — `mergeRequirements.autoMerge: false` in config
 - **Script injection hardened** — All user-controlled inputs (issue titles, labels) routed through `env:` vars, never interpolated in shell or JS
@@ -259,6 +260,7 @@ Shadow repos use a different operator contract than the legacy single-repo Claud
 - `@claude [hint: ...]` on the **shadow issue** is the default human kickoff path.
 - `AUTOFIX: Ready` on the **shadow issue** is the explicit automation and queue trigger.
 - New source issues sync into shadow with `shadow` plus mirrored source labels; they do **not** auto-run unless `AUTOFIX: Ready` is present or an operator comments `@claude`.
+- When more than 5 shadow issues are ready, `drain-autofix-queue` keeps the extras queued and dispatches only as many as current runner capacity allows.
 - Shadow issue numbers are mapped to source issue numbers through `.shadow/config.json`; they are not expected to match numerically.
 - Nothing is pushed to the source repo until a shadow fix PR merges.
 - When a merged shadow fix opens an upstream PR on the source repo, the workflow also upserts a source-issue comment linking the shadow issue, shadow PR, and upstream PR.

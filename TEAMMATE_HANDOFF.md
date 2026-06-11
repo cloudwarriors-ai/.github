@@ -121,7 +121,7 @@ These live in **your repo Settings → Secrets and variables → Actions → Var
 
 | Variable | Recommended value | Effect |
 |---|---|---|
-| `AUTOQUEUE_ENABLED` | `false` initially, flip to `true` when you trust the pipeline | When `true`, the hourly issue sync auto-stamps `AUTOFIX: Ready` on shadow issues where the source has it. When `false`, you must label manually on the shadow side. |
+| `AUTOQUEUE_ENABLED` | `false` initially, flip to `true` when you trust the pipeline | When `true`, the hourly issue sync auto-stamps `AUTOFIX: Ready` on shadow issues where the source has it. Queue drain then dispatches only up to available runner slots. When `false`, you must label manually on the shadow side. |
 | `DEPLOY_ENABLED` | `true` | Same semantics as source — kill switch |
 | `VPS_REPO_PATH` | Same path as source (shadow deploys into the SAME preview env via the source repo's deploy path) | Required for VPS preview deploy |
 
@@ -373,7 +373,7 @@ gh variable set DEPLOY_ENABLED --body "true" --repo cloudwarriors-ai/<shadow-nam
 gh variable set VPS_REPO_PATH --body "/srv/your-repo" --repo cloudwarriors-ai/<shadow-name>
 ```
 
-`AUTOQUEUE_ENABLED=false` initially means: the hourly sync mirrors issues to shadow but does NOT auto-label them. You manually label `AUTOFIX: Ready` on the shadow side to trigger autopilot. Flip to `true` after you trust the pipeline.
+`AUTOQUEUE_ENABLED=false` initially means: the hourly sync mirrors issues to shadow but does NOT auto-label them. You manually label `AUTOFIX: Ready` on the shadow side to trigger autopilot. Flip to `true` after you trust the pipeline. Once enabled, more than 5 ready issues can sit queued; the queue drain starts the oldest eligible issues as runner slots open.
 
 ### Authoring `.autopilot/config.json` on the shadow
 
