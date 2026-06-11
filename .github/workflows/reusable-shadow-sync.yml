@@ -113,7 +113,7 @@ jobs:
             // re-stamp AUTOFIX: Ready if any of these are present.
             const processingLabels = new Set([
               'AUTOFIX: Ready', 'STATUS: In Progress', 'STATUS: In QA',
-              'STATUS: Follow-Up Required', 'claude-working',
+              'STATUS: Follow-Up Required', 'AUTOPILOT: Skip', 'claude-working',
             ]);
             // Autopilot lifecycle labels — sync must never strip these.
             // Removing and re-adding them fires labeled events that re-trigger intake.
@@ -138,6 +138,7 @@ jobs:
               // below based on AUTOQUEUE_ENABLED and shadow issue state.
               const sourceLabels = src.labels.map(l => l.name);
               const sourceHasAutofix = sourceLabels.includes('AUTOFIX: Ready');
+              const sourceHasAutopilotSkip = sourceLabels.includes('AUTOPILOT: Skip');
               const filteredSourceLabels = sourceLabels.filter(l => l !== 'AUTOFIX: Ready');
               let labels = [...new Set([...filteredSourceLabels, 'shadow'])];
 
@@ -165,7 +166,7 @@ jobs:
                 //   - AUTOQUEUE_ENABLED is true
                 //   - shadow issue is open and not already in a processing state
                 const shadowAlreadyProcessing = currentShadowLabels.some(l => processingLabels.has(l));
-                if (sourceHasAutofix && AUTOQUEUE_ENABLED && sourceState === 'open' && !shadowAlreadyProcessing) {
+                if (sourceHasAutofix && AUTOQUEUE_ENABLED && sourceState === 'open' && !sourceHasAutopilotSkip && !shadowAlreadyProcessing) {
                   labels = [...new Set([...labels, 'AUTOFIX: Ready'])];
                   console.log(`Stamping AUTOFIX: Ready on shadow issue #${shadowNumber} (autoqueue enabled)`);
                 }
@@ -206,7 +207,7 @@ jobs:
               } else {
                 // Create new shadow issue — stamp AUTOFIX: Ready immediately if source has
                 // it and autoqueue is enabled (issue is inherently open at creation time).
-                if (sourceHasAutofix && AUTOQUEUE_ENABLED && sourceState === 'open') {
+                if (sourceHasAutofix && AUTOQUEUE_ENABLED && sourceState === 'open' && !sourceHasAutopilotSkip) {
                   labels = [...new Set([...labels, 'AUTOFIX: Ready'])];
                   console.log(`Stamping AUTOFIX: Ready on new shadow issue for source #${src.number} (autoqueue enabled)`);
                 }
