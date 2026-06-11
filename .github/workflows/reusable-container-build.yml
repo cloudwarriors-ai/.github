@@ -26,9 +26,6 @@ on:
         description: 'Git ref to build (default: triggering SHA)'
         type: string
         default: ''
-    secrets:
-      GITHUB_TOKEN:
-        required: false  # auto-provided, listed for clarity
     outputs:
       image:
         description: 'Full image ref with SHA tag (ghcr.io/org/name:sha-xxxx)'
@@ -82,7 +79,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ github.token }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

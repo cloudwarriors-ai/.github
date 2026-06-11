@@ -73,7 +73,7 @@ jobs:
         with:
           ref: ${{ inputs.target_branch }}
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ github.token }}
 
       - name: Check RLM cache staleness
         id: staleness
@@ -165,15 +165,15 @@ jobs:
         if: steps.staleness.outputs.mode != 'none'
         run: |
           CURRENT_SHA=$(git rev-parse HEAD)
-          python3 -c "
-import json, datetime
-meta = {
-  'last_scan_sha': '$CURRENT_SHA',
-  'scan_timestamp': datetime.datetime.utcnow().isoformat() + 'Z',
-  'scan_mode': '${{ steps.staleness.outputs.mode }}'
-}
-open('/tmp/rlm-cache/meta.json', 'w').write(json.dumps(meta, indent=2))
-"
+          python3 - <<PY
+          import json, datetime
+          meta = {
+            'last_scan_sha': '$CURRENT_SHA',
+            'scan_timestamp': datetime.datetime.utcnow().isoformat() + 'Z',
+            'scan_mode': '${{ steps.staleness.outputs.mode }}',
+          }
+          open('/tmp/rlm-cache/meta.json', 'w').write(json.dumps(meta, indent=2))
+          PY
           cd /tmp/rlm-cache
           git config user.name "Claude Code Bot"
           git config user.email "claude-bot@anthropic.com"
@@ -198,4 +198,3 @@ open('/tmp/rlm-cache/meta.json', 'w').write(json.dumps(meta, indent=2))
             echo "**Mode:** $MODE" >> $GITHUB_STEP_SUMMARY
             echo "**Commit:** ${{ steps.commit.outputs.sha }}" >> $GITHUB_STEP_SUMMARY
           fi
-
