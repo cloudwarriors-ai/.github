@@ -67,8 +67,6 @@ on:
     secrets:
       DEPLOY_SSH_KEY:
         required: false
-      GITHUB_TOKEN:
-        required: false
       KUBECONFIG:
         required: false
     outputs:
@@ -97,7 +95,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ github.token }}
 
       - name: Preserve stable as rollback
         id: preserve
