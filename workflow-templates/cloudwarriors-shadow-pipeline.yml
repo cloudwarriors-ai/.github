@@ -107,6 +107,7 @@ jobs:
       target_repo: ${{ github.repository }}
       max_concurrent: 5
       batch_size: 5
+      settle_seconds: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'drain-queue' && 0 || 120 }}
     secrets: inherit
 
   # ── Upstream PR promotion ────────────────────────────────────────────────────
