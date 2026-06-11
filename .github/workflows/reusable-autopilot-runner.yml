@@ -101,6 +101,8 @@ jobs:
 
       - name: Read .autopilot/config.json
         id: config
+        env:
+          DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED || 'true' }}
         run: |
           if [ -f .autopilot/config.json ]; then
             CONFIG=$(cat .autopilot/config.json)
@@ -118,7 +120,13 @@ jobs:
             echo "APP_TEST_EOF" >> "$GITHUB_OUTPUT"
             echo "db_migrate_command=$(echo "$CONFIG" | jq -r '.dbMigrateCommand // ""')" >> "$GITHUB_OUTPUT"
             echo "health_endpoint=$(echo "$CONFIG" | jq -r '.healthEndpoint // "/api/v1/health"')" >> "$GITHUB_OUTPUT"
-            echo "preview_deploy=$(echo "$CONFIG" | jq -r '.previewDeploy // false')" >> "$GITHUB_OUTPUT"
+            CONFIG_PREVIEW_DEPLOY=$(echo "$CONFIG" | jq -r '.previewDeploy // false')
+            if [ "${DEPLOY_ENABLED,,}" = "false" ]; then
+              echo "DEPLOY_ENABLED=false -- overriding previewDeploy to false"
+              echo "preview_deploy=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "preview_deploy=$CONFIG_PREVIEW_DEPLOY" >> "$GITHUB_OUTPUT"
+            fi
             echo "auto_merge=$(echo "$CONFIG" | jq -r '.mergeRequirements.autoMerge // false')" >> "$GITHUB_OUTPUT"
             echo "runtime=$(echo "$CONFIG" | jq -r '.runtime // ""')" >> "$GITHUB_OUTPUT"
             echo "python_version=$(echo "$CONFIG" | jq -r '.pythonVersion // "3.11"')" >> "$GITHUB_OUTPUT"
@@ -240,6 +248,7 @@ jobs:
     needs: [rlm-fix, read-config, preflight]
     if: |
       needs.read-config.outputs.preview_deploy == 'true' &&
+      vars.DEPLOY_ENABLED != 'false' &&
       needs.preflight.outputs.preflight_passed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -847,9 +856,14 @@ jobs:
           APP_TESTS_RESULT: ${{ needs.app-tests.outputs.app_tests_passed || 'skipped' }}
           APP_TESTS_REGRESSIONS: ${{ needs.app-tests.outputs.app_tests_has_regressions || 'n/a' }}
           APP_TESTS_BASELINE_LABEL: ${{ needs.app-tests.outputs.baseline_label || '' }}
+          PREVIEW_DEPLOY_ENABLED: ${{ needs.read-config.outputs.preview_deploy }}
         run: |
           EXISTING_PR=$(gh pr list --head "$ISSUE_HEAD" --base "$ISSUE_BASE" --json number --jq '.[0].number' 2>/dev/null || echo "")
-          BACKEND_URL="https://preview-${ISSUE_NUM}-api.pscx.ai"
+          if [ "$PREVIEW_DEPLOY_ENABLED" = "true" ]; then
+            BACKEND_URL="https://preview-${ISSUE_NUM}-api.pscx.ai"
+          else
+            BACKEND_URL="disabled (preview deploy off)"
+          fi
 
           # Enrich PR body — all fetches wrapped; failures degrade gracefully
           ISSUE_TITLE=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUM}" \

@@ -66,6 +66,8 @@ jobs:
 
       - name: Read config
         id: config
+        env:
+          DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED || 'true' }}
         run: |
           CONFIG=".autopilot/config.json"
           if [ ! -f "$CONFIG" ]; then
@@ -76,15 +78,36 @@ jobs:
             const c = JSON.parse(require('fs').readFileSync('$CONFIG', 'utf8'));
             const fs = require('fs');
             const out = process.env.GITHUB_OUTPUT;
+            const deployEnabled = String(process.env.DEPLOY_ENABLED || 'true').toLowerCase() !== 'false';
+            const previewDeploy = c.previewDeploy === true;
+            const appTestCommand = c.appTestCommand || '';
+            const runAppTests = Boolean(appTestCommand) && deployEnabled && previewDeploy;
             fs.appendFileSync(out, 'app_test_command<<APP_TEST_EOF\n' + (c.appTestCommand || '') + '\nAPP_TEST_EOF\n');
+            fs.appendFileSync(out, 'deploy_enabled=' + deployEnabled + '\n');
+            fs.appendFileSync(out, 'preview_deploy=' + previewDeploy + '\n');
+            fs.appendFileSync(out, 'run_app_tests=' + runAppTests + '\n');
             fs.appendFileSync(out, 'health_endpoint=' + (c.healthEndpoint || '/api/v1/health') + '\n');
             fs.appendFileSync(out, 'runtime=' + (c.runtime || '') + '\n');
             fs.appendFileSync(out, 'python_version=' + (c.pythonVersion || '3.11') + '\n');
             fs.appendFileSync(out, 'python_requirements=' + (c.pythonRequirements || 'service/requirements.txt') + '\n');
           "
 
+      - name: Note preview deploy disabled
+        if: steps.config.outputs.app_test_command != '' && steps.config.outputs.run_app_tests != 'true'
+        run: |
+          {
+            echo "### Daily Dev Health"
+            echo ""
+            echo "Preview deploy/app tests skipped."
+            echo ""
+            echo "| Signal | Value |"
+            echo "| --- | --- |"
+            echo "| DEPLOY_ENABLED | ${{ steps.config.outputs.deploy_enabled }} |"
+            echo "| previewDeploy | ${{ steps.config.outputs.preview_deploy }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Deploy dev to baseline slot
-        if: steps.config.outputs.app_test_command != ''
+        if: steps.config.outputs.run_app_tests == 'true'
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -110,7 +133,7 @@ jobs:
 
       - name: Set baseline URLs
         id: urls
-        if: steps.config.outputs.app_test_command != ''
+        if: steps.config.outputs.run_app_tests == 'true'
         env:
           SLOT: ${{ vars.BASELINE_DEPLOY_ISSUE || '0' }}
         run: |
@@ -118,7 +141,7 @@ jobs:
           echo "backend_url=https://preview-${SLOT}-api.pscx.ai" >> "$GITHUB_OUTPUT"
 
       - name: Wait for health check
-        if: steps.config.outputs.app_test_command != ''
+        if: steps.config.outputs.run_app_tests == 'true'
         run: |
           HEALTH="${{ steps.config.outputs.health_endpoint }}"
           URL="${{ steps.urls.outputs.backend_url }}${HEALTH}"
@@ -132,32 +155,32 @@ jobs:
           echo "::warning::Baseline not reachable at $URL after 5 minutes — tests may fail"
 
       - name: Setup Node.js
-        if: steps.config.outputs.app_test_command != ''
+        if: steps.config.outputs.run_app_tests == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
       - name: Install Node dependencies
-        if: steps.config.outputs.app_test_command != ''
+        if: steps.config.outputs.run_app_tests == 'true'
         run: |
           if [ -f package.json ]; then npm ci; fi
 
       - name: Install Playwright browsers
-        if: steps.config.outputs.app_test_command != ''
+        if: steps.config.outputs.run_app_tests == 'true'
         run: |
           if [ -f package.json ] && grep -q '"@playwright/test"' package.json 2>/dev/null; then
             npx --yes playwright install --with-deps chromium
           fi
 
       - name: Setup Python
-        if: steps.config.outputs.app_test_command != '' && steps.config.outputs.runtime == 'python'
+        if: steps.config.outputs.run_app_tests == 'true' && steps.config.outputs.runtime == 'python'
         uses: actions/setup-python@v5
         with:
           python-version: ${{ steps.config.outputs.python_version }}
           cache: pip
 
       - name: Install Python dependencies
-        if: steps.config.outputs.app_test_command != '' && steps.config.outputs.runtime == 'python'
+        if: steps.config.outputs.run_app_tests == 'true' && steps.config.outputs.runtime == 'python'
         env:
           REQS: ${{ steps.config.outputs.python_requirements }}
         run: |
@@ -169,7 +192,7 @@ jobs:
 
       - name: Run app test suite
         id: app-tests
-        if: steps.config.outputs.app_test_command != ''
+        if: steps.config.outputs.run_app_tests == 'true'
         continue-on-error: true
         env:
           SENTINEL_BASE_URL: ${{ steps.urls.outputs.backend_url }}
@@ -332,7 +355,7 @@ jobs:
           echo "baseline.json updated in ${SHADOW_REPO}"
 
       - name: Teardown baseline slot
-        if: always() && steps.config.outputs.app_test_command != ''
+        if: always() && steps.config.outputs.run_app_tests == 'true'
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.SSH_HOST }}
