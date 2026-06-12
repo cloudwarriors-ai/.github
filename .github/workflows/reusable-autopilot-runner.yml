@@ -28,7 +28,7 @@ on:
         description: 'Max turns for Claude in RLM'
         required: false
         type: number
-        default: 10
+        default: 20
       max_rlm_cost:
         description: 'Max cost for RLM codebase analysis ($)'
         required: false
