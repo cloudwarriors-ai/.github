@@ -15,6 +15,10 @@ name: Shadow Pipeline
 # AUTOQUEUE_ENABLED repo variable (set in shadow repo Settings → Actions → Variables):
 #   true  — issue sync automatically stamps AUTOFIX: Ready on shadow issues where source has it
 #   false — issues sync clean; human or agent manually labels to trigger
+#
+# AUTOPILOT_QUEUE_AGENT_ENABLED repo variable:
+#   true  — scheduled runs may promote source issues from AUTOPILOT: Queue into AUTOFIX: Ready
+#   false — manual agent-run still works, but scheduled runs only sync/drain existing Ready items
 
 on:
   issues:
@@ -32,7 +36,7 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'Action to run: full-sync | sync-code | sync-issues | drain-queue'
+        description: 'Action to run: full-sync | sync-code | sync-issues | drain-queue | agent-run | agent-dry-run'
         type: string
         default: 'full-sync'
 
@@ -71,16 +75,46 @@ jobs:
       shadow_repo: ${{ github.repository }}
     secrets: inherit
 
+  # ── Source queue agent ──────────────────────────────────────────────────────
+  # Keeps the shadow runner fed without exceeding the 5-runner cap. In the safe
+  # default mode, it only promotes source issues that humans marked
+  # AUTOPILOT: Queue. Promotion means adding AUTOFIX: Ready plus a TRACK label
+  # on the source issue; sync-issues then mirrors that state to shadow.
+  queue-agent:
+    if: >
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.event.inputs.action == 'agent-run' ||
+        github.event.inputs.action == 'agent-dry-run'))
+    uses: cloudwarriors-ai/.github/.github/workflows/reusable-autopilot-queue-agent.yml@main
+    with:
+      shadow_repo: ${{ github.repository }}
+      enabled: "${{ (github.event_name == 'workflow_dispatch' && (github.event.inputs.action == 'agent-run' || github.event.inputs.action == 'agent-dry-run')) && 'true' || vars.AUTOPILOT_QUEUE_AGENT_ENABLED || 'false' }}"
+      dry_run: "${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'agent-dry-run') && 'true' || vars.AUTOPILOT_QUEUE_AGENT_DRY_RUN || 'false' }}"
+      max_concurrent: ${{ fromJSON(vars.AUTOPILOT_QUEUE_AGENT_MAX_CONCURRENT || '5') }}
+      target_queue_depth: ${{ fromJSON(vars.AUTOPILOT_QUEUE_AGENT_TARGET_QUEUE_DEPTH || '10') }}
+      batch_size: ${{ fromJSON(vars.AUTOPILOT_QUEUE_AGENT_BATCH_SIZE || '5') }}
+      pool_mode: "${{ vars.AUTOPILOT_QUEUE_AGENT_POOL_MODE || 'queued' }}"
+      queue_label: "${{ vars.AUTOPILOT_QUEUE_AGENT_QUEUE_LABEL || 'AUTOPILOT: Queue' }}"
+      allowed_priority_labels: "${{ vars.AUTOPILOT_QUEUE_AGENT_ALLOWED_PRIORITIES || 'priority: low,P3: backlog,priority: medium,P2: post-launch' }}"
+      excluded_labels: "${{ vars.AUTOPILOT_QUEUE_AGENT_EXCLUDED_LABELS || 'AUTOPILOT: Disabled,AUTOPILOT: Skip,needs-decision,question,P0: ship-blocker,priority: critical,Prod Released,STATUS: In Progress,STATUS: In QA,STATUS: Follow-Up Required,STATUS: Done,STATUS: Failed' }}"
+    secrets: inherit
+
   # ── Issue sync ───────────────────────────────────────────────────────────────
   # Sync issues from source repo. Respects AUTOQUEUE_ENABLED to control whether
   # AUTOFIX: Ready is automatically stamped on matching shadow issues.
   sync-issues:
+    needs: [queue-agent]
     if: >
-      github.event_name == 'schedule' ||
-      (github.event_name == 'workflow_dispatch' &&
-       (github.event.inputs.action == '' ||
-        github.event.inputs.action == 'full-sync' ||
-        github.event.inputs.action == 'sync-issues'))
+      always() &&
+      (needs.queue-agent.result == 'success' || needs.queue-agent.result == 'skipped') &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' &&
+        (github.event.inputs.action == '' ||
+         github.event.inputs.action == 'full-sync' ||
+         github.event.inputs.action == 'sync-issues' ||
+         github.event.inputs.action == 'agent-run' ||
+         github.event.inputs.action == 'agent-dry-run')))
     uses: cloudwarriors-ai/.github/.github/workflows/reusable-shadow-sync.yml@main
     with:
       shadow_repo: ${{ github.repository }}
@@ -101,7 +135,8 @@ jobs:
         (github.event.inputs.action == '' ||
          github.event.inputs.action == 'full-sync' ||
          github.event.inputs.action == 'sync-issues' ||
-         github.event.inputs.action == 'drain-queue')))
+         github.event.inputs.action == 'drain-queue' ||
+         github.event.inputs.action == 'agent-run'))))
     uses: cloudwarriors-ai/.github/.github/workflows/reusable-autopilot-queue-drain.yml@main
     with:
       target_repo: ${{ github.repository }}

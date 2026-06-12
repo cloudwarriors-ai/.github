@@ -1,0 +1,432 @@
+name: "Reusable Autopilot: Queue Agent"
+
+on:
+  workflow_call:
+    inputs:
+      shadow_repo:
+        description: "Shadow repo full name (owner/name)"
+        required: true
+        type: string
+      enabled:
+        description: "Set true to allow the agent to promote source issues"
+        required: false
+        type: string
+        default: "false"
+      dry_run:
+        description: "Set true to report candidates without changing labels"
+        required: false
+        type: string
+        default: "true"
+      max_concurrent:
+        description: "Maximum active Autopilot runner workflows allowed"
+        required: false
+        type: number
+        default: 5
+      target_queue_depth:
+        description: "Target active runners plus queued Ready issues"
+        required: false
+        type: number
+        default: 10
+      batch_size:
+        description: "Maximum source issues to promote in one pass"
+        required: false
+        type: number
+        default: 5
+      pool_mode:
+        description: "queued requires AUTOPILOT: Queue; eligible selects from safe eligible backlog"
+        required: false
+        type: string
+        default: "queued"
+      queue_label:
+        description: "Source label used as the human-approved agent pool"
+        required: false
+        type: string
+        default: "AUTOPILOT: Queue"
+      allowed_priority_labels:
+        description: "Comma-separated priority labels allowed in eligible mode"
+        required: false
+        type: string
+        default: "priority: low,P3: backlog,priority: medium,P2: post-launch"
+      excluded_labels:
+        description: "Comma-separated labels that block agent promotion"
+        required: false
+        type: string
+        default: "AUTOPILOT: Disabled,AUTOPILOT: Skip,needs-decision,question,P0: ship-blocker,priority: critical,Prod Released,STATUS: In Progress,STATUS: In QA,STATUS: Follow-Up Required,STATUS: Done,STATUS: Failed"
+    secrets:
+      WORKFLOW_PAT:
+        required: true
+
+  workflow_dispatch:
+    inputs:
+      shadow_repo:
+        description: "Shadow repo full name (owner/name)"
+        required: true
+        type: string
+      enabled:
+        description: "Set true to allow the agent to promote source issues"
+        required: false
+        type: string
+        default: "false"
+      dry_run:
+        description: "Set true to report candidates without changing labels"
+        required: false
+        type: string
+        default: "true"
+      max_concurrent:
+        description: "Maximum active Autopilot runner workflows allowed"
+        required: false
+        type: number
+        default: 5
+      target_queue_depth:
+        description: "Target active runners plus queued Ready issues"
+        required: false
+        type: number
+        default: 10
+      batch_size:
+        description: "Maximum source issues to promote in one pass"
+        required: false
+        type: number
+        default: 5
+      pool_mode:
+        description: "queued requires AUTOPILOT: Queue; eligible selects from safe eligible backlog"
+        required: false
+        type: string
+        default: "queued"
+      queue_label:
+        description: "Source label used as the human-approved agent pool"
+        required: false
+        type: string
+        default: "AUTOPILOT: Queue"
+      allowed_priority_labels:
+        description: "Comma-separated priority labels allowed in eligible mode"
+        required: false
+        type: string
+        default: "priority: low,P3: backlog,priority: medium,P2: post-launch"
+      excluded_labels:
+        description: "Comma-separated labels that block agent promotion"
+        required: false
+        type: string
+        default: "AUTOPILOT: Disabled,AUTOPILOT: Skip,needs-decision,question,P0: ship-blocker,priority: critical,Prod Released,STATUS: In Progress,STATUS: In QA,STATUS: Follow-Up Required,STATUS: Done,STATUS: Failed"
+
+concurrency:
+  group: autopilot-queue-agent-${{ inputs.shadow_repo }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+
+jobs:
+  promote:
+    name: Promote Source Issues Into Autopilot Queue
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    outputs:
+      active_count: ${{ steps.agent.outputs.active_count }}
+      queued_ready_count: ${{ steps.agent.outputs.queued_ready_count }}
+      promoted_count: ${{ steps.agent.outputs.promoted_count }}
+      source_repo: ${{ steps.agent.outputs.source_repo }}
+
+    steps:
+      - name: Select and promote source issues
+        id: agent
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT }}
+          script: |
+            const shadowRepoFull = '${{ inputs.shadow_repo }}';
+            const [shadowOwner, shadowRepo] = shadowRepoFull.split('/');
+            if (!shadowOwner || !shadowRepo) {
+              core.setFailed(`Invalid shadow_repo: ${shadowRepoFull}`);
+              return;
+            }
+
+            const enabled = '${{ inputs.enabled }}' === 'true';
+            const dryRun = '${{ inputs.dry_run }}' === 'true';
+            const maxConcurrent = Number('${{ inputs.max_concurrent }}' || 5);
+            const targetQueueDepth = Math.max(
+              maxConcurrent,
+              Number('${{ inputs.target_queue_depth }}' || 10)
+            );
+            const batchSize = Number('${{ inputs.batch_size }}' || 5);
+            const poolMode = String('${{ inputs.pool_mode }}' || 'queued').trim().toLowerCase();
+            const queueLabel = String('${{ inputs.queue_label }}' || 'AUTOPILOT: Queue').trim();
+            const allowedPriorityLabels = new Set(
+              String('${{ inputs.allowed_priority_labels }}' || '')
+                .split(',')
+                .map((label) => label.trim())
+                .filter(Boolean)
+            );
+            const excludedLabels = new Set(
+              String('${{ inputs.excluded_labels }}' || '')
+                .split(',')
+                .map((label) => label.trim())
+                .filter(Boolean)
+            );
+            const activeStatuses = ['queued', 'in_progress', 'waiting', 'requested'];
+            const blockedShadowLabels = new Set([
+              'AUTOPILOT: Skip',
+              'claude-working',
+              'STATUS: In Progress',
+              'STATUS: In QA',
+              'STATUS: Follow-Up Required',
+              'STATUS: Done',
+              'STATUS: Failed',
+            ]);
+            const marker = '<!-- AUTOPILOT_QUEUE_AGENT -->';
+
+            if (!enabled) {
+              core.notice('Autopilot queue agent is disabled');
+              core.setOutput('active_count', '0');
+              core.setOutput('queued_ready_count', '0');
+              core.setOutput('promoted_count', '0');
+              await core.summary
+                .addRaw('### Autopilot Queue Agent\n\nAgent disabled. Set `AUTOPILOT_QUEUE_AGENT_ENABLED=true` or run the explicit `agent-run` action.\n')
+                .write();
+              return;
+            }
+
+            const { data: configFile } = await github.rest.repos.getContent({
+              owner: shadowOwner,
+              repo: shadowRepo,
+              path: '.shadow/config.json',
+            });
+            const config = JSON.parse(Buffer.from(configFile.content, 'base64').toString());
+            const sourceRepoFull = config.sourceRepo;
+            const [sourceOwner, sourceRepo] = sourceRepoFull.split('/');
+            if (!sourceOwner || !sourceRepo) {
+              core.setFailed(`Invalid sourceRepo in .shadow/config.json: ${sourceRepoFull}`);
+              return;
+            }
+            core.setOutput('source_repo', sourceRepoFull);
+
+            const ensureLabel = async (owner, repo, name, color, description) => {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                await github.rest.issues.createLabel({
+                  owner,
+                  repo,
+                  name,
+                  color,
+                  description,
+                });
+              }
+            };
+
+            if (!dryRun) {
+              await ensureLabel(sourceOwner, sourceRepo, 'AUTOFIX: Ready', '2da44e', 'Opt-in automated fix trigger');
+              await ensureLabel(sourceOwner, sourceRepo, 'TRACK: Bug', 'd73a4a', 'Autopilot bug-fix track');
+              await ensureLabel(sourceOwner, sourceRepo, 'TRACK: Feature', 'a2eeef', 'Autopilot feature track');
+              await ensureLabel(sourceOwner, sourceRepo, queueLabel, 'fbca04', 'Human-approved backlog for the Autopilot queue agent');
+            }
+
+            const runResponses = await Promise.all(activeStatuses.map((status) =>
+              github.rest.actions.listWorkflowRunsForRepo({
+                owner: shadowOwner,
+                repo: shadowRepo,
+                status,
+                per_page: 100,
+              })
+            ));
+            const activeStatusSet = new Set(activeStatuses);
+            const activeRuns = runResponses
+              .flatMap((response) => response.data.workflow_runs)
+              .filter((run) =>
+                activeStatusSet.has(run.status) &&
+                String(run.name || '').toLowerCase().includes('autopilot')
+              );
+            const activeCount = activeRuns.length;
+
+            const readyShadowIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: shadowOwner,
+              repo: shadowRepo,
+              state: 'open',
+              labels: 'AUTOFIX: Ready',
+              per_page: 100,
+            });
+            const queuedReadyIssues = readyShadowIssues.filter((issue) => {
+              if (issue.pull_request) return false;
+              const labels = issue.labels.map((label) => typeof label === 'string' ? label : label.name);
+              if (labels.some((label) => blockedShadowLabels.has(label))) return false;
+              if (labels.some((label) => label.startsWith('STATUS:'))) return false;
+              return true;
+            });
+            const queuedReadyCount = queuedReadyIssues.length;
+            const queueDeficit = Math.max(0, targetQueueDepth - activeCount - queuedReadyCount);
+            const promoteLimit = Math.min(batchSize, queueDeficit);
+
+            core.setOutput('active_count', String(activeCount));
+            core.setOutput('queued_ready_count', String(queuedReadyCount));
+
+            if (promoteLimit <= 0) {
+              core.notice(`Queue target satisfied: ${activeCount} active + ${queuedReadyCount} queued Ready >= ${targetQueueDepth}`);
+              core.setOutput('promoted_count', '0');
+              await core.summary
+                .addRaw([
+                  '### Autopilot Queue Agent',
+                  '',
+                  `Source repo: ${sourceRepoFull}`,
+                  `Shadow repo: ${shadowRepoFull}`,
+                  `Active Autopilot runs: ${activeCount}/${maxConcurrent}`,
+                  `Queued Ready issues: ${queuedReadyCount}`,
+                  `Target queue depth: ${targetQueueDepth}`,
+                  '',
+                  'No promotion needed.',
+                ].join('\n'))
+                .write();
+              return;
+            }
+
+            const sourceIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner: sourceOwner,
+              repo: sourceRepo,
+              state: 'open',
+              per_page: 100,
+            });
+
+            const hasBlockedPrefix = (labels) => labels.some((label) =>
+              label.startsWith('STATUS:') ||
+              label.startsWith('blocked:') ||
+              label.startsWith('blocked-by-')
+            );
+            const hasTrack = (labels) =>
+              labels.includes('TRACK: Bug') || labels.includes('TRACK: Feature');
+            const inferTrack = (issue, labels) => {
+              const title = String(issue.title || '').toLowerCase();
+              if (labels.includes('bug') || title.includes('[bug]') || title.startsWith('bug:')) {
+                return 'TRACK: Bug';
+              }
+              if (
+                labels.includes('feature-request') ||
+                labels.includes('enhancement') ||
+                title.includes('[feature request]') ||
+                title.startsWith('fr:')
+              ) {
+                return 'TRACK: Feature';
+              }
+              return '';
+            };
+            const priorityScore = (labels) => {
+              if (labels.includes('priority: low') || labels.includes('P3: backlog')) return 0;
+              if (labels.includes('priority: medium') || labels.includes('P2: post-launch')) return 1;
+              if (labels.includes('priority: high') || labels.includes('P1: pre-launch')) return 2;
+              return 3;
+            };
+            const titleBlocked = (title) => {
+              const normalized = String(title || '').trim().toLowerCase();
+              return normalized.includes('do not implement') ||
+                normalized.startsWith('cab request') ||
+                normalized.includes(' epic:');
+            };
+
+            const candidates = [];
+            const rejected = [];
+            for (const issue of sourceIssues) {
+              if (issue.pull_request) continue;
+              const labels = issue.labels.map((label) => typeof label === 'string' ? label : label.name);
+              const labelSet = new Set(labels);
+              const track = inferTrack(issue, labels);
+              const reasons = [];
+
+              if (labelSet.has('AUTOFIX: Ready')) reasons.push('already Ready');
+              if ([...excludedLabels].some((label) => labelSet.has(label))) reasons.push('excluded label');
+              if (hasBlockedPrefix(labels)) reasons.push('blocked/status label');
+              if (titleBlocked(issue.title)) reasons.push('blocked title');
+              if (!track && !hasTrack(labels)) reasons.push('no inferred track');
+
+              if (poolMode === 'queued') {
+                if (!labelSet.has(queueLabel)) reasons.push(`missing ${queueLabel}`);
+              } else if (poolMode === 'eligible') {
+                const hasAllowedPriority =
+                  allowedPriorityLabels.size === 0 ||
+                  [...allowedPriorityLabels].some((label) => labelSet.has(label));
+                if (!hasAllowedPriority) reasons.push('priority not allowed');
+              } else {
+                reasons.push(`unsupported pool_mode ${poolMode}`);
+              }
+
+              if (reasons.length) {
+                if (rejected.length < 10) rejected.push(`#${issue.number}: ${reasons.join(', ')}`);
+                continue;
+              }
+
+              candidates.push({ issue, labels, track: hasTrack(labels) ? '' : track, score: priorityScore(labels) });
+            }
+
+            candidates.sort((a, b) =>
+              a.score - b.score ||
+              new Date(a.issue.created_at).getTime() - new Date(b.issue.created_at).getTime() ||
+              a.issue.number - b.issue.number
+            );
+
+            const selected = candidates.slice(0, promoteLimit);
+            const promoted = [];
+            for (const candidate of selected) {
+              const labelsToAdd = ['AUTOFIX: Ready'];
+              if (candidate.track) labelsToAdd.push(candidate.track);
+
+              if (!dryRun) {
+                await github.rest.issues.addLabels({
+                  owner: sourceOwner,
+                  repo: sourceRepo,
+                  issue_number: candidate.issue.number,
+                  labels: labelsToAdd,
+                });
+
+                const comments = await github.paginate(github.rest.issues.listComments, {
+                  owner: sourceOwner,
+                  repo: sourceRepo,
+                  issue_number: candidate.issue.number,
+                  per_page: 100,
+                });
+                if (!comments.some((comment) => String(comment.body || '').includes(marker))) {
+                  await github.rest.issues.createComment({
+                    owner: sourceOwner,
+                    repo: sourceRepo,
+                    issue_number: candidate.issue.number,
+                    body: [
+                      marker,
+                      'Autopilot queue agent selected this issue for shadow execution.',
+                      '',
+                      `Shadow repo: ${shadowRepoFull}`,
+                      `Mode: ${poolMode}`,
+                      `Queue target: ${targetQueueDepth} active-or-ready items, max ${maxConcurrent} active runners.`,
+                    ].join('\n'),
+                  });
+                }
+              }
+
+              promoted.push(candidate);
+            }
+
+            core.setOutput('promoted_count', String(promoted.length));
+
+            const lines = [
+              '### Autopilot Queue Agent',
+              '',
+              `Source repo: ${sourceRepoFull}`,
+              `Shadow repo: ${shadowRepoFull}`,
+              `Mode: ${poolMode}`,
+              `Dry run: ${dryRun}`,
+              `Active Autopilot runs: ${activeCount}/${maxConcurrent}`,
+              `Queued Ready issues: ${queuedReadyCount}`,
+              `Target queue depth: ${targetQueueDepth}`,
+              `Candidates: ${candidates.length}`,
+              `Promoted: ${promoted.length}`,
+              '',
+              ...promoted.map(({ issue, track }) => `- #${issue.number} ${issue.title}${track ? ` (${track})` : ''}`),
+            ];
+            if (!promoted.length) {
+              lines.push('- No issues promoted.');
+            }
+            if (rejected.length) {
+              lines.push('', 'Sample rejects:', ...rejected.map((line) => `- ${line}`));
+            }
+            await core.summary.addRaw(lines.join('\n')).write();
+
+            const action = dryRun ? 'Would promote' : 'Promoted';
+            core.notice(`${action} ${promoted.length} source issue(s): ${promoted.map(({ issue }) => `#${issue.number}`).join(', ') || 'none'}`);
