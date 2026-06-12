@@ -147,11 +147,79 @@ jobs:
             echo "python_requirements=service/requirements.txt" >> "$GITHUB_OUTPUT"
           fi
 
+  # ── Job 2.5: Verify fix branch exists before gates ─────────────────
+  verify-fix-branch:
+    name: "Verify Fix Branch (#${{ inputs.issue_number }})"
+    needs: [rlm-fix, read-config]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    outputs:
+      branch_ready: ${{ steps.branch.outputs.branch_ready }}
+      has_changes: ${{ steps.branch.outputs.has_changes }}
+      failure_reason: ${{ steps.branch.outputs.failure_reason }}
+
+    steps:
+      - name: Check head branch and diff
+        id: branch
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const head = '${{ inputs.head }}';
+            const base = '${{ inputs.base }}';
+
+            core.setOutput('branch_ready', 'false');
+            core.setOutput('has_changes', 'false');
+            core.setOutput('failure_reason', '');
+
+            if ('${{ needs.rlm-fix.result }}' !== 'success') {
+              core.setOutput('failure_reason', 'rlm-fix-failed');
+              core.notice(`RLM fix job result was ${{ needs.rlm-fix.result }}; downstream gates will not run`);
+              return;
+            }
+
+            try {
+              await github.rest.repos.getBranch({ owner, repo, branch: head });
+            } catch (error) {
+              if (error.status === 404) {
+                core.setOutput('failure_reason', 'missing-head-branch');
+                core.notice(`Fix branch ${head} was not pushed`);
+                return;
+              }
+              throw error;
+            }
+
+            try {
+              const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({
+                owner,
+                repo,
+                basehead: `${base}...${head}`,
+              });
+              const changedFiles = comparison.files || [];
+              if (changedFiles.length === 0) {
+                core.setOutput('failure_reason', 'empty-diff');
+                core.notice(`Fix branch ${head} exists but has no diff against ${base}`);
+                return;
+              }
+              core.setOutput('branch_ready', 'true');
+              core.setOutput('has_changes', 'true');
+              core.notice(`Fix branch ${head} is ready with ${changedFiles.length} changed file(s)`);
+            } catch (error) {
+              core.setOutput('failure_reason', 'compare-failed');
+              core.setFailed(`Could not compare ${base}...${head}: ${error.message}`);
+            }
+
   # ── Job 3: Validate fix bundle ─────────────────────────────────────
   validate:
     name: "Validate (#${{ inputs.issue_number }})"
-    needs: [rlm-fix, read-config]
-    if: always() && !cancelled()
+    needs: [rlm-fix, read-config, verify-fix-branch]
+    if: |
+      always() && !cancelled() &&
+      needs.verify-fix-branch.outputs.branch_ready == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -161,17 +229,10 @@ jobs:
     steps:
       - name: Checkout fix branch
         id: checkout
-        continue-on-error: true
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.head }}
           token: ${{ secrets.WORKFLOW_PAT }}
-
-      - name: Fallback to base if head not found
-        if: steps.checkout.outcome != 'success'
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.base }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -206,8 +267,10 @@ jobs:
   # ── Job 4: Preflight CI ────────────────────────────────────────────
   preflight:
     name: "Preflight (#${{ inputs.issue_number }})"
-    needs: [rlm-fix, read-config]
-    if: always() && !cancelled()
+    needs: [rlm-fix, read-config, verify-fix-branch]
+    if: |
+      always() && !cancelled() &&
+      needs.verify-fix-branch.outputs.branch_ready == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -216,18 +279,11 @@ jobs:
 
     steps:
       - name: Checkout fix branch
-        continue-on-error: true
         id: checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.head }}
           token: ${{ secrets.WORKFLOW_PAT }}
-
-      - name: Fallback to base
-        if: steps.checkout.outcome != 'success'
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.base }}
 
       - name: Run project preflight
         id: preflight
@@ -245,8 +301,9 @@ jobs:
   # ── Job 5: Deploy preview container ────────────────────────────────
   deploy-preview:
     name: "Deploy Preview (#${{ inputs.issue_number }})"
-    needs: [rlm-fix, read-config, preflight]
+    needs: [rlm-fix, read-config, verify-fix-branch, preflight]
     if: |
+      needs.verify-fix-branch.outputs.branch_ready == 'true' &&
       needs.read-config.outputs.preview_deploy == 'true' &&
       vars.DEPLOY_ENABLED != 'false' &&
       needs.preflight.outputs.preflight_passed == 'true'
@@ -436,8 +493,11 @@ jobs:
   # ── Job 6: Run tests ───────────────────────────────────────────────
   test:
     name: "Test (#${{ inputs.issue_number }})"
-    needs: [read-config, deploy-preview]
-    if: always() && !cancelled() && needs.read-config.outputs.test_command != ''
+    needs: [read-config, verify-fix-branch, deploy-preview]
+    if: |
+      always() && !cancelled() &&
+      needs.verify-fix-branch.outputs.branch_ready == 'true' &&
+      needs.read-config.outputs.test_command != ''
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -447,17 +507,10 @@ jobs:
     steps:
       - name: Checkout fix branch
         id: checkout
-        continue-on-error: true
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.head }}
           token: ${{ secrets.WORKFLOW_PAT }}
-
-      - name: Fallback to base
-        if: steps.checkout.outcome != 'success'
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.base }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -594,17 +647,10 @@ jobs:
     steps:
       - name: Checkout fix branch
         id: checkout
-        continue-on-error: true
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.head }}
           token: ${{ secrets.WORKFLOW_PAT }}
-
-      - name: Fallback to base
-        if: steps.checkout.outcome != 'success'
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.base }}
 
       - name: Fetch shared scripts
         run: |
@@ -786,7 +832,7 @@ jobs:
   # ── Job 8: Upsert PR and update labels ─────────────────────────────
   finalize:
     name: "Finalize (#${{ inputs.issue_number }})"
-    needs: [rlm-fix, read-config, validate, preflight, deploy-preview, test, validate-api, app-tests]
+    needs: [rlm-fix, read-config, verify-fix-branch, validate, preflight, deploy-preview, test, validate-api, app-tests]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -838,6 +884,8 @@ jobs:
 
       - name: Upsert PR
         if: |
+          needs.rlm-fix.result == 'success' &&
+          needs.verify-fix-branch.outputs.branch_ready == 'true' &&
           steps.checkout.outcome == 'success' &&
           needs.validate.outputs.validation_passed == 'true' &&
           needs.preflight.outputs.preflight_passed == 'true'
@@ -959,6 +1007,7 @@ jobs:
       # --- Auto-merge if configured and all checks pass ---
       - name: Auto-merge
         if: |
+          steps.pr.outputs.pr_ready == 'true' &&
           needs.read-config.outputs.auto_merge == 'true' &&
           needs.validate.outputs.validation_passed == 'true' &&
           needs.preflight.outputs.preflight_passed == 'true' &&
@@ -975,6 +1024,9 @@ jobs:
       # --- Update issue labels ---
       - name: "On success: label In QA"
         if: |
+          needs.rlm-fix.result == 'success' &&
+          needs.verify-fix-branch.outputs.branch_ready == 'true' &&
+          steps.pr.outputs.pr_ready == 'true' &&
           needs.validate.outputs.validation_passed == 'true' &&
           needs.preflight.outputs.preflight_passed == 'true' &&
           (needs.validate-api.result == 'skipped' || needs.validate-api.outputs.api_validation_passed == 'true')
@@ -985,6 +1037,12 @@ jobs:
               await github.rest.issues.removeLabel({
                 owner: context.repo.owner, repo: context.repo.repo,
                 issue_number: ${{ inputs.issue_number }}, name: 'STATUS: In Progress',
+              });
+            } catch {}
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: ${{ inputs.issue_number }}, name: 'STATUS: Follow-Up Required',
               });
             } catch {}
             const inQaLabels = await github.rest.issues.listLabelsOnIssue({
@@ -1001,10 +1059,16 @@ jobs:
 
       - name: "On failure: label Follow-Up Required"
         if: |
+          needs.rlm-fix.result != 'success' ||
+          needs.verify-fix-branch.outputs.branch_ready != 'true' ||
+          steps.pr.outputs.pr_ready != 'true' ||
           needs.validate.outputs.validation_passed != 'true' ||
           needs.preflight.outputs.preflight_passed != 'true' ||
           (needs.validate-api.result != 'skipped' && needs.validate-api.outputs.api_validation_passed != 'true')
         env:
+          RLM_RESULT: ${{ needs.rlm-fix.result }}
+          FIX_BRANCH_READY: ${{ needs.verify-fix-branch.outputs.branch_ready || 'false' }}
+          FIX_BRANCH_FAILURE: ${{ needs.verify-fix-branch.outputs.failure_reason || '' }}
           PR_READY: ${{ steps.pr.outputs.pr_ready || 'false' }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number || '' }}
           VALIDATION_RESULT: ${{ needs.validate.outputs.validation_passed || 'skipped' }}
@@ -1022,6 +1086,12 @@ jobs:
               await github.rest.issues.removeLabel({
                 owner: context.repo.owner, repo: context.repo.repo,
                 issue_number: ${{ inputs.issue_number }}, name: 'STATUS: In Progress',
+              });
+            } catch {}
+            try {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: ${{ inputs.issue_number }}, name: 'STATUS: In QA',
               });
             } catch {}
             const followUpLabels = await github.rest.issues.listLabelsOnIssue({
@@ -1044,8 +1114,11 @@ jobs:
             const icon = (v) => v === 'true' ? '✅' : (v === 'false' || v === 'skipped' ? '❌' : '⏭️');
             const gateRow = (name, raw, extra='') => `| ${name} | ${icon(raw)} ${raw}${extra ? ' — ' + extra : ''} |`;
             const apiExtra = apiFailureReason ? `reason: \`${apiFailureReason}\`` : (process.env.API_VERDICT && process.env.API_VERDICT !== 'skipped' ? `verdict: ${process.env.API_VERDICT}` : '');
+            const branchExtra = process.env.FIX_BRANCH_FAILURE ? `reason: \`${process.env.FIX_BRANCH_FAILURE}\`` : '';
             const previewExtra = process.env.DEPLOY_PREVIEW_STATUS === 'false' ? 'preview unavailable — preview-dependent checks skipped' : '';
             const gateRows = [
+              gateRow('RLM fix',           process.env.RLM_RESULT === 'success' ? 'true' : 'false'),
+              gateRow('Fix branch',        process.env.FIX_BRANCH_READY, branchExtra),
               gateRow('Bundle validation', process.env.VALIDATION_RESULT),
               gateRow('Preflight',          process.env.PREFLIGHT_RESULT),
               gateRow('Preview deploy',     process.env.DEPLOY_PREVIEW_STATUS, previewExtra),
@@ -1057,6 +1130,15 @@ jobs:
               ? `✅ **PR #${prNumber} created** — ready for human review`
               : `❌ **PR not created** — see failures below`;
             const recommendation = (() => {
+              if (process.env.FIX_BRANCH_FAILURE === 'missing-head-branch') {
+                return 'Autofix did not push a fix branch. Rerun after reviewing the RLM/Claude step.';
+              }
+              if (process.env.FIX_BRANCH_FAILURE === 'empty-diff') {
+                return 'Autofix produced no diff. Verify whether the issue is already fixed; otherwise rerun with more precise issue context.';
+              }
+              if (process.env.FIX_BRANCH_FAILURE === 'rlm-fix-failed') {
+                return 'The RLM/Claude fix step failed before a reviewable branch was produced. Rerun after addressing the fix-step error.';
+              }
               if (!prReady) return 'Pipeline halted before PR creation — review workflow logs.';
               if (apiFailureReason === 'auth-failed') {
                 return 'Sentinel could not authenticate against the preview (HTTP 401). The E2E_EMAIL / E2E_PASSWORD org secrets may not match the preview environment. PR diff is still reviewable.';
@@ -1213,3 +1295,19 @@ jobs:
               });
             }
             console.log(`Cross-posted shadow ${prNumber ? 'PR' : 'follow-up'} to ${config.sourceRepo}#${sourceIssueNumber}`);
+
+      - name: Fail workflow when no reviewable PR was produced
+        if: |
+          needs.rlm-fix.result != 'success' ||
+          needs.verify-fix-branch.outputs.branch_ready != 'true' ||
+          steps.pr.outputs.pr_ready != 'true' ||
+          needs.validate.outputs.validation_passed != 'true' ||
+          needs.preflight.outputs.preflight_passed != 'true' ||
+          (needs.validate-api.result != 'skipped' && needs.validate-api.outputs.api_validation_passed != 'true')
+        run: |
+          echo "Autopilot did not produce a reviewable, gate-passing PR."
+          echo "RLM result: ${{ needs.rlm-fix.result }}"
+          echo "Fix branch ready: ${{ needs.verify-fix-branch.outputs.branch_ready || 'false' }}"
+          echo "Fix branch failure: ${{ needs.verify-fix-branch.outputs.failure_reason || '' }}"
+          echo "PR ready: ${{ steps.pr.outputs.pr_ready || 'false' }}"
+          exit 1
