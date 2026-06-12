@@ -1,0 +1,203 @@
+name: "Reusable Autopilot: Queue Drain"
+
+on:
+  workflow_call:
+    inputs:
+      target_repo:
+        description: "Repo to drain (defaults to caller repo)"
+        required: false
+        type: string
+        default: ""
+      max_concurrent:
+        description: "Maximum active Autopilot runner workflows allowed"
+        required: false
+        type: number
+        default: 5
+      batch_size:
+        description: "Maximum queued issues to dispatch in one drain pass"
+        required: false
+        type: number
+        default: 5
+      settle_seconds:
+        description: "Seconds to wait before draining, used after issue sync so label-triggered intakes can settle"
+        required: false
+        type: number
+        default: 0
+    secrets:
+      WORKFLOW_PAT:
+        required: true
+
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "Repo to drain (owner/name)"
+        required: true
+        type: string
+      max_concurrent:
+        description: "Maximum active Autopilot runner workflows allowed"
+        required: false
+        type: number
+        default: 5
+      batch_size:
+        description: "Maximum queued issues to dispatch in one drain pass"
+        required: false
+        type: number
+        default: 5
+      settle_seconds:
+        description: "Seconds to wait before draining"
+        required: false
+        type: number
+        default: 0
+
+concurrency:
+  group: autopilot-queue-drain-${{ inputs.target_repo || github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  issues: write
+
+jobs:
+  drain:
+    name: Drain Autopilot Queue
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    outputs:
+      active_count: ${{ steps.drain.outputs.active_count }}
+      available_slots: ${{ steps.drain.outputs.available_slots }}
+      dispatched_count: ${{ steps.drain.outputs.dispatched_count }}
+
+    steps:
+      - name: Wait for label-triggered intake events to settle
+        if: ${{ inputs.settle_seconds > 0 }}
+        run: sleep "${{ inputs.settle_seconds }}"
+
+      - name: Dispatch queued Ready issues
+        id: drain
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT }}
+          script: |
+            const targetRepo = '${{ inputs.target_repo || github.repository }}';
+            const [owner, repo] = targetRepo.split('/');
+            if (!owner || !repo) {
+              core.setFailed(`Invalid target_repo: ${targetRepo}`);
+              return;
+            }
+
+            const maxConcurrent = Number('${{ inputs.max_concurrent }}' || 5);
+            const batchSize = Number('${{ inputs.batch_size }}' || 5);
+            const activeStatuses = ['queued', 'in_progress', 'waiting', 'requested'];
+            const blockedLabels = new Set([
+              'AUTOPILOT: Skip',
+              'claude-working',
+              'STATUS: In Progress',
+              'STATUS: In QA',
+              'STATUS: Follow-Up Required',
+              'STATUS: Done',
+              'STATUS: Failed',
+            ]);
+            const marker = '<!-- AUTOPILOT_QUEUE_DRAIN -->';
+
+            const runResponses = await Promise.all(activeStatuses.map((status) =>
+              github.rest.actions.listWorkflowRunsForRepo({
+                owner,
+                repo,
+                status,
+                per_page: 100,
+              })
+            ));
+            const runs = runResponses.flatMap((response) => response.data.workflow_runs);
+            const activeStatusSet = new Set(activeStatuses);
+            const activeAutopilotRuns = runs.filter((run) =>
+              activeStatusSet.has(run.status) &&
+              String(run.name || '').toLowerCase().includes('autopilot')
+            );
+            const availableSlots = Math.max(0, maxConcurrent - activeAutopilotRuns.length);
+            const dispatchLimit = Math.min(availableSlots, batchSize);
+
+            core.setOutput('active_count', String(activeAutopilotRuns.length));
+            core.setOutput('available_slots', String(availableSlots));
+
+            if (dispatchLimit <= 0) {
+              core.notice(`No capacity available: ${activeAutopilotRuns.length}/${maxConcurrent} active Autopilot runs`);
+              core.setOutput('dispatched_count', '0');
+              await core.summary
+                .addRaw(`### Autopilot Queue Drain\n\nNo capacity available: ${activeAutopilotRuns.length}/${maxConcurrent} active Autopilot runs.\n`)
+                .write();
+              return;
+            }
+
+            const readyIssues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              labels: 'AUTOFIX: Ready',
+              per_page: 100,
+            });
+
+            const candidates = [];
+            for (const issue of readyIssues) {
+              if (issue.pull_request) continue;
+              const labels = issue.labels.map((label) => typeof label === 'string' ? label : label.name);
+              if (labels.some((label) => blockedLabels.has(label))) continue;
+              if (labels.some((label) => label.startsWith('STATUS:'))) continue;
+
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner,
+                repo,
+                issue_number: issue.number,
+                per_page: 100,
+              });
+              const recentlyDispatched = comments.some((comment) => {
+                if (!String(comment.body || '').includes(marker)) return false;
+                const createdAt = new Date(comment.created_at).getTime();
+                return Date.now() - createdAt < 15 * 60 * 1000;
+              });
+              if (recentlyDispatched) continue;
+
+              candidates.push(issue);
+            }
+
+            candidates.sort((a, b) =>
+              new Date(a.created_at).getTime() - new Date(b.created_at).getTime() ||
+              a.number - b.number
+            );
+
+            const dispatched = [];
+            for (const issue of candidates.slice(0, dispatchLimit)) {
+              const body = [
+                marker,
+                '@claude',
+                '',
+                'Queue drain dispatch: runner capacity is available, so this queued `AUTOFIX: Ready` issue is being started automatically.',
+              ].join('\n');
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: issue.number,
+                body,
+              });
+              dispatched.push(issue);
+            }
+
+            core.setOutput('dispatched_count', String(dispatched.length));
+
+            const lines = [
+              '### Autopilot Queue Drain',
+              '',
+              `Active Autopilot runs: ${activeAutopilotRuns.length}/${maxConcurrent}`,
+              `Available slots: ${availableSlots}`,
+              `Candidate Ready issues: ${candidates.length}`,
+              `Dispatched: ${dispatched.length}`,
+              '',
+              ...dispatched.map((issue) => `- #${issue.number} ${issue.title}`),
+            ];
+            await core.summary.addRaw(lines.join('\n')).write();
+
+            if (dispatched.length) {
+              core.notice(`Dispatched queued issues: ${dispatched.map((issue) => `#${issue.number}`).join(', ')}`);
+            } else {
+              core.notice('No queued Ready issues eligible for dispatch');
+            }
