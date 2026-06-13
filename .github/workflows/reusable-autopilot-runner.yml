@@ -172,6 +172,8 @@ jobs:
       branch_ready: ${{ steps.branch.outputs.branch_ready }}
       has_changes: ${{ steps.branch.outputs.has_changes }}
       failure_reason: ${{ steps.branch.outputs.failure_reason }}
+      already_fixed: ${{ steps.branch.outputs.already_fixed }}
+      already_fixed_reason: ${{ steps.branch.outputs.already_fixed_reason }}
 
     steps:
       - name: Check head branch and diff
@@ -188,10 +190,20 @@ jobs:
             core.setOutput('branch_ready', 'false');
             core.setOutput('has_changes', 'false');
             core.setOutput('failure_reason', '');
+            core.setOutput('already_fixed', 'false');
+            core.setOutput('already_fixed_reason', '');
 
             if ('${{ needs.rlm-fix.result }}' !== 'success') {
               core.setOutput('failure_reason', 'rlm-fix-failed');
               core.notice(`RLM fix job result was ${{ needs.rlm-fix.result }}; downstream gates will not run`);
+              return;
+            }
+
+            if ('${{ needs.rlm-fix.outputs.already_fixed }}' === 'true') {
+              core.setOutput('already_fixed', 'true');
+              core.setOutput('already_fixed_reason', '${{ needs.rlm-fix.outputs.already_fixed_reason }}');
+              core.setOutput('failure_reason', 'already-fixed');
+              core.notice('RLM fix reported that the base branch already satisfies the issue; no fix branch is required');
               return;
             }
 
@@ -856,6 +868,7 @@ jobs:
     steps:
       - name: Checkout fix branch
         id: checkout
+        if: needs.verify-fix-branch.outputs.already_fixed != 'true'
         continue-on-error: true
         uses: actions/checkout@v4
         with:
@@ -869,11 +882,12 @@ jobs:
           node-version: '22'
 
       - name: Fetch shared scripts
+        if: needs.verify-fix-branch.outputs.already_fixed != 'true'
         run: |
           git clone --depth 1 https://x-access-token:${{ secrets.WORKFLOW_PAT }}@github.com/cloudwarriors-ai/.github.git /tmp/org-github
 
       - name: Build matrix
-        if: always()
+        if: always() && needs.verify-fix-branch.outputs.already_fixed != 'true'
         id: matrix
         env:
           VALIDATION: ${{ needs.validate.outputs.validation_passed }}
@@ -1070,14 +1084,94 @@ jobs:
               });
             }
 
+      - name: "On already fixed: mark no PR needed"
+        if: |
+          needs.rlm-fix.result == 'success' &&
+          needs.verify-fix-branch.outputs.already_fixed == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issueNumber = ${{ inputs.issue_number }};
+            for (const name of [
+              'STATUS: In Progress',
+              'STATUS: Follow-Up Required',
+              'AUTOFIX: Ready',
+              'AUTOPILOT: Queue',
+            ]) {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  name,
+                });
+              } catch {}
+            }
+
+            const labels = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+            });
+            if (!labels.data.some(l => l.name === 'STATUS: In QA')) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                labels: ['STATUS: In QA'],
+              });
+            }
+
+            const marker = '<!-- AUTOPILOT_ALREADY_FIXED -->';
+            const body = [
+              marker,
+              '### Autopilot — Already Fixed',
+              '',
+              'The RLM/autofix pass found that the base branch already appears to satisfy this issue, so no fix branch or PR was created.',
+              '',
+              '| Field | Value |',
+              '|-------|-------|',
+              `| Base | \`${{ inputs.base }}\` |`,
+              `| Reason | \`${{ needs.verify-fix-branch.outputs.already_fixed_reason || 'base_already_satisfies_issue' }}\` |`,
+              `| Run | [Workflow](${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) |`,
+              '',
+              'The Ready/Queue labels were removed so the queue agent does not rerun this stale issue. Human UAT can close the issue once confirmed.',
+            ].join('\n');
+
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              per_page: 50,
+            });
+            const existing = comments.data.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body,
+              });
+            }
+
       - name: "On failure: label Follow-Up Required"
         if: |
-          needs.rlm-fix.result != 'success' ||
-          needs.verify-fix-branch.outputs.branch_ready != 'true' ||
-          steps.pr.outputs.pr_ready != 'true' ||
-          needs.validate.outputs.validation_passed != 'true' ||
-          needs.preflight.outputs.preflight_passed != 'true' ||
-          (needs.validate-api.result != 'skipped' && needs.validate-api.outputs.api_validation_passed != 'true')
+          needs.verify-fix-branch.outputs.already_fixed != 'true' &&
+          (
+            needs.rlm-fix.result != 'success' ||
+            needs.verify-fix-branch.outputs.branch_ready != 'true' ||
+            steps.pr.outputs.pr_ready != 'true' ||
+            needs.validate.outputs.validation_passed != 'true' ||
+            needs.preflight.outputs.preflight_passed != 'true' ||
+            (needs.validate-api.result != 'skipped' && needs.validate-api.outputs.api_validation_passed != 'true')
+          )
         env:
           RLM_RESULT: ${{ needs.rlm-fix.result }}
           FIX_BRANCH_READY: ${{ needs.verify-fix-branch.outputs.branch_ready || 'false' }}
@@ -1259,6 +1353,7 @@ jobs:
             }
 
             const prNumber = '${{ steps.pr.outputs.pr_number }}';
+            const alreadyFixed = '${{ needs.verify-fix-branch.outputs.already_fixed }}' === 'true';
             const shadowIssueUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/issues/${shadowIssueNumber}`;
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const marker = '<!-- SHADOW_RUN_ACTIVE -->';
@@ -1273,6 +1368,10 @@ jobs:
               rows.push(`| Workflow run | [View run](${runUrl}) |`);
               rows.push('| Status | Shadow PR open — awaiting auto-merge and upstream promotion |');
               heading = 'Fix Ready';
+            } else if (alreadyFixed) {
+              rows.push(`| Workflow run | [View run](${runUrl}) |`);
+              rows.push('| Status | Already fixed on base branch — no shadow PR needed |');
+              heading = 'Already Fixed';
             } else {
               rows.push(`| Workflow run | [View run](${runUrl}) |`);
               rows.push('| Status | ⚠️ Follow-up required — see shadow issue for details |');
@@ -1311,12 +1410,15 @@ jobs:
 
       - name: Fail workflow when no reviewable PR was produced
         if: |
-          needs.rlm-fix.result != 'success' ||
-          needs.verify-fix-branch.outputs.branch_ready != 'true' ||
-          steps.pr.outputs.pr_ready != 'true' ||
-          needs.validate.outputs.validation_passed != 'true' ||
-          needs.preflight.outputs.preflight_passed != 'true' ||
-          (needs.validate-api.result != 'skipped' && needs.validate-api.outputs.api_validation_passed != 'true')
+          needs.verify-fix-branch.outputs.already_fixed != 'true' &&
+          (
+            needs.rlm-fix.result != 'success' ||
+            needs.verify-fix-branch.outputs.branch_ready != 'true' ||
+            steps.pr.outputs.pr_ready != 'true' ||
+            needs.validate.outputs.validation_passed != 'true' ||
+            needs.preflight.outputs.preflight_passed != 'true' ||
+            (needs.validate-api.result != 'skipped' && needs.validate-api.outputs.api_validation_passed != 'true')
+          )
         run: |
           echo "Autopilot did not produce a reviewable, gate-passing PR."
           echo "RLM result: ${{ needs.rlm-fix.result }}"
