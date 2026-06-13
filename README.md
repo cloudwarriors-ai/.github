@@ -344,8 +344,8 @@ Set these at `github.com/organizations/cloudwarriors-ai/settings/secrets/actions
 
 | Secret | Used By | Description |
 |--------|---------|-------------|
-| `ANTHROPIC_API_KEY` | RLM, Autopilot | Claude API key |
-| `OPENROUTER_API_KEY` | RLM, Autopilot | Codebase analysis via OpenRouter |
+| `OPENROUTER_API_KEY` | RLM, Autopilot | Codebase analysis **and** Claude autofix execution (routed via OpenRouter) |
+| `ANTHROPIC_API_KEY` | — | Deprecated. Optional; kept only for rollback to direct Anthropic billing |
 | `WORKFLOW_PAT` | Autopilot | GitHub PAT for cross-repo dispatch and branch operations |
 | `BROWSERBASE_API_KEY` | E2E tests | Cloud browser testing (optional) |
 | `BROWSERBASE_PROJECT_ID` | E2E tests | Browserbase project (optional) |

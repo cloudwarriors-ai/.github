@@ -38,7 +38,8 @@ on:
       WORKFLOW_PAT:
         required: true
       ANTHROPIC_API_KEY:
-        required: true
+        # Deprecated: autofix bills through OpenRouter. Optional for rollback only.
+        required: false
       OPENROUTER_API_KEY:
         required: true
       VALIDATION_ATTESTATION_KEY:

@@ -93,8 +93,8 @@ Set these at: `https://github.com/organizations/cloudwarriors-ai/settings/secret
 
 | Secret | Required | Description |
 |--------|----------|-------------|
-| `ANTHROPIC_API_KEY` | **Yes** | Claude API key for auto-fix |
-| `OPENROUTER_API_KEY` | **Yes** | OpenRouter API key for RLM analysis |
+| `OPENROUTER_API_KEY` | **Yes** | OpenRouter API key — powers RLM analysis **and** Claude auto-fix |
+| `ANTHROPIC_API_KEY` | No | Deprecated; optional, rollback to direct Anthropic billing only |
 
 ### Required Labels
 

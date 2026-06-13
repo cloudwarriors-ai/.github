@@ -76,8 +76,8 @@ Org admin sets these in **`cloudwarriors-ai` Settings → Secrets and variables 
 | Secret | Purpose | Sample value |
 |---|---|---|
 | `WORKFLOW_PAT` | Personal access token with `repo`, `workflow`, `issues:write` scopes — used by cross-repo actions (script clone, PR creation, comment posting) | `ghp_...` (rotate every 90 days) |
-| `ANTHROPIC_API_KEY` | Powers Claude in the RLM autofix step | `sk-ant-...` |
-| `OPENROUTER_API_KEY` | Powers RLM codebase analysis | `sk-or-...` |
+| `OPENROUTER_API_KEY` | Powers RLM codebase analysis **and** the Claude autofix step | `sk-or-...` |
+| `ANTHROPIC_API_KEY` | Deprecated — optional, rollback to direct Anthropic billing only | `sk-ant-...` |
 
 ### Required if your repo uses VPS preview deploy
 
@@ -399,8 +399,8 @@ After it completes, every open issue from source should have a counterpart on sh
 | Type | Where | Name | Required | Used by |
 |---|---|---|---|---|
 | Org secret | `cloudwarriors-ai` | `WORKFLOW_PAT` | Always | All cross-repo actions |
-| Org secret | `cloudwarriors-ai` | `ANTHROPIC_API_KEY` | Always | RLM Claude auto-fix |
-| Org secret | `cloudwarriors-ai` | `OPENROUTER_API_KEY` | Always | RLM codebase analysis |
+| Org secret | `cloudwarriors-ai` | `OPENROUTER_API_KEY` | Always | RLM codebase analysis + Claude auto-fix |
+| Org secret | `cloudwarriors-ai` | `ANTHROPIC_API_KEY` | Optional (rollback) | Deprecated; autofix now bills via OpenRouter |
 | Org secret | `cloudwarriors-ai` | `SSH_HOST` | If `previewDeploy: true` | Deploy Preview job |
 | Org secret | `cloudwarriors-ai` | `SSH_USER` | If `previewDeploy: true` | Deploy Preview job |
 | Org secret | `cloudwarriors-ai` | `SSH_PRIVATE_KEY` | If `previewDeploy: true` | Deploy Preview job |

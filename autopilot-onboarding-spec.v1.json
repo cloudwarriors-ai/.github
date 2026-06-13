@@ -604,10 +604,16 @@
           "usedIn": ["autopilot-intake.yml (Dispatch runner step)"]
         },
         {
+          "name": "OPENROUTER_API_KEY",
+          "description": "OpenRouter API key. Powers both RLM codebase analysis and the Claude autofix step (Claude CLI is routed through OpenRouter via ANTHROPIC_BASE_URL). Required for autofix to run.",
+          "scope": "openrouter_api",
+          "usedIn": ["reusable-autopilot-runner.yml (via secrets: inherit)", "reusable-claude-autofix-rlm.yml (cloudwarriors-ai/workflows)"]
+        },
+        {
           "name": "ANTHROPIC_API_KEY",
-          "description": "Anthropic API key for Claude. Consumed by reusable-autopilot-runner.yml. Must have sufficient quota for the max_rlm_cost configured in runner.",
+          "description": "Deprecated. Autofix now bills through OpenRouter; this key is optional and retained only to roll back to direct Anthropic billing.",
           "scope": "anthropic_api",
-          "usedIn": ["reusable-autopilot-runner.yml (via secrets: inherit)"]
+          "usedIn": ["rollback only"]
         },
         {
           "name": "PREVIEW_AUTH_SECRET",
@@ -730,7 +736,7 @@
         "name": "Secrets & Labels",
         "items": [
           { "id": "4.1", "task": "Add WORKFLOW_PAT to GitHub repo secrets", "layer": "layer_5_secrets_and_labels" },
-          { "id": "4.2", "task": "Add ANTHROPIC_API_KEY to GitHub repo secrets", "layer": "layer_5_secrets_and_labels" },
+          { "id": "4.2", "task": "Add OPENROUTER_API_KEY to GitHub repo secrets (required; powers RLM analysis and Claude autofix)", "layer": "layer_5_secrets_and_labels" },
           { "id": "4.3", "task": "Add PREVIEW_AUTH_SECRET to GitHub repo secrets", "layer": "layer_5_secrets_and_labels" },
           { "id": "4.4", "task": "Create SHADOW_ENABLED repo variable (set to 'false' for Path A, 'true' for Path B)", "layer": "layer_5_secrets_and_labels" },
           { "id": "4.5", "task": "Create all required issue labels in GitHub repo", "layer": "layer_5_secrets_and_labels" }
