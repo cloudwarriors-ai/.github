@@ -193,13 +193,16 @@ jobs:
       - name: Generate runtime config with Claude
         id: generate
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Route through OpenRouter (matches the autofix engine + sibling workflows).
+          ANTHROPIC_API_KEY: ""
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.OPENROUTER_API_KEY }}
+          ANTHROPIC_BASE_URL: https://openrouter.ai/api
         run: |
           touch /tmp/claude-output.txt
           echo "Running Claude stack detection..."
           set +e
           timeout 300 claude --print --permission-mode bypassPermissions \
-            --model claude-sonnet-4-6 \
+            --model anthropic/claude-sonnet-4.6 \
             "$(cat /tmp/detect-prompt.md)" > /tmp/claude-output.txt 2>&1
           EXIT=$?
           set -e

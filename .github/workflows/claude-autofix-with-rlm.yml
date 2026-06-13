@@ -1,10 +1,18 @@
 name: Claude Auto-Fix with RLM Analysis
 
+# DISABLED (2026-06-12). This on-demand "@claude on an issue" workflow runs the
+# autofix pipeline directly in the SOURCE repo, bypassing the shadow-repo flow —
+# which is not desired behavior. It also still bills direct Anthropic
+# (claude-code-action@v1 + ANTHROPIC_API_KEY) and was NOT migrated to OpenRouter.
+# Auto-triggers removed so it cannot fire. Use the autopilot intake -> runner
+# (shadow) flow instead. To revive: migrate the Claude step to the OpenRouter
+# CLI pattern (see cloudwarriors-ai/workflows reusable-claude-autofix-rlm.yml)
+# and restore the triggers below.
 on:
-  issue_comment:
-    types: [created]
-  repository_dispatch:
-    types: [claude-autofix]
+  # issue_comment:        # was: @claude comment in a source repo (bypasses shadow)
+  #   types: [created]
+  # repository_dispatch:  # was: types: [claude-autofix]
+  workflow_dispatch: {}
 
 # Prevent concurrent runs on the same issue
 concurrency:

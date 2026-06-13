@@ -25,8 +25,8 @@ Your consumer repository calls these. **You do not maintain copies of the pipeli
 These must exist on `cloudwarriors-ai` and be inherited by your repo. Verify with org admin if unsure:
 
 - `WORKFLOW_PAT` — PAT with `repo`, `workflow`, `issues:write` scopes
-- `ANTHROPIC_API_KEY`
-- `OPENROUTER_API_KEY`
+- `OPENROUTER_API_KEY` — powers RLM analysis and Claude autofix
+- `ANTHROPIC_API_KEY` — optional, deprecated (rollback to direct Anthropic billing only)
 
 ### Conditional secrets (only if your repo uses these features)
 

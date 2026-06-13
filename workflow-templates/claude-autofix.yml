@@ -1,8 +1,15 @@
 name: Claude Auto-Fix
 
+# DEPRECATED (2026-06-12). This template wires up the on-demand "@claude on an
+# issue" autofix that runs in the SOURCE repo and bypasses the shadow flow —
+# not desired behavior. Its reusable target (cloudwarriors-ai/.github
+# reusable-claude-autofix-rlm.yml) has been removed; the canonical engine now
+# lives in cloudwarriors-ai/workflows and is driven by the autopilot intake ->
+# runner (shadow) flow. Do not adopt this template. Trigger disabled.
 on:
-  issue_comment:
-    types: [created]
+  # issue_comment:   # was: @claude comment in a source repo (bypasses shadow)
+  #   types: [created]
+  workflow_dispatch: {}
 
 jobs:
   trigger-autofix:
@@ -16,5 +23,5 @@ jobs:
       # Optional: Customize these if needed
       # max_rlm_cost: 5
       # max_claude_turns: 30
-      # claude_model: 'claude-opus-4-5-20251101'
+      # claude_model: 'anthropic/claude-sonnet-4.6'  # OpenRouter provider/model ID
     secrets: inherit
