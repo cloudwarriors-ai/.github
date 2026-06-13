@@ -34,6 +34,16 @@ on:
         required: false
         type: number
         default: 2
+      rlm_model:
+        description: 'OpenRouter model for RLM codebase analysis'
+        required: false
+        type: string
+        default: 'anthropic/claude-sonnet-4.6'
+      claude_model:
+        description: 'OpenRouter model for Claude autofix'
+        required: false
+        type: string
+        default: 'anthropic/claude-opus-4.6'
     secrets:
       WORKFLOW_PAT:
         required: true
@@ -76,6 +86,8 @@ jobs:
       base: ${{ inputs.base }}
       max_claude_turns: ${{ inputs.max_claude_turns }}
       max_rlm_cost: ${{ inputs.max_rlm_cost }}
+      rlm_model: ${{ inputs.rlm_model }}
+      claude_model: ${{ inputs.claude_model }}
     secrets: inherit
 
   # ── Job 2: Read project config ──────────────────────────────────────
