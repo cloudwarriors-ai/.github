@@ -30,6 +30,36 @@ on:
         description: 'Head branch (autofix/issue-<id>)'
         required: true
         type: string
+      claude_provider:
+        description: 'Claude Code provider: openrouter or anthropic'
+        required: false
+        type: string
+        default: ''
+      rlm_model:
+        description: 'OpenRouter model for RLM analysis'
+        required: false
+        type: string
+        default: ''
+      scout_model:
+        description: 'Optional Claude Code model for scout/packet stages'
+        required: false
+        type: string
+        default: ''
+      claude_model:
+        description: 'Claude Code writer model'
+        required: false
+        type: string
+        default: ''
+      max_claude_turns:
+        description: 'Max turns for the writer'
+        required: false
+        type: string
+        default: ''
+      max_rlm_cost:
+        description: 'Max cost for RLM analysis'
+        required: false
+        type: string
+        default: ''
 
 jobs:
   run:
@@ -40,4 +70,10 @@ jobs:
       track:        ${{ github.event.inputs.track }}
       base:         ${{ github.event.inputs.base }}
       head:         ${{ github.event.inputs.head }}
+      claude_provider:   ${{ github.event.inputs.claude_provider || vars.AUTOPILOT_CLAUDE_PROVIDER || 'openrouter' }}
+      rlm_model:         ${{ github.event.inputs.rlm_model || vars.AUTOPILOT_RLM_MODEL || 'anthropic/claude-sonnet-4.6' }}
+      scout_model:       ${{ github.event.inputs.scout_model || vars.AUTOPILOT_SCOUT_MODEL || '' }}
+      claude_model:      ${{ github.event.inputs.claude_model || vars.AUTOPILOT_CLAUDE_MODEL || 'anthropic/claude-opus-4.6' }}
+      max_claude_turns:  ${{ fromJSON(github.event.inputs.max_claude_turns || vars.AUTOPILOT_MAX_CLAUDE_TURNS || '60') }}
+      max_rlm_cost:      ${{ fromJSON(github.event.inputs.max_rlm_cost || vars.AUTOPILOT_MAX_RLM_COST || '2') }}
     secrets: inherit
