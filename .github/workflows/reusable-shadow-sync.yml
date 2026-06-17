@@ -108,7 +108,16 @@ jobs:
             console.log(`Fetched ${allIssues.length} issues from ${sourceRepo}`);
 
             // ── 4. Upsert each issue in shadow ───────────────────────────────
-            const AUTOQUEUE_ENABLED = '${{ inputs.autoqueue_enabled }}' === 'true';
+            // Praxis interlock (repo-scoped, default off): when Praxis owns dispatch for this
+            // source repo, the engine must NOT auto-decide to stamp `AUTOFIX: Ready` — Praxis
+            // stamps it. Only the autoqueue stamp no-ops; shadow creation/sync below is unaffected.
+            // Empty/unset org var => owns=false => identical behavior to today.
+            const praxisOwnsDispatch = `${{ vars.PRAXIS_OWNS_DISPATCH_REPOS }}`
+              .split(/[\s,]+/).filter(Boolean).includes(sourceRepo);
+            if (praxisOwnsDispatch) {
+              console.log(`Praxis owns dispatch for ${sourceRepo} — autoqueue stamping disabled (shadow sync continues).`);
+            }
+            const AUTOQUEUE_ENABLED = '${{ inputs.autoqueue_enabled }}' === 'true' && !praxisOwnsDispatch;
             // Labels that indicate a shadow issue is already being processed — do not
             // re-stamp AUTOFIX: Ready if any of these are present.
             const processingLabels = new Set([

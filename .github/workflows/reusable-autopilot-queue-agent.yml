@@ -202,6 +202,23 @@ jobs:
             }
             core.setOutput('source_repo', sourceRepoFull);
 
+            // Praxis interlock (repo-scoped, default off): when Praxis owns dispatch for this
+            // source repo, the engine must not self-select/promote it — Praxis decides. No-op
+            // that preserves outputs (mirrors the `!enabled` guard above). queue-drain still
+            // executes whatever Praxis stamps. Empty/unset org var => owns=false => no change.
+            const praxisOwnsDispatch = `${{ vars.PRAXIS_OWNS_DISPATCH_REPOS }}`
+              .split(/[\s,]+/).filter(Boolean).includes(sourceRepoFull);
+            if (praxisOwnsDispatch) {
+              core.notice(`Praxis owns dispatch for ${sourceRepoFull} — queue agent promotion skipped for this repo.`);
+              core.setOutput('active_count', '0');
+              core.setOutput('queued_ready_count', '0');
+              core.setOutput('promoted_count', '0');
+              await core.summary
+                .addRaw(`### Autopilot Queue Agent\n\nPraxis owns dispatch for \`${sourceRepoFull}\` — engine promotion skipped (additive interlock, default off).\n`)
+                .write();
+              return;
+            }
+
             const ensureLabel = async (owner, repo, name, color, description) => {
               try {
                 await github.rest.issues.getLabel({ owner, repo, name });
