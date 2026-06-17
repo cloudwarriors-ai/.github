@@ -133,6 +133,10 @@ jobs:
       - name: Select and promote source issues
         id: agent
         uses: actions/github-script@v7
+        env:
+          # Passed via env (not interpolated into the script body) so any value is safe — a stray
+          # backtick/`${}` in the var can never break the step. Default off when unset.
+          PRAXIS_OWNS_DISPATCH_REPOS: ${{ vars.PRAXIS_OWNS_DISPATCH_REPOS }}
         with:
           github-token: ${{ secrets.WORKFLOW_PAT }}
           script: |
@@ -201,6 +205,23 @@ jobs:
               return;
             }
             core.setOutput('source_repo', sourceRepoFull);
+
+            // Praxis interlock (repo-scoped, default off): when Praxis owns dispatch for this
+            // source repo, the engine must not self-select/promote it — Praxis decides. No-op
+            // that preserves outputs (mirrors the `!enabled` guard above). queue-drain still
+            // executes whatever Praxis stamps. Empty/unset org var => owns=false => no change.
+            const praxisOwnsDispatch = (process.env.PRAXIS_OWNS_DISPATCH_REPOS || '')
+              .split(/[\s,]+/).filter(Boolean).includes(sourceRepoFull);
+            if (praxisOwnsDispatch) {
+              core.notice(`Praxis owns dispatch for ${sourceRepoFull} — queue agent promotion skipped for this repo.`);
+              core.setOutput('active_count', '0');
+              core.setOutput('queued_ready_count', '0');
+              core.setOutput('promoted_count', '0');
+              await core.summary
+                .addRaw(`### Autopilot Queue Agent\n\nPraxis owns dispatch for \`${sourceRepoFull}\` — engine promotion skipped (additive interlock, default off).\n`)
+                .write();
+              return;
+            }
 
             const ensureLabel = async (owner, repo, name, color, description) => {
               try {
