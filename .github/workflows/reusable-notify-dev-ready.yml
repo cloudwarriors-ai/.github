@@ -1,0 +1,166 @@
+name: "Reusable: Notify dev-ready"
+
+# Server-side dev-validation notifier for any onboarded repo. Posts ONE plain-text
+# "ready for dev validation" message per GitHub issue to a configurable Zoom Team
+# Chat channel via org S2S creds, writes the DEV_READY_PINGED marker (idempotent),
+# and applies the deploy label the orchestrator (Praxis) reacts to. Runs in CI —
+# not tied to any laptop or MCP.
+#
+# Generic by design: the validation text is the issue's own body unless the caller
+# passes a pre-built `message`. Repos whose notify needs file uploads / proof
+# artifacts / audience routing keep their own job and should NOT call this — a
+# reusable workflow cannot receive in-job-built files across the call boundary.
+
+on:
+  workflow_call:
+    inputs:
+      issue:
+        description: "Source issue number to notify"
+        required: true
+        type: string
+      pr:
+        description: "Fix PR number (optional)"
+        required: false
+        type: string
+        default: "0"
+      channel_jid:
+        description: "Target Zoom Team Chat channel id"
+        required: true
+        type: string
+      message:
+        description: "Pre-built message; when empty the message is built from the issue body"
+        required: false
+        type: string
+        default: ""
+      deploy_label:
+        description: "Label applied on notify (the orchestrator's deploy signal)"
+        required: false
+        type: string
+        default: "Dev Released"
+      post_user_id:
+        description: "Zoom user id the S2S app posts as (must be a member of the channel)"
+        required: false
+        type: string
+        default: "Mb4vcQ4YQUaQKJjoY4vntQ"
+      dry_run:
+        description: "Build the message without posting or changing labels"
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      ZOOM_CLIENT_ID:
+        required: true
+      ZOOM_CLIENT_SECRET:
+        required: true
+      ZOOM_ACCOUNT_ID:
+        required: true
+      gh_token:
+        description: "Token with issues:write on the caller repo; defaults to github.token"
+        required: false
+    outputs:
+      message_id:
+        description: "Zoom message id when a post was made (empty on skip/dry-run)"
+        value: ${{ jobs.notify.outputs.message_id }}
+
+jobs:
+  notify:
+    name: Notify issue ready for dev validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      message_id: ${{ steps.post.outputs.message_id }}
+    steps:
+      - name: Notify dev-ready issue
+        id: post
+        env:
+          GH_TOKEN: ${{ secrets.gh_token || github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ZOOM_CLIENT_ID: ${{ secrets.ZOOM_CLIENT_ID }}
+          ZOOM_CLIENT_SECRET: ${{ secrets.ZOOM_CLIENT_SECRET }}
+          ZOOM_ACCOUNT_ID: ${{ secrets.ZOOM_ACCOUNT_ID }}
+          ZOOM_CHANNEL_JID: ${{ inputs.channel_jid }}
+          ZOOM_POST_USER_ID: ${{ inputs.post_user_id }}
+          DEPLOY_LABEL: ${{ inputs.deploy_label }}
+          INPUT_MESSAGE: ${{ inputs.message }}
+          INPUT_ISSUE: ${{ inputs.issue }}
+          INPUT_PR: ${{ inputs.pr }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          ISSUE="$INPUT_ISSUE"
+          PR="${INPUT_PR:-0}"
+          REPO="$GITHUB_REPOSITORY"
+          MARKER="<!-- DEV_READY_PINGED -->"
+          log() { echo "notify-dev-ready: $*" >&2; }
+
+          issue_json=$(gh api "repos/${REPO}/issues/${ISSUE}" 2>/dev/null) \
+            || { log "issue #${ISSUE} not readable — skipping"; exit 0; }
+          title=$(echo "$issue_json" | jq -r '.title // ""')
+          body=$(echo "$issue_json" | jq -r '.body // ""')
+          issue_url=$(echo "$issue_json" | jq -r '.html_url // ""')
+
+          if gh api "repos/${REPO}/issues/${ISSUE}/comments" --jq '.[].body' 2>/dev/null \
+               | grep -qF "$MARKER"; then
+            log "issue #${ISSUE} already pinged — skipping"; exit 0
+          fi
+
+          if [ -n "${INPUT_MESSAGE:-}" ]; then
+            msg="$INPUT_MESSAGE"
+          else
+            pr_line=""; [ "$PR" != "0" ] && pr_line=" (PR #${PR})"
+            excerpt=$(printf '%s\n' "$body" | sed '/^[[:space:]]*$/d' | head -n 12)
+            msg=$(printf '%s\n' \
+              "🔧 Autopilot fix ready for dev validation" \
+              "" \
+              "Issue #${ISSUE}: ${title}" \
+              "Fixed and merged to dev${pr_line}." \
+              "" \
+              "To validate — confirm the reported issue no longer reproduces:" \
+              "${excerpt}" \
+              "" \
+              "Reply on the issue with:" \
+              "  pass            — when the fix is verified" \
+              "  fail <reason>   — when it still reproduces" \
+              "${issue_url}")
+          fi
+
+          if [ "$INPUT_DRY_RUN" = "true" ]; then
+            echo "----- CHANNEL ----- ${ZOOM_CHANNEL_JID:-<unset>}"
+            echo "----- LABELS  ----- +${DEPLOY_LABEL}  -AUTOFIX: Ready"
+            echo "----- MESSAGE -----"; echo "$msg"
+            echo "message_id=" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          if [ -z "${ZOOM_CLIENT_ID:-}" ] || [ -z "${ZOOM_CLIENT_SECRET:-}" ] || [ -z "${ZOOM_ACCOUNT_ID:-}" ]; then
+            log "Zoom S2S secrets missing — skipping ping (flow unaffected)"
+            echo "message_id=" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ -z "${ZOOM_CHANNEL_JID:-}" ]; then
+            log "channel_jid empty — skipping ping (flow unaffected)"
+            echo "message_id=" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          token=$(curl -s -X POST \
+            "https://zoom.us/oauth/token?grant_type=account_credentials&account_id=${ZOOM_ACCOUNT_ID}" \
+            -u "${ZOOM_CLIENT_ID}:${ZOOM_CLIENT_SECRET}" | jq -r '.access_token // empty')
+          [ -z "$token" ] && { log "Zoom token mint failed — skipping ping"; echo "message_id=" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          payload=$(jq -n --arg ch "$ZOOM_CHANNEL_JID" --arg m "$msg" '{to_channel:$ch, message:$m}')
+          resp=$(curl -s -X POST "https://api.zoom.us/v2/chat/users/${ZOOM_POST_USER_ID}/messages" \
+            -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d "$payload")
+          msg_id=$(echo "$resp" | jq -r '.id // .message_id // empty')
+          if [ -z "$msg_id" ]; then
+            log "Zoom post returned no message id (resp: $resp) — not marking pinged"
+            echo "message_id=" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          log "posted to channel ${ZOOM_CHANNEL_JID} (message ${msg_id})"
+          echo "message_id=${msg_id}" >> "$GITHUB_OUTPUT"
+
+          gh api "repos/${REPO}/issues/${ISSUE}/comments" \
+            -f body="${MARKER} dev-ready ping sent (${msg_id})" >/dev/null 2>&1 || true
+          gh issue edit "$ISSUE" --repo "$REPO" --add-label "$DEPLOY_LABEL" >/dev/null 2>&1 \
+            || log "could not add label '${DEPLOY_LABEL}' (may not exist)"
+          gh issue edit "$ISSUE" --repo "$REPO" --remove-label "AUTOFIX: Ready" >/dev/null 2>&1 || true
