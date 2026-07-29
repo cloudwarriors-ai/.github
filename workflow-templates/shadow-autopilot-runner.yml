@@ -30,6 +30,11 @@ on:
         description: 'Head branch (autofix/issue-<id>)'
         required: true
         type: string
+      praxis_binding:
+        description: 'Immutable Praxis attempt binding, when dispatched by Praxis'
+        required: false
+        type: string
+        default: ''
       claude_provider:
         description: 'Claude Code provider: openrouter or anthropic'
         required: false
@@ -70,6 +75,7 @@ jobs:
       track:        ${{ github.event.inputs.track }}
       base:         ${{ github.event.inputs.base }}
       head:         ${{ github.event.inputs.head }}
+      praxis_binding:    ${{ github.event.inputs.praxis_binding }}
       claude_provider:   ${{ github.event.inputs.claude_provider || vars.AUTOPILOT_CLAUDE_PROVIDER || 'openrouter' }}
       rlm_model:         ${{ github.event.inputs.rlm_model || vars.AUTOPILOT_RLM_MODEL || 'anthropic/claude-sonnet-4.6' }}
       scout_model:       ${{ github.event.inputs.scout_model || vars.AUTOPILOT_SCOUT_MODEL || '' }}

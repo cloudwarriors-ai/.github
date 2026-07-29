@@ -135,6 +135,9 @@ jobs:
               'AUTOFIX: Ready', 'AUTOPILOT: Skip',
               'STATUS: In Progress', 'STATUS: In QA', 'STATUS: Follow-Up Required',
             ]);
+            // PRAXIS_BINDING_PATTERN: ^praxis\/a([1-9a-z][0-9a-z]{0,12})-([0-9a-f]{24})$
+            const praxisBindingPattern = /^praxis\/a([1-9a-z][0-9a-z]{0,12})-([0-9a-f]{24})$/;
+            const isPraxisMachineLabel = name => name.startsWith('praxis/a');
 
             let created = 0, updated = 0, preservedClosed = 0;
             let shadowOpenCount = 0, shadowClosedCount = 0;
@@ -150,6 +153,12 @@ jobs:
               // AUTOFIX: Ready is NOT blindly mirrored — it is stamped conditionally
               // below based on AUTOQUEUE_ENABLED and shadow issue state.
               const sourceLabels = src.labels.map(l => l.name);
+              const sourcePraxisLabels = sourceLabels.filter(isPraxisMachineLabel);
+              if (sourcePraxisLabels.length > 0) {
+                throw new Error(
+                  `Source issue ${sourceRepo}#${src.number} contains shadow-only Praxis binding label(s): ${sourcePraxisLabels.join(', ')}`
+                );
+              }
               const sourceHasAutofix = sourceLabels.includes('AUTOFIX: Ready');
               const sourceHasAutopilotSkip = sourceLabels.includes('AUTOPILOT: Skip');
               const filteredSourceLabels = sourceLabels.filter(l => l !== 'AUTOFIX: Ready');
@@ -169,9 +178,22 @@ jobs:
                   issue_number: shadowNumber,
                 });
                 const currentShadowLabels = shadowIssue.labels.map(l => typeof l === 'string' ? l : l.name);
+                const machinePraxisLabels = currentShadowLabels.filter(isPraxisMachineLabel);
+                const malformedPraxisLabels = machinePraxisLabels.filter(name => !praxisBindingPattern.test(name));
+                if (malformedPraxisLabels.length > 0) {
+                  throw new Error(
+                    `Shadow issue ${shadowOwner}/${shadowRepoName}#${shadowNumber} has malformed Praxis binding label(s): ${malformedPraxisLabels.join(', ')}`
+                  );
+                }
+                if (machinePraxisLabels.length > 1) {
+                  throw new Error(
+                    `Shadow issue ${shadowOwner}/${shadowRepoName}#${shadowNumber} has multiple Praxis bindings`
+                  );
+                }
                 labels = [...new Set([
                   ...labels,
                   ...currentShadowLabels.filter(name => preservedShadowLabels.has(name)),
+                  ...(sourceState === 'open' ? machinePraxisLabels : []),
                 ])];
 
                 // Stamp AUTOFIX: Ready when:
@@ -216,6 +238,19 @@ jobs:
                     ...(labelsChanged ? { labels } : {}),
                   });
                   updated++;
+                }
+                if (sourceState !== 'open') {
+                  for (const binding of machinePraxisLabels) {
+                    try {
+                      await github.rest.issues.deleteLabel({
+                        owner: shadowOwner,
+                        repo: shadowRepoName,
+                        name: binding,
+                      });
+                    } catch (error) {
+                      if (error.status !== 404) throw error;
+                    }
+                  }
                 }
               } else {
                 // Create new shadow issue — stamp AUTOFIX: Ready immediately if source has

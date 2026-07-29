@@ -24,6 +24,16 @@ on:
         description: 'Head branch (autofix/issue-<id>)'
         required: true
         type: string
+      praxis_binding:
+        description: 'Immutable Praxis attempt binding, when dispatched by Praxis'
+        required: false
+        type: string
+        default: ''
+      shadow_repo:
+        description: 'Optional shadow repository override for Sentinel baseline lookup'
+        required: false
+        type: string
+        default: ''
       max_claude_turns:
         description: 'Max turns for Claude in RLM'
         required: false
@@ -74,9 +84,15 @@ on:
         required: false
       PII_HMAC_KEY:
         required: false
+      SSH_HOST:
+        required: false
+      SSH_USER:
+        required: false
+      SSH_PRIVATE_KEY:
+        required: false
 
 concurrency:
-  group: autopilot-runner-${{ inputs.issue_number }}-${{ github.repository }}
+  group: autopilot-issue-${{ inputs.issue_number }}-${{ github.repository }}
   cancel-in-progress: false
 
 permissions:
@@ -1061,8 +1077,28 @@ jobs:
           fi
 
       # --- Update issue labels ---
+      - name: "On bound success: label In QA"
+        id: praxis_success_status
+        if: |
+          inputs.praxis_binding != '' &&
+          needs.rlm-fix.result == 'success' &&
+          needs.verify-fix-branch.outputs.branch_ready == 'true' &&
+          steps.pr.outputs.pr_ready == 'true' &&
+          needs.validate.outputs.validation_passed == 'true' &&
+          needs.preflight.outputs.preflight_passed == 'true' &&
+          (needs.validate-api.result == 'skipped' || needs.validate-api.outputs.api_validation_passed == 'true')
+        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@main
+        with:
+          mode: transition
+          token: ${{ github.token }}
+          repo: ${{ github.repository }}
+          issue-number: ${{ inputs.issue_number }}
+          binding: ${{ inputs.praxis_binding }}
+          phase: in-qa
+
       - name: "On success: label In QA"
         if: |
+          inputs.praxis_binding == '' &&
           needs.rlm-fix.result == 'success' &&
           needs.verify-fix-branch.outputs.branch_ready == 'true' &&
           steps.pr.outputs.pr_ready == 'true' &&
@@ -1096,20 +1132,41 @@ jobs:
               });
             }
 
+      - name: "On bound already fixed: label In QA"
+        id: praxis_already_fixed_status
+        if: |
+          inputs.praxis_binding != '' &&
+          needs.rlm-fix.result == 'success' &&
+          needs.verify-fix-branch.outputs.already_fixed == 'true'
+        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@main
+        with:
+          mode: transition
+          token: ${{ github.token }}
+          repo: ${{ github.repository }}
+          issue-number: ${{ inputs.issue_number }}
+          binding: ${{ inputs.praxis_binding }}
+          phase: in-qa
+
       - name: "On already fixed: mark no PR needed"
         if: |
           needs.rlm-fix.result == 'success' &&
-          needs.verify-fix-branch.outputs.already_fixed == 'true'
+          needs.verify-fix-branch.outputs.already_fixed == 'true' &&
+          (inputs.praxis_binding == '' ||
+           steps.praxis_already_fixed_status.outputs.applied == 'true')
+        env:
+          PRAXIS_BOUND: ${{ inputs.praxis_binding != '' }}
         uses: actions/github-script@v7
         with:
           script: |
             const issueNumber = ${{ inputs.issue_number }};
-            for (const name of [
-              'STATUS: In Progress',
-              'STATUS: Follow-Up Required',
+            const labelsToRemove = [
               'AUTOFIX: Ready',
               'AUTOPILOT: Queue',
-            ]) {
+            ];
+            if (process.env.PRAXIS_BOUND !== 'true') {
+              labelsToRemove.push('STATUS: In Progress', 'STATUS: Follow-Up Required');
+            }
+            for (const name of labelsToRemove) {
               try {
                 await github.rest.issues.removeLabel({
                   owner: context.repo.owner,
@@ -1120,18 +1177,20 @@ jobs:
               } catch {}
             }
 
-            const labels = await github.rest.issues.listLabelsOnIssue({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issueNumber,
-            });
-            if (!labels.data.some(l => l.name === 'STATUS: In QA')) {
-              await github.rest.issues.addLabels({
+            if (process.env.PRAXIS_BOUND !== 'true') {
+              const labels = await github.rest.issues.listLabelsOnIssue({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: issueNumber,
-                labels: ['STATUS: In QA'],
               });
+              if (!labels.data.some(l => l.name === 'STATUS: In QA')) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  labels: ['STATUS: In QA'],
+                });
+              }
             }
 
             const marker = '<!-- AUTOPILOT_ALREADY_FIXED -->';
@@ -1173,8 +1232,32 @@ jobs:
               });
             }
 
+      - name: "On bound failure: label Follow-Up Required"
+        id: praxis_failure_status
+        if: |
+          inputs.praxis_binding != '' &&
+          needs.verify-fix-branch.outputs.already_fixed != 'true' &&
+          (
+            needs.rlm-fix.result != 'success' ||
+            needs.verify-fix-branch.outputs.branch_ready != 'true' ||
+            steps.pr.outputs.pr_ready != 'true' ||
+            needs.validate.outputs.validation_passed != 'true' ||
+            needs.preflight.outputs.preflight_passed != 'true' ||
+            (needs.validate-api.result != 'skipped' && needs.validate-api.outputs.api_validation_passed != 'true')
+          )
+        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@main
+        with:
+          mode: transition
+          token: ${{ github.token }}
+          repo: ${{ github.repository }}
+          issue-number: ${{ inputs.issue_number }}
+          binding: ${{ inputs.praxis_binding }}
+          phase: follow-up-required
+
       - name: "On failure: label Follow-Up Required"
         if: |
+          (inputs.praxis_binding == '' ||
+           steps.praxis_failure_status.outputs.applied == 'true') &&
           needs.verify-fix-branch.outputs.already_fixed != 'true' &&
           (
             needs.rlm-fix.result != 'success' ||
@@ -1198,31 +1281,34 @@ jobs:
           API_FAILURE_REASON: ${{ needs.validate-api.outputs.sentinel_failure_reason || '' }}
           APP_TESTS_RESULT: ${{ needs.app-tests.outputs.app_tests_passed || 'skipped' }}
           DEPLOY_PREVIEW_STATUS: ${{ needs.deploy-preview.outputs.preview_deployed || 'unknown' }}
+          PRAXIS_BOUND: ${{ inputs.praxis_binding != '' }}
         uses: actions/github-script@v7
         with:
           script: |
-            try {
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner, repo: context.repo.repo,
-                issue_number: ${{ inputs.issue_number }}, name: 'STATUS: In Progress',
-              });
-            } catch {}
-            try {
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner, repo: context.repo.repo,
-                issue_number: ${{ inputs.issue_number }}, name: 'STATUS: In QA',
-              });
-            } catch {}
-            const followUpLabels = await github.rest.issues.listLabelsOnIssue({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: ${{ inputs.issue_number }},
-            });
-            if (!followUpLabels.data.some(l => l.name === 'STATUS: Follow-Up Required')) {
-              await github.rest.issues.addLabels({
+            if (process.env.PRAXIS_BOUND !== 'true') {
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: ${{ inputs.issue_number }}, name: 'STATUS: In Progress',
+                });
+              } catch {}
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: ${{ inputs.issue_number }}, name: 'STATUS: In QA',
+                });
+              } catch {}
+              const followUpLabels = await github.rest.issues.listLabelsOnIssue({
                 owner: context.repo.owner, repo: context.repo.repo,
                 issue_number: ${{ inputs.issue_number }},
-                labels: ['STATUS: Follow-Up Required'],
               });
+              if (!followUpLabels.data.some(l => l.name === 'STATUS: Follow-Up Required')) {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  issue_number: ${{ inputs.issue_number }},
+                  labels: ['STATUS: Follow-Up Required'],
+                });
+              }
             }
             // ── Build a structured per-gate breakdown so the issue comment reflects
             //    what actually failed, not just "check the logs". This separates the
@@ -1313,7 +1399,12 @@ jobs:
       # by reusable-autopilot-intake) with the final outcome: either the shadow PR
       # link (success) or a follow-up notice (failure). Runs for shadow repos only.
       - name: Cross-post shadow status to source issue
-        if: always() && !cancelled()
+        if: |
+          always() && !cancelled() &&
+          (inputs.praxis_binding == '' ||
+           steps.praxis_success_status.outputs.applied == 'true' ||
+           steps.praxis_already_fixed_status.outputs.applied == 'true' ||
+           steps.praxis_failure_status.outputs.applied == 'true')
         continue-on-error: true
         uses: actions/github-script@v7
         with:
