@@ -23,12 +23,21 @@ const NONCE_A = "0123456789abcdef0123456789abcdef";
 const NONCE_B = "fedcba9876543210fedcba9876543210";
 const BINDING_A = bindingFor("123", NONCE_A);
 const BINDING_B = bindingFor("124", NONCE_B);
+const DISPATCHER_ID = 101;
+const OTHER_USER_ID = 202;
+const SHADOW_ISSUE_URL = `https://api.github.com/repos/${SHADOW_REPO}/issues/${SHADOW_ISSUE}`;
+const SHADOW_DISPATCH = formatShadowDispatch({
+  binding: BINDING_A,
+  sourceRepo: SOURCE_REPO,
+  sourceIssue: SOURCE_ISSUE,
+});
 const WRITE_METHODS = new Set([
   "ensureLabel",
   "addLabels",
   "removeLabel",
   "deleteLabel",
   "createComment",
+  "updateIssueState",
 ]);
 
 function writes(api) {
@@ -50,12 +59,23 @@ function sourceMarker({
   })} -->`;
 }
 
+function dispatchComment(overrides = {}) {
+  return {
+    id: 5,
+    body: SHADOW_DISPATCH,
+    issue_url: SHADOW_ISSUE_URL,
+    user: { id: DISPATCHER_ID, login: "workflow-bot" },
+    ...overrides,
+  };
+}
+
 class FakeApi {
   constructor(overrides = {}) {
     Object.assign(
       this,
       {
         sourceComments: [{ id: 1, body: sourceMarker() }],
+        sourceIssue: { number: SOURCE_ISSUE, state: "open" },
         shadowConfig: {
           sourceRepo: SOURCE_REPO,
           shadowRepo: SHADOW_REPO,
@@ -67,11 +87,14 @@ class FakeApi {
           labels: [],
         },
         shadowComments: [],
+        authenticatedUser: { id: DISPATCHER_ID, login: "workflow-bot" },
         repoLabels: [],
         issues: [],
       },
       overrides,
     );
+    this.sourceIssue = { state: "open", ...this.sourceIssue };
+    this.shadowIssue = { state: "open", ...this.shadowIssue };
     this.calls = [];
   }
 
@@ -89,9 +112,29 @@ class FakeApi {
 
   async getIssue(repo, issue) {
     this.calls.push(["getIssue", repo, issue]);
+    if (repo === SOURCE_REPO) {
+      assert.equal(issue, SOURCE_ISSUE);
+      return this.sourceIssue;
+    }
     assert.equal(repo, SHADOW_REPO);
     assert.equal(issue, SHADOW_ISSUE);
     return this.shadowIssue;
+  }
+
+  async getAuthenticatedUser() {
+    this.calls.push(["getAuthenticatedUser"]);
+    return this.authenticatedUser;
+  }
+
+  async getComment(repo, id) {
+    this.calls.push(["getComment", repo, id]);
+    assert.equal(repo, SHADOW_REPO);
+    if (this.commentResponse) {
+      return this.commentResponse;
+    }
+    const comment = this.shadowComments.find((candidate) => candidate.id === id);
+    assert.ok(comment, `missing fake comment ${id}`);
+    return comment;
   }
 
   async listRepoLabels(repo) {
@@ -122,12 +165,22 @@ class FakeApi {
 
   async createComment(repo, issue, body) {
     this.calls.push(["createComment", repo, issue, body]);
-    return { id: 99, body };
+    return dispatchComment({ id: 99, body });
+  }
+
+  async updateIssueState(repo, issue, state) {
+    this.calls.push(["updateIssueState", repo, issue, state]);
+    assert.equal(repo, SHADOW_REPO);
+    assert.equal(issue, SHADOW_ISSUE);
+    this.shadowIssue.state = state;
+    return this.shadowIssue;
   }
 }
 
 test("bridge installs one binding and one deterministic shadow trigger", async () => {
-  const api = new FakeApi();
+  const api = new FakeApi({
+    shadowComments: [dispatchComment({ user: { id: OTHER_USER_ID } })],
+  });
   const result = await bridge({
     api,
     sourceRepo: SOURCE_REPO,
@@ -189,10 +242,11 @@ test("bridge retry is idempotent for the same binding and dispatch comment", asy
   const api = new FakeApi({
     shadowIssue: {
       number: SHADOW_ISSUE,
+      state: "closed",
       body: `*Shadow of [${SOURCE_REPO}#${SOURCE_ISSUE}](url)*`,
-      labels: [{ name: BINDING_A }],
+      labels: [{ name: BINDING_A }, { name: "STATUS: In QA" }],
     },
-    shadowComments: [{ id: 5, body: dispatch }],
+    shadowComments: [dispatchComment({ body: dispatch })],
     repoLabels: [{ name: BINDING_A }],
     issues: [{ number: SHADOW_ISSUE, labels: [{ name: BINDING_A }] }],
   });
@@ -205,6 +259,7 @@ test("bridge retry is idempotent for the same binding and dispatch comment", asy
   assert.equal(result.dispatchCreated, false);
   assert.equal(api.calls.some((call) => call[0] === "createComment"), false);
   assert.equal(api.calls.some((call) => call[0] === "deleteLabel"), false);
+  assert.deepEqual(writes(api), []);
 });
 
 test("missing marker remains unbound and performs no write", async () => {
@@ -248,7 +303,49 @@ test("mapping disagreement fails before any write", async () => {
   assert.deepEqual(writes(api), []);
 });
 
-test("new attempt cleans only a strict old binding", async () => {
+test("bridge rejects invalid source or shadow state before any write", async () => {
+  const shadow = {
+    number: SHADOW_ISSUE,
+    state: "locked",
+    body: `*Shadow of [${SOURCE_REPO}#${SOURCE_ISSUE}](url)*`,
+    labels: [],
+  };
+  for (const [overrides, error] of [
+    [{ sourceIssue: { state: "closed" } }, /source_issue_not_open:closed/],
+    [{ shadowIssue: shadow }, /shadow_issue_state_invalid:locked/],
+  ]) {
+    const api = new FakeApi(overrides);
+    await assert.rejects(
+      bridge({ api, sourceRepo: SOURCE_REPO, sourceIssue: SOURCE_ISSUE }),
+      error,
+    );
+    assert.deepEqual(writes(api), []);
+  }
+});
+
+test("new attempt reopens the exact shadow then replaces binding and frozen status", async () => {
+  const api = new FakeApi({
+    shadowIssue: {
+      number: SHADOW_ISSUE,
+      state: "closed",
+      body: `*Shadow of [${SOURCE_REPO}#${SOURCE_ISSUE}](url)*`,
+      labels: [{ name: BINDING_B }, { name: "STATUS: In QA" }, { name: "bug" }],
+    },
+    repoLabels: [{ name: BINDING_B }],
+    issues: [{ number: SHADOW_ISSUE, labels: [{ name: BINDING_B }] }],
+  });
+
+  await bridge({ api, sourceRepo: SOURCE_REPO, sourceIssue: SOURCE_ISSUE });
+  assert.deepEqual(
+    writes(api).map(([method]) => method),
+    ["updateIssueState", "deleteLabel", "removeLabel", "ensureLabel",
+      "addLabels", "removeLabel", "createComment"],
+  );
+  assert.deepEqual(writes(api)[0], ["updateIssueState", SHADOW_REPO, SHADOW_ISSUE, "open"]);
+  assert.equal(api.calls.some((call) => call.includes("bug")), false);
+});
+
+test("new attempt cleans the strict old binding and only frozen status labels", async () => {
   const api = new FakeApi({
     shadowIssue: {
       number: SHADOW_ISSUE,
@@ -271,13 +368,12 @@ test("new attempt cleans only a strict old binding", async () => {
       (call) => call[0] === "deleteLabel" && call[2] === BINDING_B,
     ),
   );
-  assert.equal(
+  assert.ok(
     api.calls.some(
       (call) =>
-        ["removeLabel", "deleteLabel"].includes(call[0]) &&
-        call.includes("STATUS: Follow-Up Required"),
+        call[0] === "removeLabel" &&
+        call[3] === "STATUS: Follow-Up Required",
     ),
-    false,
   );
 });
 
@@ -346,6 +442,7 @@ test("resolve binds only the exact current trigger binding", async () => {
       body: "",
       labels: [{ name: BINDING_A }],
     },
+    shadowComments: [dispatchComment({ body })],
   });
   assert.deepEqual(
     await resolveTrigger({
@@ -353,6 +450,7 @@ test("resolve binds only the exact current trigger binding", async () => {
       repo: SHADOW_REPO,
       issue: SHADOW_ISSUE,
       triggerComment: body,
+      triggerCommentId: 5,
     }),
     {
       bound: true,
@@ -370,6 +468,7 @@ test("resolve binds only the exact current trigger binding", async () => {
       repo: SHADOW_REPO,
       issue: SHADOW_ISSUE,
       triggerComment: body,
+      triggerCommentId: 5,
     }),
     {
       bound: true,
@@ -379,6 +478,47 @@ test("resolve binds only the exact current trigger binding", async () => {
       reason: "stale_binding",
     },
   );
+});
+
+test("resolve rejects mismatched event comment identity", async () => {
+  for (const [triggerCommentId, comment, error] of [
+    ["", dispatchComment(), /trigger_comment_id_required/],
+    [5, dispatchComment({ id: 6 }), /trigger_comment_id_mismatch/],
+    [5, dispatchComment({ body: `${SHADOW_DISPATCH}\nreplayed` }), /trigger_comment_body_mismatch/],
+    [5, dispatchComment({
+      issue_url: `${SHADOW_ISSUE_URL}99`,
+    }), /trigger_comment_issue_mismatch/],
+  ]) {
+    const api = new FakeApi({
+      shadowIssue: { labels: [{ name: BINDING_A }] },
+      shadowComments: [comment],
+      commentResponse: comment,
+    });
+    await assert.rejects(resolveTrigger({
+      api, repo: SHADOW_REPO, issue: SHADOW_ISSUE,
+      triggerComment: SHADOW_DISPATCH, triggerCommentId,
+    }), error);
+    assert.deepEqual(writes(api), []);
+  }
+});
+
+test("resolve ignores copied or already-consumed dispatches", async () => {
+  for (const [user, status, reason] of [
+    [{ id: OTHER_USER_ID }, "", "untrusted_dispatch_actor"],
+    [{ id: DISPATCHER_ID }, "STATUS: In Progress", "attempt_already_started"],
+  ]) {
+    const api = new FakeApi({
+      shadowIssue: { labels: [{ name: BINDING_A }, ...(status ? [{ name: status }] : [])] },
+      shadowComments: [dispatchComment({ user })],
+    });
+    const result = await resolveTrigger({
+      api, repo: SHADOW_REPO, issue: SHADOW_ISSUE,
+      triggerComment: SHADOW_DISPATCH, triggerCommentId: 5,
+    });
+    assert.equal(result.stale, true);
+    assert.equal(result.reason, reason);
+    assert.deepEqual(writes(api), []);
+  }
 });
 
 test("ordinary manual trigger remains unbound", async () => {
@@ -526,6 +666,7 @@ test("cleanup is strict and idempotent", async () => {
   );
   assert.ok(api.calls.some((call) => call[0] === "removeLabel"));
   assert.ok(api.calls.some((call) => call[0] === "deleteLabel"));
+  assert.deepEqual(writes(api).slice(0, 2).map(([method]) => method), ["deleteLabel", "removeLabel"]);
 
   const writesBeforeRejectedCandidate = writes(api).length;
   await assert.rejects(
@@ -560,6 +701,9 @@ test("REST list operations paginate through the final partial page", async () =>
   assert.equal((await api.listComments(SOURCE_REPO, SOURCE_ISSUE)).length, 101);
   assert.equal((await api.listRepoLabels(SHADOW_REPO)).length, 101);
   assert.equal((await api.listIssues(SHADOW_REPO)).length, 101);
+  await api.getAuthenticatedUser();
+  await api.getComment(SHADOW_REPO, 5);
+  await api.updateIssueState(SHADOW_REPO, SHADOW_ISSUE, "open");
   assert.deepEqual(
     requests.map(([url, method]) => [new URL(url).searchParams.get("page"), method]),
     [
@@ -569,6 +713,9 @@ test("REST list operations paginate through the final partial page", async () =>
       ["2", "GET"],
       ["1", "GET"],
       ["2", "GET"],
+      [null, "GET"],
+      [null, "GET"],
+      [null, "PATCH"],
     ],
   );
 });

@@ -19,6 +19,10 @@ inputs:
     description: "Shadow dispatch comment for resolve mode"
     required: false
     default: ""
+  trigger-comment-id:
+    description: "GitHub event comment id for authenticated resolve mode"
+    required: false
+    default: ""
   binding:
     description: "Immutable attempt binding for transition mode"
     required: false

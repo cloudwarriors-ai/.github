@@ -173,10 +173,11 @@ jobs:
         uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@main
         with:
           mode: resolve
-          token: ${{ github.token }}
+          token: ${{ secrets.WORKFLOW_PAT }}
           repo: ${{ github.repository }}
           issue-number: ${{ inputs.issue_number }}
           trigger-comment: ${{ inputs.trigger_comment || github.event.comment.body || '' }}
+          trigger-comment-id: ${{ github.event.comment.id || '' }}
 
       # --- Kill switch (check for AUTOPILOT: Disabled label) ---
       - name: Check kill switch

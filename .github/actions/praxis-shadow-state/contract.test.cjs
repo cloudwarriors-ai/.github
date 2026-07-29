@@ -183,6 +183,10 @@ test("workflow wiring carries the binding and freezes one concurrency key", () =
     path.join(root, ".github/workflows/reusable-autopilot-intake.yml"),
     "utf8",
   );
+  const action = fs.readFileSync(
+    path.join(root, ".github/actions/praxis-shadow-state/action.yml"),
+    "utf8",
+  );
   const runner = fs.readFileSync(
     path.join(root, ".github/workflows/reusable-autopilot-runner.yml"),
     "utf8",
@@ -210,6 +214,11 @@ test("workflow wiring carries the binding and freezes one concurrency key", () =
       "trigger-comment: ${{ inputs.trigger_comment || github.event.comment.body || '' }}",
     ),
   );
+  const resolveWiring = intake.split("- name: Resolve Praxis shadow trigger")[1]
+    .split("\n      - name:")[0];
+  assert.ok(resolveWiring.includes("token: ${{ secrets.WORKFLOW_PAT }}"));
+  assert.ok(resolveWiring.includes("trigger-comment-id: ${{ github.event.comment.id || '' }}"));
+  assert.ok(action.includes("trigger-comment-id:"));
   assert.ok(intake.includes("praxis_binding:"));
   assert.ok(installedRunner.includes("praxis_binding:"));
   assert.ok(runner.includes("praxis_binding:"));

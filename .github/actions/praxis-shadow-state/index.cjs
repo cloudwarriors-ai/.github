@@ -33,6 +33,16 @@ function expectedShadowRepo(sourceRepo) {
   return pairedShadowRepo(sourceRepo);
 }
 
+function triggerResult(parsed, stale, reason) {
+  return {
+    bound: true,
+    binding: parsed.binding,
+    attemptId: parseBinding(parsed.binding).attemptId,
+    stale,
+    reason,
+  };
+}
+
 async function cleanup({ api, repo, issue, bindings }) {
   const values = [...new Set(bindings || [])];
   for (const binding of values) {
@@ -41,8 +51,8 @@ async function cleanup({ api, repo, issue, bindings }) {
     }
   }
   for (const binding of values) {
-    await api.removeLabel(repo, issue, binding);
     await api.deleteLabel(repo, binding);
+    await api.removeLabel(repo, issue, binding);
   }
   return { removed: values };
 }
@@ -76,6 +86,11 @@ async function bridge({ api, sourceRepo, sourceIssue }) {
     };
   }
 
+  const source = await api.getIssue(sourceRepo, sourceIssue);
+  if (source.state !== "open") {
+    throw new Error(`source_issue_not_open:${source.state || "unknown"}`);
+  }
+
   const shadowRepo = pairedShadowRepo(sourceRepo);
   const config = await api.getJsonContent(shadowRepo, ".shadow/config.json");
   if (!config || config.sourceRepo !== sourceRepo) {
@@ -94,9 +109,45 @@ async function bridge({ api, sourceRepo, sourceIssue }) {
   if (footer.repo !== sourceRepo || footer.issue !== Number(sourceIssue)) {
     throw new Error("shadow_footer_mismatch");
   }
+  if (!["open", "closed"].includes(shadow.state)) {
+    throw new Error(`shadow_issue_state_invalid:${shadow.state || "unknown"}`);
+  }
 
   const currentLabels = issueLabels(shadow);
   const currentBindings = strictBindingNames(currentLabels);
+  if (currentBindings.length > 1) {
+    throw new Error("multiple_praxis_bindings");
+  }
+  const dispatchBody = formatShadowDispatch({
+    binding: dispatch.binding,
+    sourceRepo,
+    sourceIssue,
+  });
+  const authenticated = await api.getAuthenticatedUser();
+  const authenticatedId = positiveInteger(
+    authenticated && authenticated.id, "authenticated_user_invalid",
+  );
+  const shadowComments = await api.listComments(shadowRepo, shadowIssue);
+  const trustedDispatchExists = shadowComments.some(
+    (comment) =>
+      comment && comment.body === dispatchBody &&
+      Number(comment.user && comment.user.id) === authenticatedId,
+  );
+
+  // A trusted comment plus its current immutable binding is the terminal
+  // delivery receipt. Retrying must not reopen or clear an already-started run.
+  if (currentBindings[0] === dispatch.binding && trustedDispatchExists) {
+    return {
+      bound: true,
+      binding: dispatch.binding,
+      attemptId: dispatch.attemptId,
+      shadowIssue,
+      shadowRepo,
+      dispatchCreated: false,
+      reason: "bridged",
+    };
+  }
+
   // Validate capacity before cleanup so a rejected attempt cannot strip the
   // issue's last valid binding and leave it unowned.
   const repoLabels = await api.listRepoLabels(shadowRepo);
@@ -105,6 +156,10 @@ async function bridge({ api, sourceRepo, sourceIssue }) {
   const bindingExists = strictBindingNames(repoLabels).includes(dispatch.binding);
   if (!bindingExists && orphans.length >= ORPHAN_BUDGET) {
     throw new Error(`binding_orphan_budget_exceeded:${orphans.length}`);
+  }
+
+  if (shadow.state === "closed") {
+    await api.updateIssueState(shadowRepo, shadowIssue, "open");
   }
 
   const obsolete = currentBindings.filter((name) => name !== dispatch.binding);
@@ -122,30 +177,12 @@ async function bridge({ api, sourceRepo, sourceIssue }) {
     await api.addLabels(shadowRepo, shadowIssue, [dispatch.binding]);
   }
 
-  const dispatchBody = formatShadowDispatch({
-    binding: dispatch.binding,
-    sourceRepo,
-    sourceIssue,
-  });
-  const shadowComments = await api.listComments(shadowRepo, shadowIssue);
-  let dispatchCreated = true;
-  // Same-attempt delivery is idempotent by contract: execution retries require
-  // a new Praxis attempt/binding rather than another event for this comment.
-  for (const comment of shadowComments) {
-    const parsed = parseShadowDispatch(comment.body);
-    if (
-      parsed &&
-      parsed.binding === dispatch.binding &&
-      parsed.sourceRepo === sourceRepo &&
-      parsed.sourceIssue === Number(sourceIssue)
-    ) {
-      dispatchCreated = false;
-      break;
+  for (const status of FROZEN_STATUSES) {
+    if (currentLabels.includes(status)) {
+      await api.removeLabel(shadowRepo, shadowIssue, status);
     }
   }
-  if (dispatchCreated) {
-    await api.createComment(shadowRepo, shadowIssue, dispatchBody);
-  }
+  await api.createComment(shadowRepo, shadowIssue, dispatchBody);
 
   return {
     bound: true,
@@ -153,12 +190,12 @@ async function bridge({ api, sourceRepo, sourceIssue }) {
     attemptId: dispatch.attemptId,
     shadowIssue,
     shadowRepo,
-    dispatchCreated,
+    dispatchCreated: true,
     reason: "bridged",
   };
 }
 
-async function resolveTrigger({ api, repo, issue, triggerComment }) {
+async function resolveTrigger({ api, repo, issue, triggerComment, triggerCommentId }) {
   const parsed = parseShadowDispatch(triggerComment);
   if (!parsed) {
     const target = await api.getIssue(repo, issue);
@@ -187,15 +224,36 @@ async function resolveTrigger({ api, repo, issue, triggerComment }) {
     throw new Error("shadow_trigger_repo_mismatch");
   }
   const shadow = await api.getIssue(repo, issue);
-  const state = classifyBindingState(issueLabels(shadow), parsed.binding);
-  const attempt = parseBinding(parsed.binding);
-  return {
-    bound: true,
-    binding: parsed.binding,
-    attemptId: attempt.attemptId,
-    stale: state.state !== "current",
-    reason: state.state === "current" ? "bound_trigger" : "stale_binding",
-  };
+  const labels = issueLabels(shadow);
+  const state = classifyBindingState(labels, parsed.binding);
+  if (state.state !== "current") {
+    return triggerResult(parsed, true, "stale_binding");
+  }
+
+  const commentId = positiveInteger(triggerCommentId, "trigger_comment_id_required");
+  const comment = await api.getComment(repo, commentId);
+  if (Number(comment && comment.id) !== commentId) {
+    throw new Error("trigger_comment_id_mismatch");
+  }
+  const expectedIssueUrl = `https://api.github.com/repos/${repo}/issues/${Number(issue)}`;
+  if (!comment || comment.issue_url !== expectedIssueUrl) {
+    throw new Error("trigger_comment_issue_mismatch");
+  }
+  if (comment.body !== triggerComment) {
+    throw new Error("trigger_comment_body_mismatch");
+  }
+  const authenticated = await api.getAuthenticatedUser();
+  const authenticatedId = positiveInteger(
+    authenticated && authenticated.id, "authenticated_user_invalid",
+  );
+  if (Number(comment.user && comment.user.id) !== authenticatedId) {
+    return triggerResult(parsed, true, "untrusted_dispatch_actor");
+  }
+  if (FROZEN_STATUSES.some((status) => labels.includes(status))) {
+    return triggerResult(parsed, true, "attempt_already_started");
+  }
+
+  return triggerResult(parsed, false, "bound_trigger");
 }
 
 async function transition({
@@ -320,6 +378,14 @@ class GitHubRestApi {
     return this.request("GET", `/repos/${repo}/issues/${issue}`);
   }
 
+  async getAuthenticatedUser() {
+    return this.request("GET", "/user");
+  }
+
+  async getComment(repo, commentId) {
+    return this.request("GET", `/repos/${repo}/issues/comments/${commentId}`);
+  }
+
   async listRepoLabels(repo) {
     return this.paginate(`/repos/${repo}/labels`);
   }
@@ -368,6 +434,10 @@ class GitHubRestApi {
   async createComment(repo, issue, body) {
     return this.request("POST", `/repos/${repo}/issues/${issue}/comments`, { body });
   }
+
+  async updateIssueState(repo, issue, state) {
+    return this.request("PATCH", `/repos/${repo}/issues/${issue}`, { state });
+  }
 }
 
 function input(name, fallback = "") {
@@ -413,6 +483,7 @@ async function runAction() {
       repo,
       issue,
       triggerComment: input("TRIGGER-COMMENT"),
+      triggerCommentId: input("TRIGGER-COMMENT-ID"),
     });
   } else if (mode === "transition") {
     result = await transition({
