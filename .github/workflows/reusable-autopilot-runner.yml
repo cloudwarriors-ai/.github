@@ -105,7 +105,9 @@ jobs:
   # ── Job 1: Call RLM fix engine ──────────────────────────────────────
   rlm-fix:
     name: "RLM Fix (#${{ inputs.issue_number }})"
-    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@main
+    # Canary-only pin: validates committed-writer diff detection before the
+    # reusable gate fix is reviewed and merged in cloudwarriors-ai/workflows.
+    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@codex/autofix-committed-diff-gate
     with:
       issue_number: ${{ fromJSON(inputs.issue_number) }}
       head: ${{ inputs.head }}
