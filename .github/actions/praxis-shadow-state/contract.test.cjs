@@ -271,6 +271,10 @@ test("workflow wiring blocks source fallthrough and stale status mutation", () =
     path.join(root, ".github/workflows/reusable-shadow-sync.yml"),
     "utf8",
   );
+  const ci = fs.readFileSync(
+    path.join(root, ".github/workflows/praxis-shadow-state-ci.yml"),
+    "utf8",
+  );
   const actionSource = fs.readFileSync(
     path.join(root, ".github/actions/praxis-shadow-state/index.cjs"),
     "utf8",
@@ -308,18 +312,29 @@ test("workflow wiring blocks source fallthrough and stale status mutation", () =
     );
   }
 
-  assert.ok(blocks.get("Bridge Praxis dispatch to shadow repo").includes("blocked == 'true'"));
+  const shadowGuard = blocks.get("Check shadow guard");
+  assert.ok(shadowGuard.includes("PRAXIS_OWNS_DISPATCH_REPOS:"));
+  assert.ok(shadowGuard.includes("core.setOutput('praxis_owned'"));
+  assert.ok(shadowGuard.includes(".split(/[\\s,]+/)"));
+
   const bridgeWiring = blocks.get("Bridge Praxis dispatch to shadow repo");
+  assert.ok(bridgeWiring.includes("blocked == 'true'"));
+  assert.ok(bridgeWiring.includes("praxis_owned == 'true'"));
   assert.ok(bridgeWiring.includes("trusted-source-actor-id: ${{ vars.PRAXIS_GITHUB_ACTOR_ID }}"));
   assert.ok(bridgeWiring
     .includes("trigger-comment: ${{ inputs.trigger_comment || github.event.comment.body || '' }}"));
   const bridgeFailure = blocks.get("Report shadow bridge result");
   assert.ok(bridgeFailure.includes("steps.praxis_bridge.outcome == 'failure'"));
+  assert.ok(bridgeFailure.includes("praxis_owned == 'true'"));
   assert.ok(bridgeFailure.includes("github-token: ${{ secrets.WORKFLOW_PAT }}"));
   assert.ok(bridgeFailure.includes("const provenance ="));
   assert.equal(bridgeFailure.includes("Praxis is waiting to complete"), false);
   assert.ok(bridgeFailure.includes("Praxis shadow handoff is blocked"));
-  assert.equal(intake.includes("Shadow-enabled source repo — execution blocked"), false);
+  const legacyHandoff = blocks.get("Preserve non-Praxis shadow handoff");
+  assert.ok(legacyHandoff);
+  assert.ok(legacyHandoff.includes("blocked == 'true'"));
+  assert.ok(legacyHandoff.includes("praxis_owned != 'true'"));
+  assert.ok(legacyHandoff.includes("Shadow-enabled source repo — execution blocked"));
   assert.ok(
     intake.indexOf("Set bound STATUS to In Progress") <
       intake.indexOf("- name: Dispatch runner"),
@@ -362,6 +377,15 @@ test("workflow wiring blocks source fallthrough and stale status mutation", () =
   assert.ok(sync.split("- name: Reconcile pending Praxis shadow dispatches")[1].includes("token: ${{ secrets.WORKFLOW_PAT }}"));
   assert.ok(sync.indexOf("createOrUpdateFileContents") <
     sync.indexOf("- name: Reconcile pending Praxis shadow dispatches"));
+  assert.ok(ci.includes("pull_request:"));
+  assert.ok(ci.includes("node-version: '20'"));
+  assert.ok(ci.includes(
+    "node --test .github/actions/praxis-shadow-state/contract.test.cjs .github/actions/praxis-shadow-state/index.test.cjs",
+  ));
+  assert.ok(ci.includes("ACTIONLINT_VERSION: '1.7.12'"));
+  assert.ok(ci.includes(
+    "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
+  ));
 
   const bridgeSource = actionSource.split("async function bridge")[1]
     .split("async function resolveTrigger")[0];
