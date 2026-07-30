@@ -97,58 +97,36 @@ jobs:
           token: ${{ secrets.WORKFLOW_PAT }}
           repo: ${{ github.repository }}
           issue-number: ${{ inputs.issue_number }}
+          trigger-comment: ${{ inputs.trigger_comment || github.event.comment.body || '' }}
+          trusted-source-actor-id: ${{ vars.PRAXIS_GITHUB_ACTOR_ID }}
 
       - name: Report shadow bridge result
-        if: always() && steps.shadow_guard.outputs.blocked == 'true'
+        if: always() && steps.shadow_guard.outputs.blocked == 'true' && steps.praxis_bridge.outcome == 'failure'
         uses: actions/github-script@v7
         env:
-          BRIDGE_OUTCOME: ${{ steps.praxis_bridge.outcome }}
           BRIDGE_REASON: ${{ steps.praxis_bridge.outputs.reason }}
-          SHADOW_ISSUE: ${{ steps.praxis_bridge.outputs.shadow_issue }}
-          SHADOW_REPO: ${{ steps.praxis_bridge.outputs.shadow_repo }}
         with:
+          github-token: ${{ secrets.WORKFLOW_PAT }}
           script: |
             const marker = '<!-- AUTOPILOT_SHADOW_GUARD -->';
             const issueNumber = ${{ inputs.issue_number }};
-            const outcome = process.env.BRIDGE_OUTCOME || 'failure';
             const reason = process.env.BRIDGE_REASON || 'bridge_failed';
-            const shadowIssue = Number(process.env.SHADOW_ISSUE || 0);
-            const shadowRepo = process.env.SHADOW_REPO || '';
-            let body;
-
-            if (outcome === 'success' && reason === 'bridged' && shadowRepo && shadowIssue > 0) {
-              const shadowUrl = `https://github.com/${shadowRepo}/issues/${shadowIssue}`;
-              body = [
-                marker,
-                '**Praxis handed this attempt to the shadow Autofix pipeline.**',
-                '',
-                `Execution issue: [${shadowRepo}#${shadowIssue}](${shadowUrl})`,
-                '',
-                'The source repository will not execute this fix. Current state is carried by the bound labels on the shadow issue.',
-              ].join('\n');
-            } else if (outcome === 'success' && reason === 'no_praxis_marker') {
-              body = [
-                marker,
-                '**Autopilot skipped on the source repository:** shadow-first execution is enabled.',
-                '',
-                'No valid Praxis dispatch marker exists for this issue yet. Praxis must create the attempt before Autofix can run in the shadow repository.',
-              ].join('\n');
-            } else {
-              body = [
-                marker,
-                '**Praxis shadow handoff is blocked.**',
-                '',
-                `The bridge stopped with \`${reason}\`. Review this workflow run; no source-side Autofix was started.`,
-              ].join('\n');
-            }
-
+            const { data: actor } = await github.rest.users.getAuthenticated();
             const comments = await github.paginate(github.rest.issues.listComments, {
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: issueNumber,
               per_page: 100,
             });
-            const existing = comments.find(c => (c.body || '').includes(marker));
+            const existing = comments.find(c =>
+              c.user?.id === actor.id && (c.body || '').includes(marker));
+            const provenance = (existing?.body || '').split('\n').find(line =>
+              /^<!-- AUTOPILOT_SHADOW_TRIGGER_V1 (ready|comment) praxis\/a[0-9a-z]+-[0-9a-f]{24} -->$/.test(line));
+            const body = [
+              marker, ...(provenance ? [provenance] : []),
+              '**Praxis shadow handoff is blocked.**', '',
+              `The bridge stopped with \`${reason}\`. Review this workflow run; no source-side Autofix was started.`,
+            ].join('\n');
             if (existing) {
               if (existing.body !== body) {
                 await github.rest.issues.updateComment({
@@ -178,6 +156,7 @@ jobs:
           issue-number: ${{ inputs.issue_number }}
           trigger-comment: ${{ inputs.trigger_comment || github.event.comment.body || '' }}
           trigger-comment-id: ${{ github.event.comment.id || '' }}
+          trusted-source-actor-id: ${{ vars.PRAXIS_GITHUB_ACTOR_ID }}
 
       # --- Kill switch (check for AUTOPILOT: Disabled label) ---
       - name: Check kill switch

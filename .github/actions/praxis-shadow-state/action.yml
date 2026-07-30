@@ -3,7 +3,7 @@ description: "Bind one Praxis resolver attempt to shadow Autofix label evidence"
 
 inputs:
   mode:
-    description: "bridge, resolve, transition, or cleanup"
+    description: "bridge, reconcile, resolve, transition, or cleanup"
     required: true
   token:
     description: "GitHub token scoped to the selected mode"
@@ -14,7 +14,16 @@ inputs:
     default: ""
   issue-number:
     description: "Source or shadow issue number"
-    required: true
+    required: false
+    default: ""
+  issue-numbers:
+    description: "Bounded JSON source issue array for reconcile mode"
+    required: false
+    default: "[]"
+  trusted-source-actor-id:
+    description: "Stable numeric GitHub actor id authorized to publish Praxis markers"
+    required: false
+    default: ""
   trigger-comment:
     description: "Shadow dispatch comment for resolve mode"
     required: false

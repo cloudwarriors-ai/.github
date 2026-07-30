@@ -149,18 +149,25 @@ function normalizedSourceDispatch(payload, expected) {
   };
 }
 
-function selectSourceDispatch(comments, expected) {
+function selectSourceDispatch(comments, expected, trustedSourceActorId) {
   if (!REPO_RE.test(String(expected.repo || ""))) {
     throw new Error("invalid_expected_source_repo");
   }
   if (!Number.isSafeInteger(Number(expected.issue)) || Number(expected.issue) <= 0) {
     throw new Error("invalid_expected_source_issue");
   }
+  const trustedActorId = Number(trustedSourceActorId);
+  if (!Number.isSafeInteger(trustedActorId) || trustedActorId <= 0) {
+    throw new Error("trusted_source_actor_id_invalid");
+  }
 
   const found = [];
   for (const comment of [...(comments || [])].sort(
     (left, right) => Number(left.id) - Number(right.id),
   )) {
+    if (Number(comment && comment.user && comment.user.id) !== trustedActorId) {
+      continue;
+    }
     const payloads = markerPayloads(
       comment.body,
       SOURCE_MARKER_PREFIX,

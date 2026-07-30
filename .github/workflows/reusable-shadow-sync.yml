@@ -42,6 +42,8 @@ jobs:
 
     outputs:
       issues_synced: ${{ steps.sync.outputs.issues_synced }}
+      source_repo: ${{ steps.sync.outputs.source_repo }}
+      pending_praxis_batches: ${{ steps.sync.outputs.pending_praxis_batches }}
 
     steps:
       - name: Sync issues
@@ -321,7 +323,28 @@ jobs:
               content: Buffer.from(JSON.stringify(updatedConfig, null, 2)).toString('base64'),
             });
 
+            const pendingPraxisReports = praxisOwnsDispatch
+              ? await github.paginate(github.rest.search.issuesAndPullRequests, {
+                q: `repo:${sourceRepo} is:issue in:comments "AUTOPILOT_SHADOW_TRIGGER_V1" "Praxis is waiting to complete"`,
+                per_page: 100,
+              })
+              : [];
+            if (pendingPraxisReports.length >= 1000) {
+              throw new Error('pending Praxis report search reached GitHub 1000-result limit');
+            }
+            const pendingPraxisBridges = pendingPraxisReports.map(issue => issue.number);
+            const pendingPraxisBatches = [];
+            for (let offset = 0; offset < pendingPraxisBridges.length; offset += 100) {
+              const issue_numbers =
+                JSON.stringify(pendingPraxisBridges.slice(offset, offset + 100));
+              pendingPraxisBatches.push({ issue_numbers });
+            }
+            if (pendingPraxisBatches.length > 256) {
+              throw new Error('pending Praxis bridge matrix exceeds 256 batches');
+            }
             core.setOutput('issues_synced', totalSynced);
+            core.setOutput('source_repo', sourceRepo);
+            core.setOutput('pending_praxis_batches', JSON.stringify(pendingPraxisBatches));
             console.log(`Sync complete. ${totalSynced} issues total.`);
 
             // ── Summary ──────────────────────────────────────────────────────
@@ -339,3 +362,22 @@ jobs:
               `| Preserved closed shadow issues | ${preservedClosed} |`,
             ].join('\n');
             await core.summary.addRaw(summary).write();
+
+  reconcile:
+    needs: sync
+    if: needs.sync.outputs.pending_praxis_batches != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include: ${{ fromJSON(needs.sync.outputs.pending_praxis_batches) }}
+    steps:
+      - name: Reconcile pending Praxis shadow dispatches
+        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@main
+        with:
+          mode: reconcile
+          token: ${{ secrets.WORKFLOW_PAT }}
+          repo: ${{ needs.sync.outputs.source_repo }}
+          issue-numbers: ${{ matrix.issue_numbers }}
+          trusted-source-actor-id: ${{ vars.PRAXIS_GITHUB_ACTOR_ID }}

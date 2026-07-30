@@ -6,6 +6,7 @@ const {
   bridge,
   cleanup,
   orphanedBindings,
+  reconcile,
   resolveTrigger,
   transition,
 } = require("./index.cjs");
@@ -25,6 +26,10 @@ const BINDING_A = bindingFor("123", NONCE_A);
 const BINDING_B = bindingFor("124", NONCE_B);
 const DISPATCHER_ID = 101;
 const OTHER_USER_ID = 202;
+const TRUSTED_SOURCE_ACTOR_ID = 303;
+const FOREIGN_SOURCE_ACTOR_ID = 404;
+const REPORT_MARKER = "<!-- AUTOPILOT_SHADOW_GUARD -->";
+const REPORT_PROVENANCE = "<!-- AUTOPILOT_SHADOW_TRIGGER_V1";
 const SHADOW_ISSUE_URL = `https://api.github.com/repos/${SHADOW_REPO}/issues/${SHADOW_ISSUE}`;
 const SHADOW_DISPATCH = formatShadowDispatch({
   binding: BINDING_A,
@@ -37,12 +42,17 @@ const WRITE_METHODS = new Set([
   "removeLabel",
   "deleteLabel",
   "createComment",
+  "updateComment",
   "updateIssueState",
 ]);
 
 function writes(api) {
   return api.calls.filter((call) => WRITE_METHODS.has(call[0]));
 }
+
+const shadowWrites = (api) => writes(api).filter((call) => call[1] === SHADOW_REPO);
+const createdFor = (api, repo) =>
+  api.calls.find((call) => call[0] === "createComment" && call[1] === repo);
 
 function sourceMarker({
   repo = SOURCE_REPO,
@@ -74,7 +84,8 @@ class FakeApi {
     Object.assign(
       this,
       {
-        sourceComments: [{ id: 1, body: sourceMarker() }],
+        sourceComments: [{ id: 1, body: sourceMarker(),
+          user: { id: TRUSTED_SOURCE_ACTOR_ID, login: "praxis-app" } }],
         sourceIssue: { number: SOURCE_ISSUE, state: "open" },
         shadowConfig: {
           sourceRepo: SOURCE_REPO,
@@ -165,7 +176,14 @@ class FakeApi {
 
   async createComment(repo, issue, body) {
     this.calls.push(["createComment", repo, issue, body]);
-    return dispatchComment({ id: 99, body });
+    return repo === SHADOW_REPO
+      ? dispatchComment({ id: 99, body })
+      : { id: 99, body, user: this.authenticatedUser };
+  }
+
+  async updateComment(repo, commentId, body) {
+    this.calls.push(["updateComment", repo, commentId, body]);
+    return { id: commentId, body, user: this.authenticatedUser };
   }
 
   async updateIssueState(repo, issue, state) {
@@ -177,115 +195,225 @@ class FakeApi {
   }
 }
 
-test("bridge installs one binding and one deterministic shadow trigger", async () => {
+function runBridge(api, overrides = {}) {
+  return bridge({
+    api, sourceRepo: SOURCE_REPO, sourceIssue: SOURCE_ISSUE,
+    triggerComment: sourceMarker(), trustedSourceActorId: TRUSTED_SOURCE_ACTOR_ID, ...overrides,
+  });
+}
+
+function runResolve(api, overrides = {}) {
+  if (!api.sourceComments.some((comment) => String(comment.body).includes(REPORT_MARKER))) {
+    api.sourceComments.push({
+      id: 2, body: `${REPORT_MARKER}\n${REPORT_PROVENANCE} comment ${BINDING_A} -->`,
+      user: { id: DISPATCHER_ID },
+    });
+  }
+  return resolveTrigger({
+    api, repo: SHADOW_REPO, issue: SHADOW_ISSUE,
+    triggerComment: SHADOW_DISPATCH, triggerCommentId: 5,
+    trustedSourceActorId: TRUSTED_SOURCE_ACTOR_ID, ...overrides,
+  });
+}
+
+function runReconcile(api, sourceIssues = [SOURCE_ISSUE]) {
+  return reconcile({
+    api, sourceRepo: SOURCE_REPO, sourceIssues, trustedSourceActorId: TRUSTED_SOURCE_ACTOR_ID,
+  });
+}
+
+function unmappedApi(overrides = {}) {
+  return new FakeApi({
+    shadowConfig: { sourceRepo: SOURCE_REPO, shadowRepo: SHADOW_REPO, issueMap: {} }, ...overrides,
+  });
+}
+
+test("source bridge emits one deterministic trigger without mutating shadow state", async () => {
   const api = new FakeApi({
     shadowComments: [dispatchComment({ user: { id: OTHER_USER_ID } })],
   });
-  const result = await bridge({
-    api,
-    sourceRepo: SOURCE_REPO,
-    sourceIssue: SOURCE_ISSUE,
-  });
+  const result = await runBridge(api);
 
   assert.deepEqual(result, {
-    bound: true,
-    binding: BINDING_A,
-    attemptId: "123",
-    shadowIssue: SHADOW_ISSUE,
-    shadowRepo: SHADOW_REPO,
-    dispatchCreated: true,
-    reason: "bridged",
+    bound: false, binding: BINDING_A, attemptId: "123",
+    shadowIssue: SHADOW_ISSUE, shadowRepo: SHADOW_REPO,
+    dispatchCreated: true, reason: "bridged",
   });
-  assert.ok(
-    api.calls.some(
-      (call) =>
-        call[0] === "ensureLabel" &&
-        call[1] === SHADOW_REPO &&
-        call[2] === BINDING_A,
-    ),
+  assert.ok(api.calls.some(
+    (call) => call[0] === "createComment" && call[3] === SHADOW_DISPATCH,
+  ));
+  assert.ok(api.calls.some(
+    (call) =>
+      call[0] === "createComment" && call[1] === SOURCE_REPO &&
+      call[3].includes(REPORT_MARKER),
+  ));
+  const report = api.calls.filter((call) => call[1] === SOURCE_REPO && ["createComment", "updateComment"].includes(call[0])).at(-1);
+  assert.ok(report[3].includes("waiting to complete"));
+  assert.equal(writes(api).some((call) => ["ensureLabel", "addLabels", "removeLabel", "deleteLabel", "updateIssueState"].includes(call[0])), false);
+});
+
+test("bridge retry is idempotent for trusted dispatch and report comments", async () => {
+  const api = new FakeApi({
+    shadowIssue: {
+      body: `*Shadow of [${SOURCE_REPO}#${SOURCE_ISSUE}](url)*`,
+      labels: [{ name: BINDING_A }, { name: "STATUS: In Progress" }],
+    },
+    shadowComments: [dispatchComment()],
+  });
+
+  const first = await runBridge(api);
+  const reportCall = api.calls.find(
+    (call) => call[0] === "createComment" && call[1] === SOURCE_REPO,
   );
-  assert.ok(
-    api.calls.some(
-      (call) =>
-        call[0] === "addLabels" &&
-        call[2] === SHADOW_ISSUE &&
-        call[3][0] === BINDING_A,
-    ),
-  );
-  assert.ok(
-    api.calls.some(
-      (call) =>
-        call[0] === "createComment" &&
-        call[3] ===
-          formatShadowDispatch({
-            binding: BINDING_A,
-            sourceRepo: SOURCE_REPO,
-            sourceIssue: SOURCE_ISSUE,
-          }),
-    ),
-  );
-  const writeCalls = writes(api);
-  for (const call of writeCalls) {
-    assert.equal(call[1], SHADOW_REPO);
-    if (["addLabels", "removeLabel", "createComment"].includes(call[0])) {
-      assert.equal(call[2], SHADOW_ISSUE);
-    }
+  api.sourceComments.push({
+    id: 2, body: reportCall[3], user: { id: DISPATCHER_ID, login: "workflow-bot" },
+  });
+  api.calls = [];
+  const result = await runBridge(api);
+  assert.equal(result.dispatchCreated, false);
+  assert.equal(api.calls.some((call) => call[0] === "createComment"), false);
+  assert.deepEqual(writes(api), []);
+  assert.equal(first.dispatchCreated, false);
+});
+
+test("bridge preserves one trusted but unclaimed in-flight dispatch", async () => {
+  const api = new FakeApi({ shadowComments: [dispatchComment()] });
+  assert.equal((await runBridge(api)).dispatchCreated, false);
+  assert.deepEqual(shadowWrites(api), []);
+  api.shadowComments[0].created_at = "2000-01-01T00:00:00Z"; api.sourceComments.push({ id: 2, body: createdFor(api, SOURCE_REPO)[3], user: { id: DISPATCHER_ID } });
+  api.calls = [];
+  assert.equal((await runBridge(api, { reconcileOnly: true })).dispatchCreated, true);
+  assert.deepEqual(shadowWrites(api).map(([method]) => method), ["createComment"]);
+});
+
+test("missing marker remains unbound and creates only a trusted source report", async () => {
+  const api = new FakeApi({
+    sourceComments: [{ id: 1, body: "ordinary", user: { id: OTHER_USER_ID } }],
+  });
+  const result = await runBridge(api);
+  assert.deepEqual(result, {
+    bound: false, binding: "", attemptId: "", shadowIssue: 0, shadowRepo: "",
+    dispatchCreated: false, reason: "no_praxis_marker",
+  });
+  assert.deepEqual(writes(api).map((call) => call.slice(0, 3)), [
+    ["createComment", SOURCE_REPO, SOURCE_ISSUE],
+  ]);
+});
+
+test("missing mapping is pending and sync reconciliation delivers exactly once", async () => {
+  const api = unmappedApi();
+  const pending = await runBridge(api);
+  assert.equal(pending.reason, "pending_shadow_mapping");
+  assert.equal(pending.dispatchCreated, false);
+  assert.deepEqual(shadowWrites(api), []);
+
+  const reportCall = createdFor(api, SOURCE_REPO);
+  assert.ok(reportCall[3].includes(`${REPORT_PROVENANCE} comment ${BINDING_A} -->`));
+  api.sourceComments.push({
+    id: 2, body: reportCall[3], user: { id: DISPATCHER_ID },
+  });
+  api.sourceIssue.labels = [{ name: "AUTOFIX: Ready" }];
+  api.calls = [];
+  assert.equal((await runBridge(api, { triggerComment: "" })).reason, "pending_shadow_mapping");
+  assert.equal(api.calls.some((call) => call[0] === "updateComment"), false);
+  api.shadowConfig.issueMap[String(SOURCE_ISSUE)] = SHADOW_ISSUE;
+  api.calls = [];
+
+  const first = await runReconcile(api);
+  assert.deepEqual(first, {
+    dispatchCreated: true,
+    reason: "reconciled",
+    reconciled: 1,
+  });
+  const shadowDispatchCall = createdFor(api, SHADOW_REPO);
+  api.shadowComments.push(dispatchComment({ id: 6, body: shadowDispatchCall[3] }));
+  api.shadowIssue.labels = [
+    { name: BINDING_A },
+    { name: "STATUS: In Progress" },
+  ];
+  api.calls = [];
+
+  const retry = await runReconcile(api);
+  assert.equal(retry.dispatchCreated, false);
+  assert.deepEqual(shadowWrites(api), []);
+  assert.ok(writes(api).at(-1)[3].includes("handed this attempt"));
+});
+
+test("resolve rechecks Ready and Skip after bridge before claiming", async () => {
+  for (const [triggerComment, labels, expectedReason] of [
+    ["", [{ name: "AUTOFIX: Ready" }], "source_ready_removed"],
+    [sourceMarker(), [], "source_autopilot_skipped"],
+    [sourceMarker(), [], "source_issue_closed"],
+  ]) {
+    const api = new FakeApi({ sourceIssue: { labels } });
+    await runBridge(api, { triggerComment });
+    api.sourceComments.push({
+      id: 2, body: createdFor(api, SOURCE_REPO)[3], user: { id: DISPATCHER_ID },
+    });
+    api.shadowComments.push(dispatchComment({ body: createdFor(api, SHADOW_REPO)[3] }));
+    api.sourceIssue.labels = expectedReason === "source_autopilot_skipped"
+      ? [{ name: "AUTOPILOT: Skip" }] : [];
+    api.sourceIssue.state = expectedReason === "source_issue_closed" ? "closed" : "open";
+    api.calls = [];
+
+    const result = await runResolve(api);
+    assert.equal(result.stale, true);
+    assert.equal(result.reason, expectedReason);
+    assert.deepEqual(shadowWrites(api), []);
   }
 });
 
-test("bridge retry is idempotent for the same binding and dispatch comment", async () => {
-  const dispatch = formatShadowDispatch({
-    binding: BINDING_A,
-    sourceRepo: SOURCE_REPO,
-    sourceIssue: SOURCE_ISSUE,
-  });
-  const api = new FakeApi({
-    shadowIssue: {
-      number: SHADOW_ISSUE,
-      state: "closed",
-      body: `*Shadow of [${SOURCE_REPO}#${SOURCE_ISSUE}](url)*`,
-      labels: [{ name: BINDING_A }, { name: "STATUS: In QA" }],
-    },
-    shadowComments: [dispatchComment({ body: dispatch })],
-    repoLabels: [{ name: BINDING_A }],
-    issues: [{ number: SHADOW_ISSUE, labels: [{ name: BINDING_A }] }],
-  });
-
-  const result = await bridge({
-    api,
-    sourceRepo: SOURCE_REPO,
-    sourceIssue: SOURCE_ISSUE,
-  });
-  assert.equal(result.dispatchCreated, false);
-  assert.equal(api.calls.some((call) => call[0] === "createComment"), false);
-  assert.equal(api.calls.some((call) => call[0] === "deleteLabel"), false);
-  assert.deepEqual(writes(api), []);
+test("reconcile cancels after Ready removal, Skip, or source closure", async () => {
+  for (const [triggerComment, initialLabels, currentLabels, mode, state = "open"] of [
+    ["", [{ name: "AUTOFIX: Ready" }], [], "ready"],
+    [sourceMarker(), [], [{ name: "AUTOPILOT: Skip" }], "comment"],
+    [sourceMarker(), [], [], "comment", "closed"],
+  ]) {
+    const api = unmappedApi({ sourceIssue: { labels: initialLabels } });
+    await runBridge(api, { triggerComment });
+    const report = createdFor(api, SOURCE_REPO);
+    assert.ok(report[3].includes(`${REPORT_PROVENANCE} ${mode} ${BINDING_A} -->`));
+    api.sourceComments.push({ id: 2, body: report[3], user: { id: DISPATCHER_ID } });
+    api.shadowConfig.issueMap[String(SOURCE_ISSUE)] = SHADOW_ISSUE;
+    api.sourceIssue.labels = currentLabels;
+    api.sourceIssue.state = state;
+    api.calls = [];
+    assert.equal((await runReconcile(api)).dispatchCreated, false);
+    assert.deepEqual(shadowWrites(api), []);
+    assert.equal(writes(api).at(-1)[3].includes("waiting to complete"), false);
+  }
 });
 
-test("missing marker remains unbound and performs no write", async () => {
-  const api = new FakeApi({ sourceComments: [{ id: 1, body: "ordinary" }] });
-  const result = await bridge({
-    api,
-    sourceRepo: SOURCE_REPO,
-    sourceIssue: SOURCE_ISSUE,
+test("reconcile ignores unmarked, foreign, and malformed provenance", async () => {
+  const marker = { id: 1, body: sourceMarker(), user: { id: TRUSTED_SOURCE_ACTOR_ID } };
+  for (const report of [
+    null,
+    { body: `${REPORT_MARKER}\n${REPORT_PROVENANCE} comment ${BINDING_A} -->`,
+      user: { id: FOREIGN_SOURCE_ACTOR_ID } },
+    { body: `${REPORT_MARKER}\n${REPORT_PROVENANCE} forged ${BINDING_A} -->`,
+      user: { id: DISPATCHER_ID } },
+  ]) {
+    const sourceComments = [marker, ...(report ? [{ id: 2, ...report }] : [])];
+    const api = new FakeApi({ sourceComments });
+    const result = await runReconcile(api);
+    assert.equal(result.dispatchCreated, false);
+    assert.deepEqual(writes(api), []);
+  }
+});
+
+test("foreign source report preplay is never updated", async () => {
+  const foreignBody = `${REPORT_MARKER}\nforeign preplay`;
+  const api = new FakeApi({
+    sourceComments: [
+      { id: 1, body: sourceMarker(), user: { id: TRUSTED_SOURCE_ACTOR_ID } },
+      { id: 2, body: foreignBody, user: { id: FOREIGN_SOURCE_ACTOR_ID } },
+    ],
   });
-  assert.deepEqual(result, {
-    bound: false,
-    binding: "",
-    attemptId: "",
-    shadowIssue: 0,
-    shadowRepo: "",
-    dispatchCreated: false,
-    reason: "no_praxis_marker",
-  });
-  assert.deepEqual(
-    api.calls.filter((call) =>
-      ["ensureLabel", "addLabels", "removeLabel", "deleteLabel", "createComment"].includes(
-        call[0],
-      ),
-    ),
-    [],
-  );
+  await runBridge(api);
+  assert.equal(api.calls.some((call) => call[0] === "updateComment" && call[2] === 2), false);
+  assert.ok(api.calls.some((call) =>
+    call[0] === "createComment" && call[1] === SOURCE_REPO &&
+    call[3].includes(REPORT_MARKER)));
 });
 
 test("mapping disagreement fails before any write", async () => {
@@ -297,7 +425,7 @@ test("mapping disagreement fails before any write", async () => {
     },
   });
   await assert.rejects(
-    bridge({ api, sourceRepo: SOURCE_REPO, sourceIssue: SOURCE_ISSUE }),
+    runBridge(api),
     /shadow_source_repo_mismatch/,
   );
   assert.deepEqual(writes(api), []);
@@ -311,19 +439,19 @@ test("bridge rejects invalid source or shadow state before any write", async () 
     labels: [],
   };
   for (const [overrides, error] of [
-    [{ sourceIssue: { state: "closed" } }, /source_issue_not_open:closed/],
+    [{ sourceIssue: { state: "locked" } }, /source_issue_not_open:locked/],
     [{ shadowIssue: shadow }, /shadow_issue_state_invalid:locked/],
   ]) {
     const api = new FakeApi(overrides);
     await assert.rejects(
-      bridge({ api, sourceRepo: SOURCE_REPO, sourceIssue: SOURCE_ISSUE }),
+      runBridge(api),
       error,
     );
     assert.deepEqual(writes(api), []);
   }
 });
 
-test("new attempt reopens the exact shadow then replaces binding and frozen status", async () => {
+test("resolve claims a new attempt, reopens shadow, and clears only frozen state", async () => {
   const api = new FakeApi({
     shadowIssue: {
       number: SHADOW_ISSUE,
@@ -333,72 +461,71 @@ test("new attempt reopens the exact shadow then replaces binding and frozen stat
     },
     repoLabels: [{ name: BINDING_B }],
     issues: [{ number: SHADOW_ISSUE, labels: [{ name: BINDING_B }] }],
+    shadowComments: [dispatchComment()],
   });
 
-  await bridge({ api, sourceRepo: SOURCE_REPO, sourceIssue: SOURCE_ISSUE });
+  const result = await runResolve(api);
+  assert.equal(result.stale, false);
+  assert.equal(result.binding, BINDING_A);
   assert.deepEqual(
     writes(api).map(([method]) => method),
-    ["updateIssueState", "deleteLabel", "removeLabel", "ensureLabel",
-      "addLabels", "removeLabel", "createComment"],
+    ["updateIssueState", "removeLabel", "deleteLabel", "removeLabel",
+      "ensureLabel", "addLabels", "updateComment"],
   );
   assert.deepEqual(writes(api)[0], ["updateIssueState", SHADOW_REPO, SHADOW_ISSUE, "open"]);
+  assert.ok(writes(api).at(-1)[3].includes("handed this attempt"));
   assert.equal(api.calls.some((call) => call.includes("bug")), false);
 });
 
-test("new attempt cleans the strict old binding and only frozen status labels", async () => {
+test("resolve rejects replay of A1 after trusted source marker advances to A2", async () => {
   const api = new FakeApi({
-    shadowIssue: {
-      number: SHADOW_ISSUE,
-      body: `*Shadow of [${SOURCE_REPO}#${SOURCE_ISSUE}](url)*`,
-      labels: [{ name: BINDING_B }, { name: "STATUS: Follow-Up Required" }],
-    },
-    repoLabels: [{ name: BINDING_B }],
+    sourceComments: [
+      {
+        id: 1,
+        body: sourceMarker(),
+        user: { id: TRUSTED_SOURCE_ACTOR_ID },
+      },
+      {
+        id: 2,
+        body: sourceMarker({ attempt_id: "124", nonce: NONCE_B }),
+        user: { id: TRUSTED_SOURCE_ACTOR_ID },
+      },
+    ],
+    shadowComments: [dispatchComment()],
   });
-  await bridge({ api, sourceRepo: SOURCE_REPO, sourceIssue: SOURCE_ISSUE });
-  assert.ok(
-    api.calls.some(
-      (call) =>
-        call[0] === "removeLabel" &&
-        call[2] === SHADOW_ISSUE &&
-        call[3] === BINDING_B,
-    ),
-  );
-  assert.ok(
-    api.calls.some(
-      (call) => call[0] === "deleteLabel" && call[2] === BINDING_B,
-    ),
-  );
-  assert.ok(
-    api.calls.some(
-      (call) =>
-        call[0] === "removeLabel" &&
-        call[3] === "STATUS: Follow-Up Required",
-    ),
-  );
+  const result = await runResolve(api);
+  assert.equal(result.stale, true);
+  assert.equal(result.reason, "stale_source_dispatch");
+  assert.deepEqual(writes(api), []);
 });
 
-test("malformed machine-looking label blocks cleanup and all writes", async () => {
+test("malformed machine-looking label blocks resolve claim and all writes", async () => {
   const api = new FakeApi({
     shadowIssue: {
       number: SHADOW_ISSUE,
       body: `*Shadow of [${SOURCE_REPO}#${SOURCE_ISSUE}](url)*`,
       labels: [{ name: "praxis/a-malformed" }],
     },
+    shadowComments: [dispatchComment()],
   });
   await assert.rejects(
-    bridge({ api, sourceRepo: SOURCE_REPO, sourceIssue: SOURCE_ISSUE }),
+    runResolve(api),
     /malformed_praxis_binding/,
   );
   assert.deepEqual(writes(api), []);
 });
 
-test("orphan budget fails closed before creating a new binding", async () => {
+test("orphan budget fails closed before resolve creates a new binding", async () => {
   const repoLabels = Array.from({ length: ORPHAN_BUDGET }, (_, index) => ({
     name: bindingFor(String(index + 1000), NONCE_B),
   }));
-  const api = new FakeApi({ repoLabels, issues: [] });
+  const api = new FakeApi({
+    repoLabels,
+    issues: [],
+    shadowComments: [dispatchComment()],
+  });
   await assert.rejects(
-    bridge({ api, sourceRepo: SOURCE_REPO, sourceIssue: SOURCE_ISSUE }),
+    runResolve(api),
     /binding_orphan_budget_exceeded/,
   );
   assert.deepEqual(writes(api), []);
@@ -421,16 +548,17 @@ test("orphan budget rejects before removing the issue's old binding", async () =
         labels: [{ name: BINDING_B }],
       },
     ],
+    shadowComments: [dispatchComment()],
   });
 
   await assert.rejects(
-    bridge({ api, sourceRepo: SOURCE_REPO, sourceIssue: SOURCE_ISSUE }),
+    runResolve(api),
     /binding_orphan_budget_exceeded/,
   );
   assert.deepEqual(writes(api), []);
 });
 
-test("resolve binds only the exact current trigger binding", async () => {
+test("resolve accepts an authenticated trigger for the already-current binding", async () => {
   const body = formatShadowDispatch({
     binding: BINDING_A,
     sourceRepo: SOURCE_REPO,
@@ -439,19 +567,13 @@ test("resolve binds only the exact current trigger binding", async () => {
   const api = new FakeApi({
     shadowIssue: {
       number: SHADOW_ISSUE,
-      body: "",
+      body: `*Shadow of [${SOURCE_REPO}#${SOURCE_ISSUE}](url)*`,
       labels: [{ name: BINDING_A }],
     },
     shadowComments: [dispatchComment({ body })],
   });
   assert.deepEqual(
-    await resolveTrigger({
-      api,
-      repo: SHADOW_REPO,
-      issue: SHADOW_ISSUE,
-      triggerComment: body,
-      triggerCommentId: 5,
-    }),
+    await runResolve(api, { triggerComment: body }),
     {
       bound: true,
       binding: BINDING_A,
@@ -460,24 +582,8 @@ test("resolve binds only the exact current trigger binding", async () => {
       reason: "bound_trigger",
     },
   );
-
-  api.shadowIssue.labels = [{ name: BINDING_B }];
-  assert.deepEqual(
-    await resolveTrigger({
-      api,
-      repo: SHADOW_REPO,
-      issue: SHADOW_ISSUE,
-      triggerComment: body,
-      triggerCommentId: 5,
-    }),
-    {
-      bound: true,
-      binding: BINDING_A,
-      attemptId: "123",
-      stale: true,
-      reason: "stale_binding",
-    },
-  );
+  assert.deepEqual(shadowWrites(api), []);
+  assert.ok(writes(api).at(-1)[3].includes("handed this attempt"));
 });
 
 test("resolve rejects mismatched event comment identity", async () => {
@@ -497,6 +603,7 @@ test("resolve rejects mismatched event comment identity", async () => {
     await assert.rejects(resolveTrigger({
       api, repo: SHADOW_REPO, issue: SHADOW_ISSUE,
       triggerComment: SHADOW_DISPATCH, triggerCommentId,
+      trustedSourceActorId: TRUSTED_SOURCE_ACTOR_ID,
     }), error);
     assert.deepEqual(writes(api), []);
   }
@@ -508,17 +615,47 @@ test("resolve ignores copied or already-consumed dispatches", async () => {
     [{ id: DISPATCHER_ID }, "STATUS: In Progress", "attempt_already_started"],
   ]) {
     const api = new FakeApi({
-      shadowIssue: { labels: [{ name: BINDING_A }, ...(status ? [{ name: status }] : [])] },
+      shadowIssue: {
+        body: `*Shadow of [${SOURCE_REPO}#${SOURCE_ISSUE}](url)*`,
+        labels: [{ name: BINDING_A }, ...(status ? [{ name: status }] : [])],
+      },
       shadowComments: [dispatchComment({ user })],
     });
-    const result = await resolveTrigger({
-      api, repo: SHADOW_REPO, issue: SHADOW_ISSUE,
-      triggerComment: SHADOW_DISPATCH, triggerCommentId: 5,
-    });
+    const result = await runResolve(api);
     assert.equal(result.stale, true);
     assert.equal(result.reason, reason);
     assert.deepEqual(writes(api), []);
   }
+});
+
+test("reconcile validates its full bounded issue list before any write", async () => {
+  for (const sourceIssues of [
+    [SOURCE_ISSUE, 0],
+    Array.from({ length: ORPHAN_BUDGET + 1 }, (_, index) => index + 1),
+  ]) {
+    const api = new FakeApi();
+    await assert.rejects(
+      runReconcile(api, sourceIssues),
+      /reconcile_issue/,
+    );
+    assert.deepEqual(writes(api), []);
+    assert.deepEqual(api.calls, []);
+  }
+});
+
+test("reconcile continues after one issue fails, then reports the batch failure", async () => {
+  const api = new FakeApi({ sourceComments: [
+    { id: 1, body: sourceMarker(), user: { id: TRUSTED_SOURCE_ACTOR_ID } },
+    { id: 2, body: `${REPORT_MARKER}\n${REPORT_PROVENANCE} comment ${BINDING_A} -->`,
+      user: { id: DISPATCHER_ID } },
+  ] });
+  const listComments = api.listComments.bind(api);
+  api.listComments = async (repo, issue) => {
+    if (repo === SOURCE_REPO && issue === 43) throw new Error("broken_issue");
+    return listComments(repo, issue);
+  };
+  await assert.rejects(runReconcile(api, [43, SOURCE_ISSUE]), /43:broken_issue/);
+  assert.ok(createdFor(api, SHADOW_REPO), "later issue was not reconciled");
 });
 
 test("ordinary manual trigger remains unbound", async () => {
@@ -703,6 +840,7 @@ test("REST list operations paginate through the final partial page", async () =>
   assert.equal((await api.listIssues(SHADOW_REPO)).length, 101);
   await api.getAuthenticatedUser();
   await api.getComment(SHADOW_REPO, 5);
+  await api.updateComment(SOURCE_REPO, 9, "updated");
   await api.updateIssueState(SHADOW_REPO, SHADOW_ISSUE, "open");
   assert.deepEqual(
     requests.map(([url, method]) => [new URL(url).searchParams.get("page"), method]),
@@ -715,6 +853,7 @@ test("REST list operations paginate through the final partial page", async () =>
       ["2", "GET"],
       [null, "GET"],
       [null, "GET"],
+      [null, "PATCH"],
       [null, "PATCH"],
     ],
   );

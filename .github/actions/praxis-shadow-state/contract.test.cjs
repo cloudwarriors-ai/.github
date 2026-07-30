@@ -20,6 +20,8 @@ const {
 
 const NONCE_A = "0123456789abcdef0123456789abcdef";
 const NONCE_B = "fedcba9876543210fedcba9876543210";
+const TRUSTED_SOURCE_ACTOR_ID = 303;
+const FOREIGN_SOURCE_ACTOR_ID = 404;
 
 function sourceMarker({
   repo = "cloudwarriors-ai/example",
@@ -77,11 +79,13 @@ test("binding retains 96 nonce bits and rejects non-canonical forms", () => {
 test("latest valid source marker wins and byte-identical retries collapse", () => {
   const selected = selectSourceDispatch(
     [
-      { id: 10, body: sourceMarker({ attempt_id: "122", nonce: NONCE_B }) },
-      { id: 11, body: sourceMarker() },
-      { id: 12, body: sourceMarker() },
+      { id: 10, body: sourceMarker({ attempt_id: "122", nonce: NONCE_B }),
+        user: { id: TRUSTED_SOURCE_ACTOR_ID } },
+      { id: 11, body: sourceMarker(), user: { id: TRUSTED_SOURCE_ACTOR_ID } },
+      { id: 12, body: sourceMarker(), user: { id: TRUSTED_SOURCE_ACTOR_ID } },
     ],
     { repo: "cloudwarriors-ai/example", issue: 42 },
+    TRUSTED_SOURCE_ACTOR_ID,
   );
   assert.equal(selected.attemptId, "123");
   assert.equal(selected.nonce, NONCE_A);
@@ -89,30 +93,53 @@ test("latest valid source marker wins and byte-identical retries collapse", () =
   assert.deepEqual(selected.commentIds, [11, 12]);
 });
 
-test("malformed or mismatched Praxis source evidence fails closed", () => {
+test("foreign source markers are ignored before parsing", () => {
+  const selected = selectSourceDispatch(
+    [
+      { id: 1, body: "<!-- praxis-dispatch {foreign-malformed} -->",
+        user: { id: FOREIGN_SOURCE_ACTOR_ID } },
+      { id: 2, body: sourceMarker(), user: { id: TRUSTED_SOURCE_ACTOR_ID } },
+    ],
+    { repo: "cloudwarriors-ai/example", issue: 42 },
+    TRUSTED_SOURCE_ACTOR_ID,
+  );
+  assert.equal(selected.binding, bindingFor("123", NONCE_A));
+  assert.equal(
+    selectSourceDispatch(
+      [{ id: 3, body: sourceMarker(), user: { id: FOREIGN_SOURCE_ACTOR_ID } }],
+      { repo: "cloudwarriors-ai/example", issue: 42 },
+      TRUSTED_SOURCE_ACTOR_ID,
+    ),
+    null,
+  );
+});
+
+test("trusted malformed or mismatched Praxis source evidence fails closed", () => {
   assert.throws(
     () =>
       selectSourceDispatch(
-        [{ id: 1, body: "<!-- praxis-dispatch {nope} -->" }],
+        [{ id: 1, body: "<!-- praxis-dispatch {nope} -->",
+          user: { id: TRUSTED_SOURCE_ACTOR_ID } }],
         { repo: "cloudwarriors-ai/example", issue: 42 },
+        TRUSTED_SOURCE_ACTOR_ID,
       ),
     /malformed_praxis_dispatch/,
   );
   assert.throws(
     () =>
       selectSourceDispatch(
-        [{ id: 1, body: sourceMarker({ repo: "cloudwarriors-ai/other" }) }],
+        [{ id: 1, body: sourceMarker({ repo: "cloudwarriors-ai/other" }),
+          user: { id: TRUSTED_SOURCE_ACTOR_ID } }],
         { repo: "cloudwarriors-ai/example", issue: 42 },
+        TRUSTED_SOURCE_ACTOR_ID,
       ),
     /source_marker_mismatch/,
   );
-  assert.equal(
-    selectSourceDispatch([{ id: 1, body: "ordinary comment" }], {
-      repo: "cloudwarriors-ai/example",
-      issue: 42,
-    }),
-    null,
-  );
+  for (const actorId of ["", "abc", 0, -1]) {
+    assert.throws(() => selectSourceDispatch(
+      [], { repo: "cloudwarriors-ai/example", issue: 42 }, actorId,
+    ), /trusted_source_actor_id_invalid/);
+  }
 });
 
 test("shadow dispatch comment is deterministic and strictly parsed", () => {
@@ -218,7 +245,12 @@ test("workflow wiring carries the binding and freezes one concurrency key", () =
     .split("\n      - name:")[0];
   assert.ok(resolveWiring.includes("token: ${{ secrets.WORKFLOW_PAT }}"));
   assert.ok(resolveWiring.includes("trigger-comment-id: ${{ github.event.comment.id || '' }}"));
+  assert.ok(resolveWiring.includes(
+    "trusted-source-actor-id: ${{ vars.PRAXIS_GITHUB_ACTOR_ID }}",
+  ));
   assert.ok(action.includes("trigger-comment-id:"));
+  assert.ok(action.includes("trusted-source-actor-id:"));
+  assert.ok(action.includes("issue-numbers:"));
   assert.ok(intake.includes("praxis_binding:"));
   assert.ok(installedRunner.includes("praxis_binding:"));
   assert.ok(runner.includes("praxis_binding:"));
@@ -237,6 +269,10 @@ test("workflow wiring blocks source fallthrough and stale status mutation", () =
   );
   const sync = fs.readFileSync(
     path.join(root, ".github/workflows/reusable-shadow-sync.yml"),
+    "utf8",
+  );
+  const actionSource = fs.readFileSync(
+    path.join(root, ".github/actions/praxis-shadow-state/index.cjs"),
     "utf8",
   );
 
@@ -273,6 +309,16 @@ test("workflow wiring blocks source fallthrough and stale status mutation", () =
   }
 
   assert.ok(blocks.get("Bridge Praxis dispatch to shadow repo").includes("blocked == 'true'"));
+  const bridgeWiring = blocks.get("Bridge Praxis dispatch to shadow repo");
+  assert.ok(bridgeWiring.includes("trusted-source-actor-id: ${{ vars.PRAXIS_GITHUB_ACTOR_ID }}"));
+  assert.ok(bridgeWiring
+    .includes("trigger-comment: ${{ inputs.trigger_comment || github.event.comment.body || '' }}"));
+  const bridgeFailure = blocks.get("Report shadow bridge result");
+  assert.ok(bridgeFailure.includes("steps.praxis_bridge.outcome == 'failure'"));
+  assert.ok(bridgeFailure.includes("github-token: ${{ secrets.WORKFLOW_PAT }}"));
+  assert.ok(bridgeFailure.includes("const provenance ="));
+  assert.equal(bridgeFailure.includes("Praxis is waiting to complete"), false);
+  assert.ok(bridgeFailure.includes("Praxis shadow handoff is blocked"));
   assert.equal(intake.includes("Shadow-enabled source repo — execution blocked"), false);
   assert.ok(
     intake.indexOf("Set bound STATUS to In Progress") <
@@ -304,4 +350,25 @@ test("workflow wiring blocks source fallthrough and stale status mutation", () =
   assert.ok(sync.includes("github.rest.issues.deleteLabel"));
   assert.ok(sync.includes("malformed Praxis binding label(s)"));
   assert.ok(sync.includes("has multiple Praxis bindings"));
+  assert.ok(sync.includes("pending_praxis_batches"));
+  assert.ok(sync.includes("github.rest.search.issuesAndPullRequests"));
+  assert.equal(sync.includes("? allIssues\n                .filter(issue => issue.state === 'open'"), false);
+  assert.ok(sync.includes("is:issue in:comments"));
+  assert.equal(sync.includes("is:issue is:open"), false);
+  assert.equal(sync.includes(".filter(issue => !issue.labels.some"), false);
+  assert.equal(sync.includes("labels.includes('AUTOFIX: Ready') &&\n"), false);
+  assert.ok(sync.includes("max-parallel: 1"));
+  assert.ok(sync.includes("include: ${{ fromJSON(needs.sync.outputs.pending_praxis_batches) }}"));
+  assert.ok(sync.split("- name: Reconcile pending Praxis shadow dispatches")[1].includes("token: ${{ secrets.WORKFLOW_PAT }}"));
+  assert.ok(sync.indexOf("createOrUpdateFileContents") <
+    sync.indexOf("- name: Reconcile pending Praxis shadow dispatches"));
+
+  const bridgeSource = actionSource.split("async function bridge")[1]
+    .split("async function resolveTrigger")[0];
+  for (const forbidden of [
+    "updateIssueState(", "ensureLabel(", "addLabels(", "removeLabel(", "deleteLabel(",
+  ]) {
+    assert.equal(bridgeSource.includes(`api.${forbidden}`), false,
+      `source bridge must not call ${forbidden}`);
+  }
 });
