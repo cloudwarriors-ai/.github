@@ -105,7 +105,7 @@ jobs:
         if: |
           steps.shadow_guard.outputs.blocked == 'true' &&
           steps.shadow_guard.outputs.praxis_owned == 'true'
-        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@codex/praxis-shadow-canary
+        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@d76c62efd58511a1f8ca8986254be0d18d891325
         with:
           mode: bridge
           token: ${{ secrets.WORKFLOW_PAT }}
@@ -198,7 +198,7 @@ jobs:
       - name: Resolve Praxis shadow trigger
         id: praxis_trigger
         if: steps.shadow_guard.outputs.blocked != 'true'
-        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@codex/praxis-shadow-canary
+        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@d76c62efd58511a1f8ca8986254be0d18d891325
         with:
           mode: resolve
           token: ${{ secrets.WORKFLOW_PAT }}
@@ -474,7 +474,7 @@ jobs:
           steps.praxis_trigger.outputs.bound == 'true' &&
           steps.killswitch.outputs.disabled != 'true' &&
           steps.context.outputs.status == 'resolved'
-        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@codex/praxis-shadow-canary
+        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@d76c62efd58511a1f8ca8986254be0d18d891325
         with:
           mode: transition
           token: ${{ github.token }}
