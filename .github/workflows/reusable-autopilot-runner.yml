@@ -1068,7 +1068,8 @@ jobs:
           needs.read-config.outputs.auto_merge == 'true' &&
           needs.validate.outputs.validation_passed == 'true' &&
           needs.preflight.outputs.preflight_passed == 'true' &&
-          (needs.test.outputs.tests_passed == 'true' || needs.test.outputs.tests_passed == '') &&
+          (needs.read-config.outputs.test_command == '' ||
+           needs.test.outputs.tests_passed == 'true') &&
           (needs.validate-api.result == 'skipped' || needs.validate-api.outputs.api_validation_passed == 'true')
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
@@ -1088,6 +1089,8 @@ jobs:
           steps.pr.outputs.pr_ready == 'true' &&
           needs.validate.outputs.validation_passed == 'true' &&
           needs.preflight.outputs.preflight_passed == 'true' &&
+          (needs.read-config.outputs.test_command == '' ||
+           needs.test.outputs.tests_passed == 'true') &&
           (needs.validate-api.result == 'skipped' || needs.validate-api.outputs.api_validation_passed == 'true')
         uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@d76c62efd58511a1f8ca8986254be0d18d891325
         with:
@@ -1106,6 +1109,8 @@ jobs:
           steps.pr.outputs.pr_ready == 'true' &&
           needs.validate.outputs.validation_passed == 'true' &&
           needs.preflight.outputs.preflight_passed == 'true' &&
+          (needs.read-config.outputs.test_command == '' ||
+           needs.test.outputs.tests_passed == 'true') &&
           (needs.validate-api.result == 'skipped' || needs.validate-api.outputs.api_validation_passed == 'true')
         uses: actions/github-script@v7
         with:
@@ -1245,6 +1250,8 @@ jobs:
             steps.pr.outputs.pr_ready != 'true' ||
             needs.validate.outputs.validation_passed != 'true' ||
             needs.preflight.outputs.preflight_passed != 'true' ||
+            (needs.read-config.outputs.test_command != '' &&
+             needs.test.outputs.tests_passed != 'true') ||
             (needs.validate-api.result != 'skipped' && needs.validate-api.outputs.api_validation_passed != 'true')
           )
         uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@d76c62efd58511a1f8ca8986254be0d18d891325
@@ -1267,6 +1274,8 @@ jobs:
             steps.pr.outputs.pr_ready != 'true' ||
             needs.validate.outputs.validation_passed != 'true' ||
             needs.preflight.outputs.preflight_passed != 'true' ||
+            (needs.read-config.outputs.test_command != '' &&
+             needs.test.outputs.tests_passed != 'true') ||
             (needs.validate-api.result != 'skipped' && needs.validate-api.outputs.api_validation_passed != 'true')
           )
         env:
@@ -1459,6 +1468,17 @@ jobs:
 
             const prNumber = '${{ steps.pr.outputs.pr_number }}';
             const alreadyFixed = '${{ needs.verify-fix-branch.outputs.already_fixed }}' === 'true';
+            const testsRequired = '${{ needs.read-config.outputs.test_command }}' !== '';
+            const pipelineSucceeded =
+              '${{ needs.rlm-fix.result }}' === 'success' &&
+              '${{ needs.verify-fix-branch.outputs.branch_ready }}' === 'true' &&
+              '${{ needs.validate.outputs.validation_passed }}' === 'true' &&
+              '${{ needs.preflight.outputs.preflight_passed }}' === 'true' &&
+              (!testsRequired || '${{ needs.test.outputs.tests_passed }}' === 'true') &&
+              (
+                '${{ needs.validate-api.result }}' === 'skipped' ||
+                '${{ needs.validate-api.outputs.api_validation_passed }}' === 'true'
+              );
             const shadowIssueUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/issues/${shadowIssueNumber}`;
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const marker = '<!-- SHADOW_RUN_ACTIVE -->';
@@ -1467,7 +1487,7 @@ jobs:
               `| Shadow issue | [${context.repo.owner}/${context.repo.repo}#${shadowIssueNumber}](${shadowIssueUrl}) |`,
             ];
             let heading;
-            if (prNumber) {
+            if (prNumber && pipelineSucceeded) {
               const shadowPrUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/pull/${prNumber}`;
               rows.push(`| Shadow PR | [${context.repo.owner}/${context.repo.repo}#${prNumber}](${shadowPrUrl}) |`);
               rows.push(`| Workflow run | [View run](${runUrl}) |`);
@@ -1478,6 +1498,10 @@ jobs:
               rows.push('| Status | Already fixed on base branch — no shadow PR needed |');
               heading = 'Already Fixed';
             } else {
+              if (prNumber) {
+                const shadowPrUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/pull/${prNumber}`;
+                rows.push(`| Shadow PR | [${context.repo.owner}/${context.repo.repo}#${prNumber}](${shadowPrUrl}) |`);
+              }
               rows.push(`| Workflow run | [View run](${runUrl}) |`);
               rows.push('| Status | ⚠️ Follow-up required — see shadow issue for details |');
               heading = 'Follow-Up Required';

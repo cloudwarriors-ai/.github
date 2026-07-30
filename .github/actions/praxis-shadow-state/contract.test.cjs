@@ -259,6 +259,49 @@ test("workflow wiring carries the binding and freezes one concurrency key", () =
   assert.ok(sync.includes(`PRAXIS_BINDING_PATTERN: ${BINDING_RE.source}`));
 });
 
+test("runner requires configured tests to pass before ready-state side effects", () => {
+  const root = path.resolve(__dirname, "../../..");
+  const runner = fs.readFileSync(
+    path.join(root, ".github/workflows/reusable-autopilot-runner.yml"),
+    "utf8",
+  );
+  const blocks = new Map(
+    runner
+      .split(/\n      - name: /)
+      .slice(1)
+      .map((block) => [block.split("\n", 1)[0].replaceAll('"', ""), block]),
+  );
+  const passingTestGate = [
+    "needs.read-config.outputs.test_command == ''",
+    "needs.test.outputs.tests_passed == 'true'",
+  ];
+  for (const name of [
+    "Auto-merge",
+    "On bound success: label In QA",
+    "On success: label In QA",
+  ]) {
+    const block = blocks.get(name);
+    assert.ok(block, `missing runner step: ${name}`);
+    for (const condition of passingTestGate) {
+      assert.ok(block.includes(condition), `${name} lacks test gate: ${condition}`);
+    }
+  }
+  for (const name of [
+    "On bound failure: label Follow-Up Required",
+    "On failure: label Follow-Up Required",
+  ]) {
+    const block = blocks.get(name);
+    assert.ok(block, `missing runner step: ${name}`);
+    assert.ok(block.includes("needs.read-config.outputs.test_command != ''"));
+    assert.ok(block.includes("needs.test.outputs.tests_passed != 'true'"));
+  }
+  const sourceReport = blocks.get("Cross-post shadow status to source issue");
+  assert.ok(sourceReport, "missing source shadow-status report");
+  assert.ok(sourceReport.includes("const testsRequired ="));
+  assert.ok(sourceReport.includes("const pipelineSucceeded ="));
+  assert.ok(sourceReport.includes("prNumber && pipelineSucceeded"));
+});
+
 test("workflow wiring blocks source fallthrough and stale status mutation", () => {
   const root = path.resolve(__dirname, "../../..");
   const intake = fs.readFileSync(
