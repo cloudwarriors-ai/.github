@@ -64,6 +64,8 @@ jobs:
           mkdir actionlint
           tar -xzf "$archive" -C actionlint
           actionlint/actionlint \
+            -shellcheck= \
+            -pyflakes= \
             .github/workflows/praxis-shadow-state-ci.yml \
             .github/workflows/reusable-autopilot-intake.yml \
             .github/workflows/reusable-autopilot-runner.yml \

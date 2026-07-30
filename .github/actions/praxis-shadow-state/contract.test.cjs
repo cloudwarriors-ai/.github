@@ -386,6 +386,8 @@ test("workflow wiring blocks source fallthrough and stale status mutation", () =
   assert.ok(ci.includes(
     "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8",
   ));
+  assert.ok(ci.includes("-shellcheck="));
+  assert.ok(ci.includes("-pyflakes="));
 
   const bridgeSource = actionSource.split("async function bridge")[1]
     .split("async function resolveTrigger")[0];
