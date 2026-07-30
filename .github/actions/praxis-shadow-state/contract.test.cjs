@@ -244,7 +244,9 @@ test("workflow wiring carries the binding and freezes one concurrency key", () =
   const resolveWiring = intake.split("- name: Resolve Praxis shadow trigger")[1]
     .split("\n      - name:")[0];
   assert.ok(resolveWiring.includes("token: ${{ secrets.WORKFLOW_PAT }}"));
-  assert.ok(resolveWiring.includes("trigger-comment-id: ${{ github.event.comment.id || '' }}"));
+  assert.ok(resolveWiring.includes(
+    "trigger-comment-id: ${{ inputs.trigger_comment_id || github.event.comment.id || '' }}",
+  ));
   assert.ok(resolveWiring.includes(
     "trusted-source-actor-id: ${{ vars.PRAXIS_GITHUB_ACTOR_ID }}",
   ));

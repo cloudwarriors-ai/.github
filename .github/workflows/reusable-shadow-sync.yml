@@ -374,7 +374,7 @@ jobs:
         include: ${{ fromJSON(needs.sync.outputs.pending_praxis_batches) }}
     steps:
       - name: Reconcile pending Praxis shadow dispatches
-        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@main
+        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@codex/praxis-shadow-canary
         with:
           mode: reconcile
           token: ${{ secrets.WORKFLOW_PAT }}

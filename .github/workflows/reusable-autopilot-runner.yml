@@ -1087,7 +1087,7 @@ jobs:
           needs.validate.outputs.validation_passed == 'true' &&
           needs.preflight.outputs.preflight_passed == 'true' &&
           (needs.validate-api.result == 'skipped' || needs.validate-api.outputs.api_validation_passed == 'true')
-        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@main
+        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@codex/praxis-shadow-canary
         with:
           mode: transition
           token: ${{ github.token }}
@@ -1138,7 +1138,7 @@ jobs:
           inputs.praxis_binding != '' &&
           needs.rlm-fix.result == 'success' &&
           needs.verify-fix-branch.outputs.already_fixed == 'true'
-        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@main
+        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@codex/praxis-shadow-canary
         with:
           mode: transition
           token: ${{ github.token }}
@@ -1245,7 +1245,7 @@ jobs:
             needs.preflight.outputs.preflight_passed != 'true' ||
             (needs.validate-api.result != 'skipped' && needs.validate-api.outputs.api_validation_passed != 'true')
           )
-        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@main
+        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@codex/praxis-shadow-canary
         with:
           mode: transition
           token: ${{ github.token }}

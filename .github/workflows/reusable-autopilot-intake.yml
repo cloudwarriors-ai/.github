@@ -22,6 +22,11 @@ on:
         required: false
         type: string
         default: ''
+      trigger_comment_id:
+        description: 'Exact GitHub comment ID for authenticated manual replay'
+        required: false
+        type: string
+        default: ''
     secrets:
       WORKFLOW_PAT:
         required: true
@@ -100,7 +105,7 @@ jobs:
         if: |
           steps.shadow_guard.outputs.blocked == 'true' &&
           steps.shadow_guard.outputs.praxis_owned == 'true'
-        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@main
+        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@codex/praxis-shadow-canary
         with:
           mode: bridge
           token: ${{ secrets.WORKFLOW_PAT }}
@@ -193,14 +198,14 @@ jobs:
       - name: Resolve Praxis shadow trigger
         id: praxis_trigger
         if: steps.shadow_guard.outputs.blocked != 'true'
-        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@main
+        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@codex/praxis-shadow-canary
         with:
           mode: resolve
           token: ${{ secrets.WORKFLOW_PAT }}
           repo: ${{ github.repository }}
           issue-number: ${{ inputs.issue_number }}
           trigger-comment: ${{ inputs.trigger_comment || github.event.comment.body || '' }}
-          trigger-comment-id: ${{ github.event.comment.id || '' }}
+          trigger-comment-id: ${{ inputs.trigger_comment_id || github.event.comment.id || '' }}
           trusted-source-actor-id: ${{ vars.PRAXIS_GITHUB_ACTOR_ID }}
 
       # --- Kill switch (check for AUTOPILOT: Disabled label) ---
@@ -469,7 +474,7 @@ jobs:
           steps.praxis_trigger.outputs.bound == 'true' &&
           steps.killswitch.outputs.disabled != 'true' &&
           steps.context.outputs.status == 'resolved'
-        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@main
+        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@codex/praxis-shadow-canary
         with:
           mode: transition
           token: ${{ github.token }}
