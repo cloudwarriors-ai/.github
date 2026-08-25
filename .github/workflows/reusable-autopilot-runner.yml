@@ -1352,8 +1352,10 @@ jobs:
                   repo: context.repo.repo,
                   issue_number: shadowIssueNumber,
                 });
-                const m = (shadowIssue.body || '').match(/Shadow of \[.*?#(\d+)\]/);
-                if (m) sourceIssueNumber = Number(m[1]);
+                // Last match: the sync appends the real footer at the end of the
+                // body, after any synced maintainer-decision text.
+                const ms = [...(shadowIssue.body || '').matchAll(/Shadow of \[.*?#(\d+)\]/g)];
+                if (ms.length) sourceIssueNumber = Number(ms[ms.length - 1][1]);
               } catch (e) {
                 core.warning(`Could not fetch shadow issue body: ${e.message}`);
               }

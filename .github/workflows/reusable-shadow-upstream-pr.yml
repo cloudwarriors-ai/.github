@@ -94,6 +94,10 @@ jobs:
               return;
             }
             const shadowIssueNumber = parseInt(branchMatch[1], 10);
+            // Emit identifiers the moment they are known, not only in the success
+            // block at the end: if a later fetch in this step throws, the failure
+            // notifier still needs these to reach the source/shadow issues.
+            core.setOutput('shadow_issue_number', String(shadowIssueNumber));
 
             const { data: configFile } = await github.rest.repos.getContent({
               owner: shadowOwner,
@@ -103,6 +107,9 @@ jobs:
             const config = JSON.parse(Buffer.from(configFile.content, 'base64').toString());
             const sourceRepo = config.sourceRepo;
             const [sourceOwner, sourceRepoName] = sourceRepo.split('/');
+            core.setOutput('source_repo', sourceRepo);
+            core.setOutput('source_owner', sourceOwner);
+            core.setOutput('source_repo_name', sourceRepoName);
 
             const reverseMap = Object.fromEntries(
               Object.entries(config.issueMap || {}).map(([src, shad]) => [String(shad), Number(src)])
@@ -117,8 +124,11 @@ jobs:
                   repo: shadowRepoName,
                   issue_number: shadowIssueNumber,
                 });
-                const m = (shadowIssue.body || '').match(/Shadow of \[.*?#(\d+)\]/);
-                if (m) sourceIssueNumber = Number(m[1]);
+                // Last match, not first: the sync appends the real footer at the
+                // end of the body, after any synced maintainer-decision text that
+                // could quote a footer-shaped string.
+                const ms = [...(shadowIssue.body || '').matchAll(/Shadow of \[.*?#(\d+)\]/g)];
+                if (ms.length) sourceIssueNumber = Number(ms[ms.length - 1][1]);
               } catch (e) {
                 core.warning(`Could not fetch shadow issue body: ${e.message}`);
               }
@@ -128,6 +138,7 @@ jobs:
               core.setFailed(`Cannot resolve source issue for shadow issue #${shadowIssueNumber} — issueMap miss and no body footer found`);
               return;
             }
+            core.setOutput('source_issue_number', String(sourceIssueNumber));
 
             const { data: shadowPr } = await github.rest.pulls.get({
               owner: shadowOwner,
@@ -214,14 +225,35 @@ jobs:
           if [ ! -s /tmp/shadow-fix.patch ]; then
             echo "::warning::No source-app changes to export after excluding shadow control files"
             echo "exported=false" >> "$GITHUB_OUTPUT"
+            echo "export_failure=empty-patch" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          git -C source apply --index --3way /tmp/shadow-fix.patch
+          # A conflicted 3-way apply must fail LOUDLY: without this handler the run
+          # dies red in the shadow repo's Actions tab and nothing reaches the source
+          # issue (scopely-shadow#669). Capture the conflict set for the notifier
+          # step, then still fail the step so the run conclusion stays honest.
+          if ! git -C source apply --index --3way /tmp/shadow-fix.patch; then
+            CONFLICT_FILES=$(git -C source diff --name-only --diff-filter=U | head -20 || true)
+            echo "exported=false" >> "$GITHUB_OUTPUT"
+            echo "export_failure=patch-conflict" >> "$GITHUB_OUTPUT"
+            # Randomized delimiter: the file list is repo-derived content, and a
+            # fixed EOF delimiter could be terminated early by a file named EOF
+            # (GitHub's multiline-output hardening guidance).
+            delim="CONFLICT_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+            {
+              echo "conflict_files<<${delim}"
+              echo "${CONFLICT_FILES:-<none listed — apply failed before leaving unmerged entries>}"
+              echo "${delim}"
+            } >> "$GITHUB_OUTPUT"
+            echo "::error::Shadow fix patch does not apply cleanly onto ${UPSTREAM_TARGET}. Conflicting files: ${CONFLICT_FILES:-unknown}. Run sync-code on the shadow repo to converge branches, then re-dispatch this workflow."
+            exit 1
+          fi
 
           if [ -z "$(git -C source status --porcelain)" ]; then
             echo "::warning::Patch exported no source changes after apply"
             echo "exported=false" >> "$GITHUB_OUTPUT"
+            echo "export_failure=empty-after-apply" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -579,6 +611,107 @@ jobs:
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # ── Failure surfacing ─────────────────────────────────────────────
+      # A validated shadow fix that never reaches the source repo must never
+      # fail silently (scopely-shadow#669: a conflicted export died red in the
+      # shadow Actions tab with no comment or label anywhere). Fires on any
+      # step failure, and on a successful export step that exported nothing.
+      # Deliberately NOT fired when the prepare step skipped this branch as a
+      # non-autofix branch — that is a normal no-op.
+      - name: Surface export failure to source and shadow issues
+        if: >
+          always() &&
+          (failure() ||
+           (steps.export.outcome == 'success' && steps.export.outputs.exported != 'true'))
+        uses: actions/github-script@v7
+        env:
+          # Conflict paths come from repo content — passed via env (not interpolated
+          # into the script body) so no file name can break or inject into the step.
+          CONFLICT_FILES: ${{ steps.export.outputs.conflict_files }}
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT || secrets.GITHUB_TOKEN }}
+          script: |
+            const [shadowOwner, shadowRepoName] = '${{ inputs.shadow_repo }}'.split('/');
+            const sourceOwner = '${{ steps.prepare.outputs.source_owner }}';
+            const sourceRepoName = '${{ steps.prepare.outputs.source_repo_name }}';
+            const sourceIssueNumber = '${{ steps.prepare.outputs.source_issue_number }}';
+            const shadowIssueNumber = '${{ steps.prepare.outputs.shadow_issue_number }}';
+            const exportFailure = '${{ steps.export.outputs.export_failure }}' || '';
+            const jobFailed = '${{ job.status }}' === 'failure';
+            const conflictFiles = (process.env.CONFLICT_FILES || '').trim();
+            const notifyMode = '${{ inputs.source_issue_notification_mode }}';
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const reason = exportFailure ||
+              (jobFailed ? 'pipeline-step-failed' : 'nothing-exported');
+            const reasonText = {
+              'patch-conflict': 'The validated shadow diff no longer applies cleanly to the source branch (merge conflict). This usually means the source branch moved after the shadow fix was written.',
+              'empty-patch': 'The merged shadow PR contained no source-application changes to export.',
+              'empty-after-apply': 'The exported patch applied but produced no changes — the source branch likely already contains this fix.',
+              'pipeline-step-failed': 'A pipeline step failed before an upstream PR could be created. Open the run for the failing step.',
+              'nothing-exported': 'The export step completed without exporting changes.',
+            }[reason] || reason;
+
+            const lines = [
+              '<!-- SHADOW_UPSTREAM_EXPORT_FAILED -->',
+              '## ⚠️ Shadow fix did NOT reach the source repo',
+              '',
+              `A merged, validated shadow fix failed to export upstream. Without this notice the failure is only visible in the shadow repo's Actions tab.`,
+              '',
+              `| | |`,
+              `|--|--|`,
+              `| Shadow PR | ${{ inputs.shadow_repo }}#${{ inputs.shadow_pr_number }} |`,
+              `| Reason | \`${reason}\` — ${reasonText} |`,
+              conflictFiles ? `| Conflicting files | ${conflictFiles.split('\n').map(f => '`' + f + '`').join(', ')} |` : '',
+              `| Run | [workflow run](${runUrl}) |`,
+              '',
+              '**Recovery:** run `sync-code` on the shadow repo to converge branches, then re-dispatch this workflow (`Shadow Upstream PR` → workflow_dispatch) with the same shadow repo / PR / branch — or export the diff manually.',
+            ].filter(l => l !== '');
+            const body = lines.join('\n');
+
+            // Source issue comment (marker-upserted), respecting the repo's
+            // notification mode the same way the success path does.
+            if (notifyMode === 'comment' && sourceOwner && sourceRepoName && sourceIssueNumber) {
+              try {
+                const marker = '<!-- SHADOW_UPSTREAM_EXPORT_FAILED -->';
+                const comments = await github.paginate(github.rest.issues.listComments, {
+                  owner: sourceOwner, repo: sourceRepoName,
+                  issue_number: Number(sourceIssueNumber), per_page: 100,
+                });
+                const existing = comments.find(c => (c.body || '').includes(marker));
+                if (existing) {
+                  await github.rest.issues.updateComment({
+                    owner: sourceOwner, repo: sourceRepoName,
+                    comment_id: existing.id, body,
+                  });
+                } else {
+                  await github.rest.issues.createComment({
+                    owner: sourceOwner, repo: sourceRepoName,
+                    issue_number: Number(sourceIssueNumber), body,
+                  });
+                }
+              } catch (e) {
+                core.warning(`Could not comment on source issue: ${e.message}`);
+              }
+            }
+
+            // Shadow issue: label so the queue/humans can find stranded fixes.
+            if (shadowIssueNumber) {
+              try {
+                await github.rest.issues.addLabels({
+                  owner: shadowOwner, repo: shadowRepoName,
+                  issue_number: Number(shadowIssueNumber),
+                  labels: ['STATUS: Follow-Up Required'],
+                });
+              } catch (e) {
+                core.warning(`Could not label shadow issue: ${e.message}`);
+              }
+            }
+
+            await core.summary
+              .addRaw(`### Upstream export failed\n\n${body}`)
+              .write();
 
   review-upstream-pr:
     needs: upstream-pr

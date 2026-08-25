@@ -136,12 +136,79 @@ jobs:
               'STATUS: In Progress', 'STATUS: In QA', 'STATUS: Follow-Up Required',
             ]);
 
+            // ── Maintainer decision carry ────────────────────────────────────
+            // Source-issue comments never sync, so a design decision written as a
+            // comment is invisible to the shadow writer — it implements the body's
+            // "Suggested fix" instead (observed: scopely#1359 attempt 1 shipped a
+            // rejected design). For issues in the active dispatch queue only,
+            // comments a maintainer explicitly marked as decisions are appended to
+            // the shadow body, which is the writer's entire spec surface.
+            //  - Bounded: only open issues carrying a dispatch label (keeps the
+            //    hourly sync's API cost proportional to the queue, not the repo).
+            //  - Opt-in: only comments containing `AUTOPILOT-DECISION:` or an
+            //    `## Accepted design` heading. Ordinary discussion never syncs.
+            //  - Trust-gated: only OWNER/MEMBER/COLLABORATOR authors; drive-by
+            //    comments can never inject into the writer's spec surface.
+            const dispatchLabels = new Set(['AUTOFIX: Ready', 'AUTOPILOT: Queue', 'PRAXIS: Go']);
+            const trustedAssociations = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+            // Marker vocabulary is mirrored in the fixer policy
+            // (.claude/rules/autopilot-fixer-policy.md, "Decision precedence") —
+            // change both together. Line-start `Decision:` is deliberate; bare
+            // "ratified" mid-prose is NOT a marker.
+            const decisionPattern = /(^|\n)\s*(AUTOPILOT-DECISION:|Decision:|##\s*Accepted design)/i;
+            const buildDecisionSection = async (src) => {
+              if (src.state !== 'open') return '';
+              if (!src.labels.some(l => dispatchLabels.has(l.name))) return '';
+              if ((src.comments || 0) === 0) return '';
+              let comments;
+              try {
+                comments = await github.paginate(github.rest.issues.listComments, {
+                  owner: sourceOwner, repo: sourceRepoName,
+                  issue_number: src.number, per_page: 100,
+                });
+              } catch (e) {
+                console.log(`Could not fetch comments for #${src.number}: ${e.message}`);
+                return '';
+              }
+              const decisions = comments.filter(c =>
+                trustedAssociations.has(c.author_association) &&
+                decisionPattern.test(c.body || '')
+              );
+              if (!decisions.length) return '';
+              // When over budget, keep the NEWEST decisions — a later decision
+              // supersedes an earlier one, so the tail is the authoritative part.
+              // Selection walks newest-first; rendering stays chronological, and
+              // dropped entries are announced, never silently omitted.
+              const entries = decisions.map(c => {
+                const raw = c.body || '';
+                return `\n### @${c.user.login} — ${c.created_at.slice(0, 10)}\n${raw.slice(0, 1500)}${raw.length > 1500 ? '\n_[decision truncated at 1500 chars]_' : ''}`;
+              });
+              let budget = 4000;
+              const kept = [];
+              for (let k = entries.length - 1; k >= 0; k--) {
+                if (entries[k].length > budget) break;
+                kept.unshift(entries[k]);
+                budget -= entries[k].length;
+              }
+              const omitted = entries.length - kept.length;
+              const parts = [
+                '\n\n---\n## Maintainer decisions (synced from source issue comments)',
+                '_Marked as decisions by maintainers. Where these conflict with the issue text above, these control._',
+              ];
+              if (omitted > 0) {
+                parts.push(`\n_[${omitted} earlier decision comment(s) omitted for length — newest retained; see source issue for full history]_`);
+              }
+              parts.push(...kept);
+              return parts.join('\n');
+            };
+
             let created = 0, updated = 0, preservedClosed = 0;
             let shadowOpenCount = 0, shadowClosedCount = 0;
             for (let i = 0; i < allIssues.length; i++) {
               const src = allIssues[i];
               const shadowFooter = `\n\n---\n*Shadow of [${sourceRepo}#${src.number}](${src.html_url})*`;
-              const body = (src.body || '') + shadowFooter;
+              const decisionSection = await buildDecisionSection(src);
+              const body = (src.body || '') + decisionSection + shadowFooter;
               const title = src.title;
               const sourceState = src.state;
               let effectiveState = sourceState;
