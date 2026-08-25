@@ -151,7 +151,11 @@ jobs:
             //    comments can never inject into the writer's spec surface.
             const dispatchLabels = new Set(['AUTOFIX: Ready', 'AUTOPILOT: Queue', 'PRAXIS: Go']);
             const trustedAssociations = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
-            const decisionPattern = /(^|\n)\s*(AUTOPILOT-DECISION:|##\s*Accepted design)/i;
+            // Marker vocabulary is mirrored in the fixer policy
+            // (.claude/rules/autopilot-fixer-policy.md, "Decision precedence") —
+            // change both together. Line-start `Decision:` is deliberate; bare
+            // "ratified" mid-prose is NOT a marker.
+            const decisionPattern = /(^|\n)\s*(AUTOPILOT-DECISION:|Decision:|##\s*Accepted design)/i;
             const buildDecisionSection = async (src) => {
               if (src.state !== 'open') return '';
               if (!src.labels.some(l => dispatchLabels.has(l.name))) return '';
@@ -171,18 +175,30 @@ jobs:
                 decisionPattern.test(c.body || '')
               );
               if (!decisions.length) return '';
+              // When over budget, keep the NEWEST decisions — a later decision
+              // supersedes an earlier one, so the tail is the authoritative part.
+              // Selection walks newest-first; rendering stays chronological, and
+              // dropped entries are announced, never silently omitted.
+              const entries = decisions.map(c => {
+                const raw = c.body || '';
+                return `\n### @${c.user.login} — ${c.created_at.slice(0, 10)}\n${raw.slice(0, 1500)}${raw.length > 1500 ? '\n_[decision truncated at 1500 chars]_' : ''}`;
+              });
+              let budget = 4000;
+              const kept = [];
+              for (let k = entries.length - 1; k >= 0; k--) {
+                if (entries[k].length > budget) break;
+                kept.unshift(entries[k]);
+                budget -= entries[k].length;
+              }
+              const omitted = entries.length - kept.length;
               const parts = [
                 '\n\n---\n## Maintainer decisions (synced from source issue comments)',
                 '_Marked as decisions by maintainers. Where these conflict with the issue text above, these control._',
               ];
-              let budget = 4000;
-              for (const c of decisions) {
-                const excerpt = (c.body || '').slice(0, 1500);
-                const entry = `\n### @${c.user.login} — ${c.created_at.slice(0, 10)}\n${excerpt}${(c.body || '').length > 1500 ? '\n_[decision truncated at 1500 chars]_' : ''}`;
-                if (entry.length > budget) break;
-                parts.push(entry);
-                budget -= entry.length;
+              if (omitted > 0) {
+                parts.push(`\n_[${omitted} earlier decision comment(s) omitted for length — newest retained; see source issue for full history]_`);
               }
+              parts.push(...kept);
               return parts.join('\n');
             };
 

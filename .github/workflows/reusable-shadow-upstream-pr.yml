@@ -94,6 +94,10 @@ jobs:
               return;
             }
             const shadowIssueNumber = parseInt(branchMatch[1], 10);
+            // Emit identifiers the moment they are known, not only in the success
+            // block at the end: if a later fetch in this step throws, the failure
+            // notifier still needs these to reach the source/shadow issues.
+            core.setOutput('shadow_issue_number', String(shadowIssueNumber));
 
             const { data: configFile } = await github.rest.repos.getContent({
               owner: shadowOwner,
@@ -103,6 +107,9 @@ jobs:
             const config = JSON.parse(Buffer.from(configFile.content, 'base64').toString());
             const sourceRepo = config.sourceRepo;
             const [sourceOwner, sourceRepoName] = sourceRepo.split('/');
+            core.setOutput('source_repo', sourceRepo);
+            core.setOutput('source_owner', sourceOwner);
+            core.setOutput('source_repo_name', sourceRepoName);
 
             const reverseMap = Object.fromEntries(
               Object.entries(config.issueMap || {}).map(([src, shad]) => [String(shad), Number(src)])
@@ -117,8 +124,11 @@ jobs:
                   repo: shadowRepoName,
                   issue_number: shadowIssueNumber,
                 });
-                const m = (shadowIssue.body || '').match(/Shadow of \[.*?#(\d+)\]/);
-                if (m) sourceIssueNumber = Number(m[1]);
+                // Last match, not first: the sync appends the real footer at the
+                // end of the body, after any synced maintainer-decision text that
+                // could quote a footer-shaped string.
+                const ms = [...(shadowIssue.body || '').matchAll(/Shadow of \[.*?#(\d+)\]/g)];
+                if (ms.length) sourceIssueNumber = Number(ms[ms.length - 1][1]);
               } catch (e) {
                 core.warning(`Could not fetch shadow issue body: ${e.message}`);
               }
@@ -128,6 +138,7 @@ jobs:
               core.setFailed(`Cannot resolve source issue for shadow issue #${shadowIssueNumber} — issueMap miss and no body footer found`);
               return;
             }
+            core.setOutput('source_issue_number', String(sourceIssueNumber));
 
             const { data: shadowPr } = await github.rest.pulls.get({
               owner: shadowOwner,
@@ -226,10 +237,14 @@ jobs:
             CONFLICT_FILES=$(git -C source diff --name-only --diff-filter=U | head -20 || true)
             echo "exported=false" >> "$GITHUB_OUTPUT"
             echo "export_failure=patch-conflict" >> "$GITHUB_OUTPUT"
+            # Randomized delimiter: the file list is repo-derived content, and a
+            # fixed EOF delimiter could be terminated early by a file named EOF
+            # (GitHub's multiline-output hardening guidance).
+            delim="CONFLICT_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
             {
-              echo "conflict_files<<EOF"
+              echo "conflict_files<<${delim}"
               echo "${CONFLICT_FILES:-<none listed — apply failed before leaving unmerged entries>}"
-              echo "EOF"
+              echo "${delim}"
             } >> "$GITHUB_OUTPUT"
             echo "::error::Shadow fix patch does not apply cleanly onto ${UPSTREAM_TARGET}. Conflicting files: ${CONFLICT_FILES:-unknown}. Run sync-code on the shadow repo to converge branches, then re-dispatch this workflow."
             exit 1
