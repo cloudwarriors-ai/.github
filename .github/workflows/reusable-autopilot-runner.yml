@@ -29,6 +29,11 @@ on:
         required: false
         type: number
         default: 60
+      writer_timeout_minutes:
+        description: 'Wall-clock budget (minutes) for the Claude writer job (passed through to the RLM fix engine)'
+        required: false
+        type: number
+        default: 30
       claude_provider:
         description: 'Provider for Claude Code scout/packet/writer stages: openrouter or anthropic'
         required: false
@@ -95,6 +100,7 @@ jobs:
       head: ${{ inputs.head }}
       base: ${{ inputs.base }}
       max_claude_turns: ${{ inputs.max_claude_turns }}
+      writer_timeout_minutes: ${{ inputs.writer_timeout_minutes }}
       claude_provider: ${{ inputs.claude_provider }}
       max_rlm_cost: ${{ inputs.max_rlm_cost }}
       rlm_model: ${{ inputs.rlm_model }}

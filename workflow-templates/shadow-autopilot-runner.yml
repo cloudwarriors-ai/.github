@@ -60,9 +60,60 @@ on:
         required: false
         type: string
         default: ''
+      writer_timeout_minutes:
+        description: 'Wall-clock budget (minutes) for the writer job'
+        required: false
+        type: string
+        default: ''
 
 jobs:
+  # Size the writer budget from the issue before delegating. One static budget
+  # was the repeated failure mode (scopely #1418/#1426: multi-surface issues
+  # killed the writer at the wall clock twice each) — an `AUTOFIX: Large` label
+  # on the issue now buys the writer 100 turns / 90 minutes. Explicit dispatch
+  # inputs still win over the label; repo vars remain the global override.
+  sizing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      issues: read
+    outputs:
+      max_claude_turns: ${{ steps.size.outputs.max_claude_turns }}
+      writer_timeout_minutes: ${{ steps.size.outputs.writer_timeout_minutes }}
+    steps:
+      - name: Compute writer budget
+        id: size
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.inputs.issue_number }}
+          IN_TURNS: ${{ github.event.inputs.max_claude_turns }}
+          IN_TIMEOUT: ${{ github.event.inputs.writer_timeout_minutes }}
+          VAR_TURNS: ${{ vars.AUTOPILOT_MAX_CLAUDE_TURNS }}
+          VAR_TIMEOUT: ${{ vars.AUTOPILOT_WRITER_TIMEOUT_MINUTES }}
+          LARGE_TURNS: ${{ vars.AUTOPILOT_LARGE_TURNS || '100' }}
+          LARGE_TIMEOUT: ${{ vars.AUTOPILOT_LARGE_TIMEOUT_MINUTES || '90' }}
+        run: |
+          LARGE=false
+          # Label read is best-effort: a label-API failure must degrade to the
+          # default budget, never block the dispatch.
+          LABELS=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE}/labels" --jq '.[].name' 2>/dev/null || echo "")
+          if echo "$LABELS" | grep -qx "AUTOFIX: Large"; then
+            LARGE=true
+          fi
+          TURNS="${IN_TURNS:-}"
+          if [ -z "$TURNS" ]; then
+            if [ "$LARGE" = "true" ]; then TURNS="$LARGE_TURNS"; else TURNS="${VAR_TURNS:-60}"; fi
+          fi
+          TIMEOUT="${IN_TIMEOUT:-}"
+          if [ -z "$TIMEOUT" ]; then
+            if [ "$LARGE" = "true" ]; then TIMEOUT="$LARGE_TIMEOUT"; else TIMEOUT="${VAR_TIMEOUT:-30}"; fi
+          fi
+          echo "Sized issue #${ISSUE}: large=${LARGE} turns=${TURNS} timeout=${TIMEOUT}m"
+          echo "max_claude_turns=${TURNS}" >> "$GITHUB_OUTPUT"
+          echo "writer_timeout_minutes=${TIMEOUT}" >> "$GITHUB_OUTPUT"
+
   run:
+    needs: [sizing]
     uses: cloudwarriors-ai/.github/.github/workflows/reusable-autopilot-runner.yml@main
     with:
       issue_number: ${{ github.event.inputs.issue_number }}
@@ -74,6 +125,7 @@ jobs:
       rlm_model:         ${{ github.event.inputs.rlm_model || vars.AUTOPILOT_RLM_MODEL || 'anthropic/claude-sonnet-4.6' }}
       scout_model:       ${{ github.event.inputs.scout_model || vars.AUTOPILOT_SCOUT_MODEL || '' }}
       claude_model:      ${{ github.event.inputs.claude_model || vars.AUTOPILOT_CLAUDE_MODEL || 'anthropic/claude-opus-4.6' }}
-      max_claude_turns:  ${{ fromJSON(github.event.inputs.max_claude_turns || vars.AUTOPILOT_MAX_CLAUDE_TURNS || '60') }}
+      max_claude_turns:  ${{ fromJSON(needs.sizing.outputs.max_claude_turns) }}
+      writer_timeout_minutes: ${{ fromJSON(needs.sizing.outputs.writer_timeout_minutes) }}
       max_rlm_cost:      ${{ fromJSON(github.event.inputs.max_rlm_cost || vars.AUTOPILOT_MAX_RLM_COST || '2') }}
     secrets: inherit
