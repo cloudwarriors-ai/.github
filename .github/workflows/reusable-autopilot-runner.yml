@@ -424,6 +424,23 @@ jobs:
       # the second-most common failure surface in historical runs (SSH/network flake
       # against the preview environment). Each attempt is independently scoped so
       # transient failures recover without taking down the rest of the pipeline.
+      # Join the tailnet before SSHing to the VPS. Its public port 22 is firewalled
+      # (runner-side symptom: "dial tcp <host>:22: i/o timeout" on every attempt,
+      # while the step is continue-on-error, so the job still reports success and
+      # preview_deployed=false silently skips every preview-dependent check).
+      # Same join scopely/deploy-dev.yml uses; SSH_HOST is then the tailnet address.
+      # Skipped when the caller has no TS_OAUTH_* secrets, so callers that reach
+      # their host another way are unaffected.
+      - name: Connect to Tailscale
+        if: env.TS_OAUTH_CLIENT_ID != ''
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3.3.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: 1.98.8
+        env:
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
       - name: Deploy preview to VPS (attempt 1)
         id: deploy-1
         continue-on-error: true
@@ -433,7 +450,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 15m
-          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY
+          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN
           script: |
             cd "$VPS_PATH"
             git fetch origin dev --depth 1
@@ -444,6 +461,8 @@ jobs:
           DEPLOY_HEAD: ${{ steps.shadow-prep.outputs.deploy_head || inputs.head }}
           DEPLOY_ISSUE: ${{ inputs.issue_number }}
           VPS_PATH: ${{ vars.VPS_REPO_PATH }}
+          PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
+          PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
@@ -466,7 +485,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 15m
-          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY
+          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN
           script: |
             cd "$VPS_PATH"
             git fetch origin dev --depth 1
@@ -477,6 +496,8 @@ jobs:
           DEPLOY_HEAD: ${{ steps.shadow-prep.outputs.deploy_head || inputs.head }}
           DEPLOY_ISSUE: ${{ inputs.issue_number }}
           VPS_PATH: ${{ vars.VPS_REPO_PATH }}
+          PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
+          PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
@@ -498,11 +519,17 @@ jobs:
         id: set-url
         env:
           ISSUE_NUM: ${{ inputs.issue_number }}
+          # Repo-scoped preview naming. Defaults reproduce the historical scopely shape
+          # (preview-N.pscx.ai). A second preview-enabled repo MUST set PREVIEW_PREFIX
+          # (e.g. "preview-cube-") or its issue numbers collide with scopely's on the
+          # same Traefik host rules.
+          PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
+          PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
         run: |
-          PREVIEW_URL="https://preview-${ISSUE_NUM}.pscx.ai"
-          # Use flat subdomain (preview-N-api) so the *.pscx.ai wildcard cert covers it;
-          # preview-N.api.pscx.ai is 3rd-level and not covered by *.pscx.ai.
-          BACKEND_URL="https://preview-${ISSUE_NUM}-api.pscx.ai"
+          PREVIEW_URL="https://${PREVIEW_PREFIX}${ISSUE_NUM}.${PREVIEW_DOMAIN}"
+          # Use flat subdomain (<prefix>N-api) so the *.<domain> wildcard cert covers it;
+          # <prefix>N.api.<domain> is 3rd-level and not covered by the wildcard.
+          BACKEND_URL="https://${PREVIEW_PREFIX}${ISSUE_NUM}-api.${PREVIEW_DOMAIN}"
           echo "preview_url=$PREVIEW_URL" >> "$GITHUB_OUTPUT"
           echo "backend_url=$BACKEND_URL" >> "$GITHUB_OUTPUT"
 
@@ -610,6 +637,23 @@ jobs:
     environment: ${{ inputs.base == 'main' && 'production' || 'dev' }}
 
     steps:
+      # Join the tailnet before SSHing to the VPS. Its public port 22 is firewalled
+      # (runner-side symptom: "dial tcp <host>:22: i/o timeout" on every attempt,
+      # while the step is continue-on-error, so the job still reports success and
+      # preview_deployed=false silently skips every preview-dependent check).
+      # Same join scopely/deploy-dev.yml uses; SSH_HOST is then the tailnet address.
+      # Skipped when the caller has no TS_OAUTH_* secrets, so callers that reach
+      # their host another way are unaffected.
+      - name: Connect to Tailscale
+        if: env.TS_OAUTH_CLIENT_ID != ''
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3.3.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: 1.98.8
+        env:
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
       - name: Teardown preview on VPS
         uses: appleboy/ssh-action@v1
         with:
@@ -950,10 +994,12 @@ jobs:
           APP_TESTS_REGRESSIONS: ${{ needs.app-tests.outputs.app_tests_has_regressions || 'n/a' }}
           APP_TESTS_BASELINE_LABEL: ${{ needs.app-tests.outputs.baseline_label || '' }}
           PREVIEW_DEPLOY_ENABLED: ${{ needs.read-config.outputs.preview_deploy }}
+          PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
+          PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
         run: |
           EXISTING_PR=$(gh pr list --head "$ISSUE_HEAD" --base "$ISSUE_BASE" --json number --jq '.[0].number' 2>/dev/null || echo "")
           if [ "$PREVIEW_DEPLOY_ENABLED" = "true" ]; then
-            BACKEND_URL="https://preview-${ISSUE_NUM}-api.pscx.ai"
+            BACKEND_URL="https://${PREVIEW_PREFIX}${ISSUE_NUM}-api.${PREVIEW_DOMAIN}"
           else
             BACKEND_URL="disabled (preview deploy off)"
           fi
