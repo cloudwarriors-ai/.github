@@ -1,0 +1,84 @@
+name: "Reusable Autopilot: Preview Teardown"
+
+# Standalone teardown for a preview the runner deliberately left standing.
+#
+# reusable-autopilot-runner.yml skips its own teardown-preview job when the
+# preview gate holds (opted-in repo + features track + preview actually deployed),
+# so the human can look at the preview before the PR merges. Praxis releases that
+# hold — on a `preview pass`, a `preview fail: ...`, or an expiry — by dispatching
+# a caller workflow in the app repo, which calls this. The steps, action pins and
+# the `git checkout origin/dev -- scripts/ .autopilot/` prelude are copied from the
+# runner's teardown-preview job so a held preview is torn down exactly the way an
+# unheld one is.
+#
+# Secrets come from the caller via `secrets: inherit` — SSH_HOST, SSH_USER,
+# SSH_PRIVATE_KEY, and the optional TS_OAUTH_* pair.
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        description: 'Issue number whose preview should be torn down'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  teardown-preview:
+    name: "Teardown Preview (#${{ inputs.issue_number }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Held previews are a features/dev-track concern, so the dev environment holds
+    # the deploy credentials — same environment the runner's teardown uses for a
+    # non-main base.
+    environment: dev
+
+    steps:
+      # Join the tailnet before SSHing to the VPS. Its public port 22 is firewalled
+      # (runner-side symptom: "dial tcp <host>:22: i/o timeout" on every attempt,
+      # while the step is continue-on-error, so the job still reports success and
+      # preview_deployed=false silently skips every preview-dependent check).
+      # Same join scopely/deploy-dev.yml uses; SSH_HOST is then the tailnet address.
+      # Skipped when the caller has no TS_OAUTH_* secrets, so callers that reach
+      # their host another way are unaffected.
+      - name: Connect to Tailscale
+        if: env.TS_OAUTH_CLIENT_ID != ''
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3.3.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: 1.98.8
+        env:
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+      - name: Teardown preview on VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          envs: DEPLOY_ISSUE,VPS_PATH
+          script: |
+            cd "$VPS_PATH"
+            git fetch origin dev --depth 1
+            git checkout origin/dev -- scripts/ .autopilot/
+            "$VPS_PATH/scripts/preview-teardown.sh" "$DEPLOY_ISSUE"
+        env:
+          DEPLOY_ISSUE: ${{ inputs.issue_number }}
+          VPS_PATH: ${{ vars.VPS_REPO_PATH }}
+
+      - name: Delete shadow preview branch from source repo
+        if: contains(github.repository, '-shadow')
+        env:
+          WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
+        run: |
+          SOURCE_REPO="${{ github.repository }}"
+          SOURCE_REPO="${SOURCE_REPO%-shadow}"
+          PREVIEW_BRANCH="shadow-preview/issue-${ISSUE_NUM}"
+          git push \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/${SOURCE_REPO}.git" \
+            --delete "${PREVIEW_BRANCH}" 2>/dev/null || true
+          echo "Cleaned up ${SOURCE_REPO}:${PREVIEW_BRANCH}"

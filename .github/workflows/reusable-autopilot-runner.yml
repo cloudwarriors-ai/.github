@@ -122,6 +122,10 @@ jobs:
       db_migrate_command: ${{ steps.config.outputs.db_migrate_command }}
       health_endpoint: ${{ steps.config.outputs.health_endpoint }}
       preview_deploy: ${{ steps.config.outputs.preview_deploy }}
+      # Opt-in preview gate: hold a successful FEATURE preview for a human verdict
+      # instead of tearing it down and merging. See teardown-preview for the
+      # canonical hold expression.
+      preview_gate: ${{ steps.config.outputs.preview_gate }}
       auto_merge: ${{ steps.config.outputs.auto_merge }}
       runtime: ${{ steps.config.outputs.runtime }}
       python_version: ${{ steps.config.outputs.python_version }}
@@ -158,6 +162,7 @@ jobs:
             else
               echo "preview_deploy=$CONFIG_PREVIEW_DEPLOY" >> "$GITHUB_OUTPUT"
             fi
+            echo "preview_gate=$(echo "$CONFIG" | jq -r '.previewGate // false')" >> "$GITHUB_OUTPUT"
             echo "auto_merge=$(echo "$CONFIG" | jq -r '.mergeRequirements.autoMerge // false')" >> "$GITHUB_OUTPUT"
             echo "runtime=$(echo "$CONFIG" | jq -r '.runtime // ""')" >> "$GITHUB_OUTPUT"
             echo "python_version=$(echo "$CONFIG" | jq -r '.pythonVersion // "3.11"')" >> "$GITHUB_OUTPUT"
@@ -172,6 +177,7 @@ jobs:
             echo "db_migrate_command=" >> "$GITHUB_OUTPUT"
             echo "health_endpoint=/api/v1/health" >> "$GITHUB_OUTPUT"
             echo "preview_deploy=false" >> "$GITHUB_OUTPUT"
+            echo "preview_gate=false" >> "$GITHUB_OUTPUT"
             echo "auto_merge=false" >> "$GITHUB_OUTPUT"
             echo "runtime=" >> "$GITHUB_OUTPUT"
             echo "python_version=3.11" >> "$GITHUB_OUTPUT"
@@ -628,10 +634,36 @@ jobs:
           fi
 
   # ── Job 7: Teardown preview ────────────────────────────────────────
+  # PREVIEW GATE — the canonical hold expression is:
+  #
+  #     needs.read-config.outputs.preview_gate == 'true' &&
+  #     inputs.track == 'features' &&
+  #     needs.deploy-preview.outputs.preview_deployed == 'true' &&
+  #     needs.validate.outputs.validation_passed == 'true'
+  #
+  # The last clause is what guarantees the hold has something to hand the human.
+  # `validate` runs in parallel with `preflight`, and deploy-preview does not depend
+  # on it, so a preview can come up on a run whose bundle validation failed. Such a
+  # run never reaches finalize's Upsert PR, so without this clause the preview would
+  # be held with no PR to review and no teardown to reclaim it.
+  #
+  # When it holds, the run stops short of teardown and auto-merge and leaves the
+  # preview standing for a human verdict on the issue. The same expression is
+  # duplicated once, as finalize's PREVIEW_HOLD job env — a job-level `if:` has no
+  # `env` context, so the two copies must be changed together. Praxis tears a held
+  # preview down afterwards by dispatching a caller of
+  # .github/workflows/reusable-preview-teardown.yml.
   teardown-preview:
     name: "Teardown Preview (#${{ inputs.issue_number }})"
-    needs: [read-config, deploy-preview, test, validate-api, app-tests]
-    if: always() && needs.deploy-preview.result != 'skipped'
+    needs: [read-config, validate, deploy-preview, test, validate-api, app-tests]
+    if: |
+      always() && needs.deploy-preview.result != 'skipped' &&
+      !(
+        needs.read-config.outputs.preview_gate == 'true' &&
+        inputs.track == 'features' &&
+        needs.deploy-preview.outputs.preview_deployed == 'true' &&
+        needs.validate.outputs.validation_passed == 'true'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: ${{ inputs.base == 'main' && 'production' || 'dev' }}
@@ -927,6 +959,13 @@ jobs:
       pr_ready: ${{ steps.pr.outputs.pr_ready }}
       pr_number: ${{ steps.pr.outputs.pr_number }}
 
+    # PREVIEW GATE hold — the same expression teardown-preview's `if:` carries, kept
+    # in sync by hand (a job-level `if:` cannot read `env`). 'true' only when the
+    # repo opted in, the issue is on the features track, and the preview actually
+    # came up; every step that must not run on a held run tests env.PREVIEW_HOLD.
+    env:
+      PREVIEW_HOLD: ${{ needs.read-config.outputs.preview_gate == 'true' && inputs.track == 'features' && needs.deploy-preview.outputs.preview_deployed == 'true' && needs.validate.outputs.validation_passed == 'true' }}
+
     steps:
       - name: Checkout fix branch
         id: checkout
@@ -1096,8 +1135,11 @@ jobs:
           fi
 
       # --- Auto-merge if configured and all checks pass ---
+      # A held run never merges, whatever mergeRequirements.autoMerge says: the PR
+      # waits on the human preview verdict.
       - name: Auto-merge
         if: |
+          env.PREVIEW_HOLD != 'true' &&
           steps.pr.outputs.pr_ready == 'true' &&
           needs.read-config.outputs.auto_merge == 'true' &&
           needs.validate.outputs.validation_passed == 'true' &&
@@ -1112,9 +1154,144 @@ jobs:
             gh pr merge "$PR" --squash --auto || echo "Auto-merge failed — PR may need reviews"
           fi
 
+      # --- Preview gate: hold for a human verdict instead of finishing ---
+      # Runs only on a held run (see the PREVIEW_HOLD job env above). The PR is
+      # already created and left un-merged; this labels the source issue
+      # PREVIEW: Ready and posts the marker comment Praxis parses.
+      #
+      # Deliberately NOT gated on the downstream verification gates: the preview is
+      # standing and undestroyed either way, so the human and Praxis must be told
+      # about it even when a gate failed. A gate failure still surfaces separately
+      # through "On failure: label Follow-Up Required".
+      - name: "On hold: label Preview Ready"
+        if: |
+          env.PREVIEW_HOLD == 'true' &&
+          steps.pr.outputs.pr_ready == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT }}
+          script: |
+            const prNumber = Number(process.env.PR_NUMBER);
+            const previewUrl = process.env.PREVIEW_URL;
+
+            // The PR lives in the repo that ran the fix (the shadow repo on shadow
+            // runs). Its head sha is what the reviewer and Praxis correlate on.
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner, repo: context.repo.repo, pull_number: prNumber,
+            });
+            const headSha = pr.head.sha;
+            const prUrl = pr.html_url;
+
+            // Where the human verdict is expected. Non-shadow: this repo's issue.
+            // Shadow: the upstream source issue, resolved exactly the way
+            // "Cross-post shadow status to source issue" resolves it below.
+            let targetOwner = context.repo.owner;
+            let targetRepo = context.repo.repo;
+            let targetIssue = Number(process.env.ISSUE_NUM);
+
+            if (context.repo.repo.endsWith('-shadow')) {
+              let config = null;
+              try {
+                const { data } = await github.rest.repos.getContent({
+                  owner: context.repo.owner, repo: context.repo.repo, path: '.shadow/config.json',
+                });
+                config = JSON.parse(Buffer.from(data.content, 'base64').toString());
+              } catch (e) {
+                core.warning(`Cannot read .shadow/config.json: ${e.message}`);
+              }
+              if (config && config.sourceRepo) {
+                const reverseMap = Object.fromEntries(
+                  Object.entries(config.issueMap || {}).map(([src, shad]) => [String(shad), Number(src)])
+                );
+                let sourceIssueNumber = reverseMap[String(targetIssue)];
+                if (!sourceIssueNumber) {
+                  try {
+                    const { data: shadowIssue } = await github.rest.issues.get({
+                      owner: context.repo.owner, repo: context.repo.repo, issue_number: targetIssue,
+                    });
+                    const ms = [...(shadowIssue.body || '').matchAll(/Shadow of \[.*?#(\d+)\]/g)];
+                    if (ms.length) sourceIssueNumber = Number(ms[ms.length - 1][1]);
+                  } catch (e) {
+                    core.warning(`Could not fetch shadow issue body: ${e.message}`);
+                  }
+                }
+                if (sourceIssueNumber) {
+                  [targetOwner, targetRepo] = config.sourceRepo.split('/');
+                  targetIssue = sourceIssueNumber;
+                } else {
+                  core.warning(`No source issue mapping for shadow issue #${targetIssue} — holding on the shadow issue itself`);
+                }
+              }
+            }
+
+            // Held, not in QA: drop In Progress, add PREVIEW: Ready (addLabels
+            // creates the label if the repo does not have it yet), and never add
+            // STATUS: In QA — QA is what the human verdict decides.
+            try {
+              await github.rest.issues.removeLabel({
+                owner: targetOwner, repo: targetRepo,
+                issue_number: targetIssue, name: 'STATUS: In Progress',
+              });
+            } catch {}
+            const heldLabels = await github.rest.issues.listLabelsOnIssue({
+              owner: targetOwner, repo: targetRepo, issue_number: targetIssue,
+            });
+            if (!heldLabels.data.some(l => l.name === 'PREVIEW: Ready')) {
+              await github.rest.issues.addLabels({
+                owner: targetOwner, repo: targetRepo,
+                issue_number: targetIssue, labels: ['PREVIEW: Ready'],
+              });
+            }
+
+            // First line is a machine contract Praxis parses — single spaces, no
+            // trailing text. Keep it byte-exact:
+            //   <!-- praxis:preview url=<preview_url> sha=<40-hex head sha> pr=<pr number> -->
+            const markerPrefix = '<!-- praxis:preview ';
+            const marker = `${markerPrefix}url=${previewUrl} sha=${headSha} pr=${prNumber} -->`;
+            const body = [
+              marker,
+              '### Preview ready for review',
+              '',
+              `**Preview:** ${previewUrl}`,
+              `**Commit:** \`${headSha}\``,
+              `**PR:** ${prUrl}`,
+              '',
+              'This run is held: the preview is still up and the PR is not merged.',
+              'Reply on this issue with exactly one of:',
+              '',
+              '- `preview pass` — the preview is right; release the hold and merge.',
+              '- `preview fail: <why>` — something is wrong; say what, and autopilot takes another pass.',
+              '- `needs decision: <question>` — a product call is needed before this can proceed.',
+            ].join('\n');
+
+            const heldComments = await github.paginate(github.rest.issues.listComments, {
+              owner: targetOwner, repo: targetRepo,
+              issue_number: targetIssue, per_page: 100,
+            });
+            // Matched on the stable marker prefix — url/sha/pr change between runs.
+            const existingHeld = heldComments.find(c => (c.body || '').startsWith(markerPrefix));
+            if (existingHeld) {
+              await github.rest.issues.updateComment({
+                owner: targetOwner, repo: targetRepo,
+                comment_id: existingHeld.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: targetOwner, repo: targetRepo,
+                issue_number: targetIssue, body,
+              });
+            }
+            console.log(`Preview gate held ${targetOwner}/${targetRepo}#${targetIssue} on ${previewUrl}`);
+        env:
+          PREVIEW_URL: ${{ needs.deploy-preview.outputs.preview_url }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
+
       # --- Update issue labels ---
+      # A held run stops before In QA — the preview verdict decides that.
       - name: "On success: label In QA"
         if: |
+          env.PREVIEW_HOLD != 'true' &&
           needs.rlm-fix.result == 'success' &&
           needs.verify-fix-branch.outputs.branch_ready == 'true' &&
           steps.pr.outputs.pr_ready == 'true' &&
