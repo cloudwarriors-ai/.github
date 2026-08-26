@@ -433,7 +433,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 15m
-          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY
+          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN
           script: |
             cd "$VPS_PATH"
             git fetch origin dev --depth 1
@@ -444,6 +444,8 @@ jobs:
           DEPLOY_HEAD: ${{ steps.shadow-prep.outputs.deploy_head || inputs.head }}
           DEPLOY_ISSUE: ${{ inputs.issue_number }}
           VPS_PATH: ${{ vars.VPS_REPO_PATH }}
+          PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
+          PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
@@ -466,7 +468,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 15m
-          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY
+          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN
           script: |
             cd "$VPS_PATH"
             git fetch origin dev --depth 1
@@ -477,6 +479,8 @@ jobs:
           DEPLOY_HEAD: ${{ steps.shadow-prep.outputs.deploy_head || inputs.head }}
           DEPLOY_ISSUE: ${{ inputs.issue_number }}
           VPS_PATH: ${{ vars.VPS_REPO_PATH }}
+          PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
+          PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
@@ -498,11 +502,17 @@ jobs:
         id: set-url
         env:
           ISSUE_NUM: ${{ inputs.issue_number }}
+          # Repo-scoped preview naming. Defaults reproduce the historical scopely shape
+          # (preview-N.pscx.ai). A second preview-enabled repo MUST set PREVIEW_PREFIX
+          # (e.g. "preview-cube-") or its issue numbers collide with scopely's on the
+          # same Traefik host rules.
+          PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
+          PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
         run: |
-          PREVIEW_URL="https://preview-${ISSUE_NUM}.pscx.ai"
-          # Use flat subdomain (preview-N-api) so the *.pscx.ai wildcard cert covers it;
-          # preview-N.api.pscx.ai is 3rd-level and not covered by *.pscx.ai.
-          BACKEND_URL="https://preview-${ISSUE_NUM}-api.pscx.ai"
+          PREVIEW_URL="https://${PREVIEW_PREFIX}${ISSUE_NUM}.${PREVIEW_DOMAIN}"
+          # Use flat subdomain (<prefix>N-api) so the *.<domain> wildcard cert covers it;
+          # <prefix>N.api.<domain> is 3rd-level and not covered by the wildcard.
+          BACKEND_URL="https://${PREVIEW_PREFIX}${ISSUE_NUM}-api.${PREVIEW_DOMAIN}"
           echo "preview_url=$PREVIEW_URL" >> "$GITHUB_OUTPUT"
           echo "backend_url=$BACKEND_URL" >> "$GITHUB_OUTPUT"
 
@@ -950,10 +960,12 @@ jobs:
           APP_TESTS_REGRESSIONS: ${{ needs.app-tests.outputs.app_tests_has_regressions || 'n/a' }}
           APP_TESTS_BASELINE_LABEL: ${{ needs.app-tests.outputs.baseline_label || '' }}
           PREVIEW_DEPLOY_ENABLED: ${{ needs.read-config.outputs.preview_deploy }}
+          PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
+          PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
         run: |
           EXISTING_PR=$(gh pr list --head "$ISSUE_HEAD" --base "$ISSUE_BASE" --json number --jq '.[0].number' 2>/dev/null || echo "")
           if [ "$PREVIEW_DEPLOY_ENABLED" = "true" ]; then
-            BACKEND_URL="https://preview-${ISSUE_NUM}-api.pscx.ai"
+            BACKEND_URL="https://${PREVIEW_PREFIX}${ISSUE_NUM}-api.${PREVIEW_DOMAIN}"
           else
             BACKEND_URL="disabled (preview deploy off)"
           fi
