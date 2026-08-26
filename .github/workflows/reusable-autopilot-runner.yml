@@ -94,7 +94,7 @@ jobs:
   # ── Job 1: Call RLM fix engine ──────────────────────────────────────
   rlm-fix:
     name: "RLM Fix (#${{ inputs.issue_number }})"
-    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@main
+    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@codex/writer-diagnostics
     with:
       issue_number: ${{ fromJSON(inputs.issue_number) }}
       head: ${{ inputs.head }}
