@@ -59,6 +59,7 @@ jobs:
     uses: cloudwarriors-ai/.github/.github/workflows/reusable-autopilot-intake.yml@main
     with:
       issue_number: ${{ github.event.issue.number }}
+      trigger_comment: ${{ github.event.comment.body || '' }}
     secrets: inherit
 
   # ── Code sync ────────────────────────────────────────────────────────────────

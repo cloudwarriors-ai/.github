@@ -1,0 +1,74 @@
+name: Praxis Shadow State CI
+
+on:
+  pull_request:
+    paths:
+      - '.github/actions/praxis-shadow-state/**'
+      - '.github/workflows/praxis-shadow-state-ci.yml'
+      - '.github/workflows/reusable-autopilot-intake.yml'
+      - '.github/workflows/reusable-autopilot-runner.yml'
+      - '.github/workflows/reusable-shadow-sync.yml'
+      - 'workflow-templates/cloudwarriors-shadow-pipeline.yml'
+      - 'workflow-templates/shadow-autopilot-runner.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Praxis shadow-state contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout pull-request head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check JavaScript syntax
+        run: |
+          node --check .github/actions/praxis-shadow-state/contract.cjs
+          node --check .github/actions/praxis-shadow-state/index.cjs
+
+      - name: Run shadow-state contract tests
+        run: node --test .github/actions/praxis-shadow-state/contract.test.cjs .github/actions/praxis-shadow-state/index.test.cjs
+
+      - name: Check pull-request diff hygiene
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -n "$BASE_SHA" ]; then
+            git diff --check "$BASE_SHA...HEAD"
+          else
+            git diff --check HEAD^
+          fi
+
+      - name: Run pinned actionlint
+        env:
+          ACTIONLINT_VERSION: '1.7.12'
+          ACTIONLINT_SHA256: '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8'
+        run: |
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl --fail --location --silent --show-error \
+            --output "$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          echo "${ACTIONLINT_SHA256}  ${archive}" | sha256sum --check -
+          mkdir actionlint
+          tar -xzf "$archive" -C actionlint
+          actionlint/actionlint \
+            -shellcheck= \
+            -pyflakes= \
+            .github/workflows/praxis-shadow-state-ci.yml \
+            .github/workflows/reusable-autopilot-intake.yml \
+            .github/workflows/reusable-autopilot-runner.yml \
+            .github/workflows/reusable-shadow-sync.yml \
+            workflow-templates/cloudwarriors-shadow-pipeline.yml \
+            workflow-templates/shadow-autopilot-runner.yml

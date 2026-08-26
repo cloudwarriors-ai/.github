@@ -1,0 +1,76 @@
+name: "Praxis Shadow State"
+description: "Bind one Praxis resolver attempt to shadow Autofix label evidence"
+
+inputs:
+  mode:
+    description: "bridge, reconcile, resolve, transition, or cleanup"
+    required: true
+  token:
+    description: "GitHub token scoped to the selected mode"
+    required: true
+  repo:
+    description: "owner/repo; defaults to GITHUB_REPOSITORY"
+    required: false
+    default: ""
+  issue-number:
+    description: "Source or shadow issue number"
+    required: false
+    default: ""
+  issue-numbers:
+    description: "Bounded JSON source issue array for reconcile mode"
+    required: false
+    default: "[]"
+  trusted-source-actor-id:
+    description: "Stable numeric GitHub actor id authorized to publish Praxis markers"
+    required: false
+    default: ""
+  trigger-comment:
+    description: "Shadow dispatch comment for resolve mode"
+    required: false
+    default: ""
+  trigger-comment-id:
+    description: "GitHub event comment id for authenticated resolve mode"
+    required: false
+    default: ""
+  binding:
+    description: "Immutable attempt binding for transition mode"
+    required: false
+    default: ""
+  phase:
+    description: "in-progress, in-qa, or follow-up-required"
+    required: false
+    default: ""
+  force-relabel:
+    description: "Remove and re-add the desired status to mint a fresh label event"
+    required: false
+    default: "false"
+  bindings:
+    description: "JSON binding array for cleanup mode"
+    required: false
+    default: "[]"
+
+outputs:
+  applied:
+    description: "Whether the requested status transition was written"
+  attempt_id:
+    description: "Decimal Praxis resolver attempt id"
+  binding:
+    description: "Canonical attempt binding label"
+  bound:
+    description: "Whether the trigger belongs to a Praxis attempt"
+  dispatch_created:
+    description: "Whether bridge mode created a shadow dispatch comment"
+  reason:
+    description: "Stable result reason"
+  shadow_issue:
+    description: "Mapped shadow issue number"
+  shadow_repo:
+    description: "Mapped shadow repository"
+  stale:
+    description: "Whether an immutable binding was superseded"
+  status:
+    description: "Human status label selected by transition mode"
+
+runs:
+  using: "node20"
+  main: "index.cjs"

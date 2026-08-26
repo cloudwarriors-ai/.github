@@ -42,6 +42,8 @@ jobs:
 
     outputs:
       issues_synced: ${{ steps.sync.outputs.issues_synced }}
+      source_repo: ${{ steps.sync.outputs.source_repo }}
+      pending_praxis_batches: ${{ steps.sync.outputs.pending_praxis_batches }}
 
     steps:
       - name: Sync issues
@@ -135,6 +137,9 @@ jobs:
               'AUTOFIX: Ready', 'AUTOPILOT: Skip',
               'STATUS: In Progress', 'STATUS: In QA', 'STATUS: Follow-Up Required',
             ]);
+            // PRAXIS_BINDING_PATTERN: ^praxis\/a([1-9a-z][0-9a-z]{0,12})-([0-9a-f]{24})$
+            const praxisBindingPattern = /^praxis\/a([1-9a-z][0-9a-z]{0,12})-([0-9a-f]{24})$/;
+            const isPraxisMachineLabel = name => name.startsWith('praxis/a');
 
             // ── Maintainer decision carry ────────────────────────────────────
             // Source-issue comments never sync, so a design decision written as a
@@ -217,6 +222,12 @@ jobs:
               // AUTOFIX: Ready is NOT blindly mirrored — it is stamped conditionally
               // below based on AUTOQUEUE_ENABLED and shadow issue state.
               const sourceLabels = src.labels.map(l => l.name);
+              const sourcePraxisLabels = sourceLabels.filter(isPraxisMachineLabel);
+              if (sourcePraxisLabels.length > 0) {
+                throw new Error(
+                  `Source issue ${sourceRepo}#${src.number} contains shadow-only Praxis binding label(s): ${sourcePraxisLabels.join(', ')}`
+                );
+              }
               const sourceHasAutofix = sourceLabels.includes('AUTOFIX: Ready');
               const sourceHasAutopilotSkip = sourceLabels.includes('AUTOPILOT: Skip');
               const filteredSourceLabels = sourceLabels.filter(l => l !== 'AUTOFIX: Ready');
@@ -236,9 +247,22 @@ jobs:
                   issue_number: shadowNumber,
                 });
                 const currentShadowLabels = shadowIssue.labels.map(l => typeof l === 'string' ? l : l.name);
+                const machinePraxisLabels = currentShadowLabels.filter(isPraxisMachineLabel);
+                const malformedPraxisLabels = machinePraxisLabels.filter(name => !praxisBindingPattern.test(name));
+                if (malformedPraxisLabels.length > 0) {
+                  throw new Error(
+                    `Shadow issue ${shadowOwner}/${shadowRepoName}#${shadowNumber} has malformed Praxis binding label(s): ${malformedPraxisLabels.join(', ')}`
+                  );
+                }
+                if (machinePraxisLabels.length > 1) {
+                  throw new Error(
+                    `Shadow issue ${shadowOwner}/${shadowRepoName}#${shadowNumber} has multiple Praxis bindings`
+                  );
+                }
                 labels = [...new Set([
                   ...labels,
                   ...currentShadowLabels.filter(name => preservedShadowLabels.has(name)),
+                  ...(sourceState === 'open' ? machinePraxisLabels : []),
                 ])];
 
                 // Stamp AUTOFIX: Ready when:
@@ -283,6 +307,19 @@ jobs:
                     ...(labelsChanged ? { labels } : {}),
                   });
                   updated++;
+                }
+                if (sourceState !== 'open') {
+                  for (const binding of machinePraxisLabels) {
+                    try {
+                      await github.rest.issues.deleteLabel({
+                        owner: shadowOwner,
+                        repo: shadowRepoName,
+                        name: binding,
+                      });
+                    } catch (error) {
+                      if (error.status !== 404) throw error;
+                    }
+                  }
                 }
               } else {
                 // Create new shadow issue — stamp AUTOFIX: Ready immediately if source has
@@ -353,7 +390,28 @@ jobs:
               content: Buffer.from(JSON.stringify(updatedConfig, null, 2)).toString('base64'),
             });
 
+            const pendingPraxisReports = praxisOwnsDispatch
+              ? await github.paginate(github.rest.search.issuesAndPullRequests, {
+                q: `repo:${sourceRepo} is:issue in:comments "AUTOPILOT_SHADOW_TRIGGER_V1" "Praxis is waiting to complete"`,
+                per_page: 100,
+              })
+              : [];
+            if (pendingPraxisReports.length >= 1000) {
+              throw new Error('pending Praxis report search reached GitHub 1000-result limit');
+            }
+            const pendingPraxisBridges = pendingPraxisReports.map(issue => issue.number);
+            const pendingPraxisBatches = [];
+            for (let offset = 0; offset < pendingPraxisBridges.length; offset += 100) {
+              const issue_numbers =
+                JSON.stringify(pendingPraxisBridges.slice(offset, offset + 100));
+              pendingPraxisBatches.push({ issue_numbers });
+            }
+            if (pendingPraxisBatches.length > 256) {
+              throw new Error('pending Praxis bridge matrix exceeds 256 batches');
+            }
             core.setOutput('issues_synced', totalSynced);
+            core.setOutput('source_repo', sourceRepo);
+            core.setOutput('pending_praxis_batches', JSON.stringify(pendingPraxisBatches));
             console.log(`Sync complete. ${totalSynced} issues total.`);
 
             // ── Summary ──────────────────────────────────────────────────────
@@ -371,3 +429,22 @@ jobs:
               `| Preserved closed shadow issues | ${preservedClosed} |`,
             ].join('\n');
             await core.summary.addRaw(summary).write();
+
+  reconcile:
+    needs: sync
+    if: needs.sync.outputs.pending_praxis_batches != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include: ${{ fromJSON(needs.sync.outputs.pending_praxis_batches) }}
+    steps:
+      - name: Reconcile pending Praxis shadow dispatches
+        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@main
+        with:
+          mode: reconcile
+          token: ${{ secrets.WORKFLOW_PAT }}
+          repo: ${{ needs.sync.outputs.source_repo }}
+          issue-numbers: ${{ matrix.issue_numbers }}
+          trusted-source-actor-id: ${{ vars.PRAXIS_GITHUB_ACTOR_ID }}

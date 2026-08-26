@@ -17,12 +17,17 @@ on:
         required: false
         type: string
         default: ''
+      trigger_comment:
+        description: 'Issue comment that triggered intake, when applicable'
+        required: false
+        type: string
+        default: ''
     secrets:
       WORKFLOW_PAT:
         required: true
 
 concurrency:
-  group: autopilot-intake-${{ inputs.issue_number }}-${{ github.repository }}
+  group: autopilot-issue-${{ inputs.issue_number }}-${{ github.repository }}
   cancel-in-progress: false
 
 permissions:
@@ -53,6 +58,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           SHADOW_ENABLED_VAR: ${{ vars.SHADOW_ENABLED }}
+          PRAXIS_OWNS_DISPATCH_REPOS: ${{ vars.PRAXIS_OWNS_DISPATCH_REPOS }}
         with:
           script: |
             // Repo variable takes priority — no PR needed to flip the switch.
@@ -76,6 +82,12 @@ jobs:
             // A shadow repo's name ends with '-shadow'. If this is already a shadow repo,
             // the guard does not apply — execution is intentional.
             const isShadowRepo = context.repo.repo.endsWith('-shadow');
+            const sourceRepo = `${context.repo.owner}/${context.repo.repo}`;
+            const praxisOwned = (process.env.PRAXIS_OWNS_DISPATCH_REPOS || '')
+              .split(/[\s,]+/)
+              .filter(Boolean)
+              .includes(sourceRepo);
+            core.setOutput('praxis_owned', praxisOwned ? 'true' : 'false');
 
             if (shadowEnabled && !isShadowRepo) {
               core.setOutput('blocked', 'true');
@@ -83,22 +95,85 @@ jobs:
               core.setOutput('blocked', 'false');
             }
 
-      - name: Exit if shadow-enabled source repo
-        if: steps.shadow_guard.outputs.blocked == 'true'
+      - name: Bridge Praxis dispatch to shadow repo
+        id: praxis_bridge
+        if: |
+          steps.shadow_guard.outputs.blocked == 'true' &&
+          steps.shadow_guard.outputs.praxis_owned == 'true'
+        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@main
+        with:
+          mode: bridge
+          token: ${{ secrets.WORKFLOW_PAT }}
+          repo: ${{ github.repository }}
+          issue-number: ${{ inputs.issue_number }}
+          trigger-comment: ${{ inputs.trigger_comment || github.event.comment.body || '' }}
+          trusted-source-actor-id: ${{ vars.PRAXIS_GITHUB_ACTOR_ID }}
+
+      - name: Report shadow bridge result
+        if: |
+          always() &&
+          steps.shadow_guard.outputs.blocked == 'true' &&
+          steps.shadow_guard.outputs.praxis_owned == 'true' &&
+          steps.praxis_bridge.outcome == 'failure'
+        uses: actions/github-script@v7
+        env:
+          BRIDGE_REASON: ${{ steps.praxis_bridge.outputs.reason }}
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT }}
+          script: |
+            const marker = '<!-- AUTOPILOT_SHADOW_GUARD -->';
+            const issueNumber = ${{ inputs.issue_number }};
+            const reason = process.env.BRIDGE_REASON || 'bridge_failed';
+            const { data: actor } = await github.rest.users.getAuthenticated();
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              per_page: 100,
+            });
+            const existing = comments.find(c =>
+              c.user?.id === actor.id && (c.body || '').includes(marker));
+            const provenance = (existing?.body || '').split('\n').find(line =>
+              /^<!-- AUTOPILOT_SHADOW_TRIGGER_V1 (ready|comment) praxis\/a[0-9a-z]+-[0-9a-f]{24} -->$/.test(line));
+            const body = [
+              marker, ...(provenance ? [provenance] : []),
+              '**Praxis shadow handoff is blocked.**', '',
+              `The bridge stopped with \`${reason}\`. Review this workflow run; no source-side Autofix was started.`,
+            ].join('\n');
+            if (existing) {
+              if (existing.body !== body) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existing.id,
+                  body,
+                });
+              }
+            } else {
+              await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  body,
+                });
+            }
+
+      - name: Preserve non-Praxis shadow handoff
+        if: |
+          steps.shadow_guard.outputs.blocked == 'true' &&
+          steps.shadow_guard.outputs.praxis_owned != 'true'
         uses: actions/github-script@v7
         with:
           script: |
             const marker = '<!-- AUTOPILOT_SHADOW_GUARD -->';
             const issueNumber = ${{ inputs.issue_number }};
-
-            const comments = await github.rest.issues.listComments({
+            const comments = await github.paginate(github.rest.issues.listComments, {
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: issueNumber,
-              per_page: 20,
+              per_page: 100,
             });
-
-            if (!comments.data.some(c => c.body.includes(marker))) {
+            if (!comments.some(c => (c.body || '').includes(marker))) {
               const shadowRepoName = `${context.repo.repo}-shadow`;
               const shadowIssuesUrl = `https://github.com/${context.repo.owner}/${shadowRepoName}/issues`;
               await github.rest.issues.createComment({
@@ -109,15 +184,31 @@ jobs:
                   marker,
                   '**Autopilot skipped on source repo:** this repo uses shadow-first execution.',
                   '',
-                  `The fix will run in the [shadow repo](${shadowIssuesUrl}). Label \`AUTOFIX: Ready\` on the corresponding shadow issue to trigger, or enable \`AUTOQUEUE_ENABLED\` on the shadow repo to trigger automatically. Once the shadow run starts, this issue will receive live updates with the shadow issue and workflow run links.`,
+                  `Continue in the [shadow repo](${shadowIssuesUrl}). Praxis routing is not enabled for this source repository.`,
                 ].join('\n'),
               });
             }
-            core.setFailed('Shadow-enabled source repo — execution blocked at source, runs in shadow repo');
+            core.setFailed('Shadow-enabled source repo — execution blocked');
+
+      - name: Resolve Praxis shadow trigger
+        id: praxis_trigger
+        if: steps.shadow_guard.outputs.blocked != 'true'
+        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@main
+        with:
+          mode: resolve
+          token: ${{ secrets.WORKFLOW_PAT }}
+          repo: ${{ github.repository }}
+          issue-number: ${{ inputs.issue_number }}
+          trigger-comment: ${{ inputs.trigger_comment || github.event.comment.body || '' }}
+          trigger-comment-id: ${{ github.event.comment.id || '' }}
+          trusted-source-actor-id: ${{ vars.PRAXIS_GITHUB_ACTOR_ID }}
 
       # --- Kill switch (check for AUTOPILOT: Disabled label) ---
       - name: Check kill switch
         id: killswitch
+        if: |
+          steps.shadow_guard.outputs.blocked != 'true' &&
+          steps.praxis_trigger.outputs.stale != 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -182,7 +273,10 @@ jobs:
             core.setOutput('reason', '');
 
       - name: Exit if disabled
-        if: steps.killswitch.outputs.disabled == 'true'
+        if: |
+          steps.shadow_guard.outputs.blocked != 'true' &&
+          steps.praxis_trigger.outputs.stale != 'true' &&
+          steps.killswitch.outputs.disabled == 'true'
         uses: actions/github-script@v7
         env:
           KILLSWITCH_REASON: ${{ steps.killswitch.outputs.reason }}
@@ -211,7 +305,10 @@ jobs:
 
       # --- Validate issue is open ---
       - name: Validate issue state
-        if: steps.killswitch.outputs.disabled != 'true'
+        if: |
+          steps.shadow_guard.outputs.blocked != 'true' &&
+          steps.praxis_trigger.outputs.stale != 'true' &&
+          steps.killswitch.outputs.disabled != 'true'
         id: validate
         uses: actions/github-script@v7
         with:
@@ -233,19 +330,28 @@ jobs:
 
       # --- Resolve context using shared scripts ---
       - name: Setup Node.js
-        if: steps.killswitch.outputs.disabled != 'true'
+        if: |
+          steps.shadow_guard.outputs.blocked != 'true' &&
+          steps.praxis_trigger.outputs.stale != 'true' &&
+          steps.killswitch.outputs.disabled != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
       - name: Fetch shared scripts
-        if: steps.killswitch.outputs.disabled != 'true'
+        if: |
+          steps.shadow_guard.outputs.blocked != 'true' &&
+          steps.praxis_trigger.outputs.stale != 'true' &&
+          steps.killswitch.outputs.disabled != 'true'
         run: |
           git clone --depth 1 https://x-access-token:${{ secrets.WORKFLOW_PAT }}@github.com/cloudwarriors-ai/.github.git /tmp/org-github
           ls /tmp/org-github/scripts/autopilot/
 
       - name: Resolve issue context
-        if: steps.killswitch.outputs.disabled != 'true'
+        if: |
+          steps.shadow_guard.outputs.blocked != 'true' &&
+          steps.praxis_trigger.outputs.stale != 'true' &&
+          steps.killswitch.outputs.disabled != 'true'
         id: context
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -278,7 +384,11 @@ jobs:
 
       # --- Fail with comment if track unresolvable ---
       - name: Handle unresolvable track
-        if: steps.killswitch.outputs.disabled != 'true' && steps.context.outputs.status == 'error'
+        if: |
+          steps.shadow_guard.outputs.blocked != 'true' &&
+          steps.praxis_trigger.outputs.stale != 'true' &&
+          steps.killswitch.outputs.disabled != 'true' &&
+          steps.context.outputs.status == 'error'
         uses: actions/github-script@v7
         with:
           script: |
@@ -314,38 +424,12 @@ jobs:
             }
             core.setFailed('Track unresolvable');
 
-      # --- Dispatch runner workflow ---
-      - name: Dispatch runner
-        if: |
-          steps.killswitch.outputs.disabled != 'true' &&
-          steps.context.outputs.status == 'resolved'
-        uses: actions/github-script@v7
-        env:
-          ISSUE_TITLE: ${{ steps.validate.outputs.title }}
-          RUNNER_REF: ${{ inputs.runner_workflow_ref || github.ref_name }}
-          ISSUE_TRACK: ${{ steps.context.outputs.track }}
-          ISSUE_BASE: ${{ steps.context.outputs.base }}
-          ISSUE_HEAD: ${{ steps.context.outputs.head }}
-        with:
-          github-token: ${{ secrets.WORKFLOW_PAT }}
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'autopilot-runner.yml',
-              ref: process.env.RUNNER_REF,
-              inputs: {
-                issue_number: String(${{ inputs.issue_number }}),
-                issue_title: (process.env.ISSUE_TITLE || '').slice(0, 200),
-                track: process.env.ISSUE_TRACK,
-                base: process.env.ISSUE_BASE,
-                head: process.env.ISSUE_HEAD,
-              },
-            });
-
-      # --- Set STATUS: In Progress label ---
+      # --- Set STATUS: In Progress for unbound/manual execution ---
       - name: Set STATUS label
         if: |
+          steps.shadow_guard.outputs.blocked != 'true' &&
+          steps.praxis_trigger.outputs.stale != 'true' &&
+          steps.praxis_trigger.outputs.bound != 'true' &&
           steps.killswitch.outputs.disabled != 'true' &&
           steps.context.outputs.status == 'resolved'
         uses: actions/github-script@v7
@@ -377,11 +461,68 @@ jobs:
               });
             }
 
+      - name: Set bound STATUS to In Progress
+        id: praxis_in_progress
+        if: |
+          steps.shadow_guard.outputs.blocked != 'true' &&
+          steps.praxis_trigger.outputs.stale != 'true' &&
+          steps.praxis_trigger.outputs.bound == 'true' &&
+          steps.killswitch.outputs.disabled != 'true' &&
+          steps.context.outputs.status == 'resolved'
+        uses: cloudwarriors-ai/.github/.github/actions/praxis-shadow-state@main
+        with:
+          mode: transition
+          token: ${{ github.token }}
+          repo: ${{ github.repository }}
+          issue-number: ${{ inputs.issue_number }}
+          binding: ${{ steps.praxis_trigger.outputs.binding }}
+          phase: in-progress
+          force-relabel: 'true'
+
+      # --- Dispatch runner workflow after status ownership is established ---
+      - name: Dispatch runner
+        if: |
+          steps.shadow_guard.outputs.blocked != 'true' &&
+          steps.praxis_trigger.outputs.stale != 'true' &&
+          steps.killswitch.outputs.disabled != 'true' &&
+          steps.context.outputs.status == 'resolved' &&
+          (steps.praxis_trigger.outputs.bound != 'true' ||
+           steps.praxis_in_progress.outputs.applied == 'true')
+        uses: actions/github-script@v7
+        env:
+          ISSUE_TITLE: ${{ steps.validate.outputs.title }}
+          RUNNER_REF: ${{ inputs.runner_workflow_ref || github.ref_name }}
+          ISSUE_TRACK: ${{ steps.context.outputs.track }}
+          ISSUE_BASE: ${{ steps.context.outputs.base }}
+          ISSUE_HEAD: ${{ steps.context.outputs.head }}
+          PRAXIS_BINDING: ${{ steps.praxis_trigger.outputs.binding }}
+        with:
+          github-token: ${{ secrets.WORKFLOW_PAT }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'autopilot-runner.yml',
+              ref: process.env.RUNNER_REF,
+              inputs: {
+                issue_number: String(${{ inputs.issue_number }}),
+                issue_title: (process.env.ISSUE_TITLE || '').slice(0, 200),
+                track: process.env.ISSUE_TRACK,
+                base: process.env.ISSUE_BASE,
+                head: process.env.ISSUE_HEAD,
+                praxis_binding: process.env.PRAXIS_BINDING || '',
+              },
+            });
+
       # --- Post progress comment ---
       - name: Post progress comment
         if: |
+          steps.shadow_guard.outputs.blocked != 'true' &&
+          steps.praxis_trigger.outputs.stale != 'true' &&
           steps.killswitch.outputs.disabled != 'true' &&
-          steps.context.outputs.status == 'resolved'
+          steps.context.outputs.status == 'resolved' &&
+          (steps.praxis_trigger.outputs.bound != 'true' ||
+           steps.praxis_in_progress.outputs.applied == 'true')
         uses: actions/github-script@v7
         env:
           ISSUE_TRACK: ${{ steps.context.outputs.track }}
@@ -441,8 +582,12 @@ jobs:
       # post a live-updating status comment with the shadow issue and run links.
       - name: Cross-post shadow run to source issue
         if: |
+          steps.shadow_guard.outputs.blocked != 'true' &&
+          steps.praxis_trigger.outputs.stale != 'true' &&
           steps.killswitch.outputs.disabled != 'true' &&
-          steps.context.outputs.status == 'resolved'
+          steps.context.outputs.status == 'resolved' &&
+          (steps.praxis_trigger.outputs.bound != 'true' ||
+           steps.praxis_in_progress.outputs.applied == 'true')
         continue-on-error: true
         uses: actions/github-script@v7
         with:
