@@ -424,6 +424,23 @@ jobs:
       # the second-most common failure surface in historical runs (SSH/network flake
       # against the preview environment). Each attempt is independently scoped so
       # transient failures recover without taking down the rest of the pipeline.
+      # Join the tailnet before SSHing to the VPS. Its public port 22 is firewalled
+      # (runner-side symptom: "dial tcp <host>:22: i/o timeout" on every attempt,
+      # while the step is continue-on-error, so the job still reports success and
+      # preview_deployed=false silently skips every preview-dependent check).
+      # Same join scopely/deploy-dev.yml uses; SSH_HOST is then the tailnet address.
+      # Skipped when the caller has no TS_OAUTH_* secrets, so callers that reach
+      # their host another way are unaffected.
+      - name: Connect to Tailscale
+        if: env.TS_OAUTH_CLIENT_ID != ''
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3.3.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: 1.98.8
+        env:
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
       - name: Deploy preview to VPS (attempt 1)
         id: deploy-1
         continue-on-error: true
@@ -620,6 +637,23 @@ jobs:
     environment: ${{ inputs.base == 'main' && 'production' || 'dev' }}
 
     steps:
+      # Join the tailnet before SSHing to the VPS. Its public port 22 is firewalled
+      # (runner-side symptom: "dial tcp <host>:22: i/o timeout" on every attempt,
+      # while the step is continue-on-error, so the job still reports success and
+      # preview_deployed=false silently skips every preview-dependent check).
+      # Same join scopely/deploy-dev.yml uses; SSH_HOST is then the tailnet address.
+      # Skipped when the caller has no TS_OAUTH_* secrets, so callers that reach
+      # their host another way are unaffected.
+      - name: Connect to Tailscale
+        if: env.TS_OAUTH_CLIENT_ID != ''
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3.3.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: 1.98.8
+        env:
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
       - name: Teardown preview on VPS
         uses: appleboy/ssh-action@v1
         with:
