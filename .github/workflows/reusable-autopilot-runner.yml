@@ -456,7 +456,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 15m
-          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN,PREVIEW_MODE,PREVIEW_PORT_BASE,PREVIEW_TS_HOST
+          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN,PREVIEW_MODE,PREVIEW_PORT_BASE,PREVIEW_TS_HOST,PREVIEW_CAPACITY
           script: |
             cd "$VPS_PATH"
             git fetch origin dev --depth 1
@@ -471,6 +471,9 @@ jobs:
           PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
           PREVIEW_MODE: ${{ vars.PREVIEW_MODE || '' }}
           PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '' }}
+          # Capacity belt for the repo's preview-deploy.sh: the host refuses to stand up more
+          # previews than this (Praxis is the authority; this catches manual/out-of-band runs).
+          PREVIEW_CAPACITY: ${{ vars.PREVIEW_CAPACITY || '' }}
           PREVIEW_TS_HOST: ${{ vars.PREVIEW_TS_HOST || '' }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
@@ -494,7 +497,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 15m
-          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN,PREVIEW_MODE,PREVIEW_PORT_BASE,PREVIEW_TS_HOST
+          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN,PREVIEW_MODE,PREVIEW_PORT_BASE,PREVIEW_TS_HOST,PREVIEW_CAPACITY
           script: |
             cd "$VPS_PATH"
             git fetch origin dev --depth 1
@@ -509,6 +512,9 @@ jobs:
           PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
           PREVIEW_MODE: ${{ vars.PREVIEW_MODE || '' }}
           PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '' }}
+          # Capacity belt for the repo's preview-deploy.sh: the host refuses to stand up more
+          # previews than this (Praxis is the authority; this catches manual/out-of-band runs).
+          PREVIEW_CAPACITY: ${{ vars.PREVIEW_CAPACITY || '' }}
           PREVIEW_TS_HOST: ${{ vars.PREVIEW_TS_HOST || '' }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
