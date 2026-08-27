@@ -1195,7 +1195,21 @@ jobs:
           github-token: ${{ secrets.WORKFLOW_PAT }}
           script: |
             const prNumber = Number(process.env.PR_NUMBER);
-            const previewUrl = process.env.PREVIEW_URL;
+            const issueNum = String(process.env.ISSUE_NUM || '');
+            const port = Number(process.env.PREVIEW_PORT_BASE || '20000') + Number(issueNum || 0);
+            const renderUrl = (tpl) => tpl
+              .replaceAll('{prefix}', process.env.PREVIEW_PREFIX || 'preview-')
+              .replaceAll('{issue}', issueNum)
+              .replaceAll('{domain}', process.env.PREVIEW_DOMAIN || 'pscx.ai')
+              .replaceAll('{port_api}', String(port + 1000))
+              .replaceAll('{port}', String(port));
+            const previewUrl = process.env.PREVIEW_URL_TEMPLATE
+              ? renderUrl(process.env.PREVIEW_URL_TEMPLATE)
+              : (process.env.PREVIEW_URL || `https://${process.env.PREVIEW_PREFIX || 'preview-'}${issueNum}.${process.env.PREVIEW_DOMAIN || 'pscx.ai'}`);
+            if (!/^https:\/\/\S+$/.test(previewUrl)) {
+              core.setFailed(`hold: could not derive a preview URL (template='${process.env.PREVIEW_URL_TEMPLATE}', output='${process.env.PREVIEW_URL}')`);
+              return;
+            }
 
             // The PR lives in the repo that ran the fix (the shadow repo on shadow
             // runs). Its head sha is what the reviewer and Praxis correlate on.
@@ -1307,6 +1321,15 @@ jobs:
             console.log(`Preview gate held ${targetOwner}/${targetRepo}#${targetIssue} on ${previewUrl}`);
         env:
           PREVIEW_URL: ${{ needs.deploy-preview.outputs.preview_url }}
+          # Actions drops any job OUTPUT that contains a secret value. The tailnet hostname
+          # noob-root.tailcc6c5f.ts.net contains SSH_USER ("root"), so preview_url above
+          # arrives EMPTY on such hosts. Re-render from the template here instead (env is
+          # not scrubbed); the deploy job already verified the same URL was reachable.
+          PREVIEW_URL_TEMPLATE: ${{ vars.PREVIEW_URL_TEMPLATE || '' }}
+          PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
+          PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
+          PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '20000' }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           ISSUE_NUM: ${{ inputs.issue_number }}
 
