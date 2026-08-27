@@ -456,7 +456,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 15m
-          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN
+          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN,PREVIEW_MODE,PREVIEW_PORT_BASE,PREVIEW_TS_HOST
           script: |
             cd "$VPS_PATH"
             git fetch origin dev --depth 1
@@ -469,6 +469,9 @@ jobs:
           VPS_PATH: ${{ vars.VPS_REPO_PATH }}
           PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
           PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
+          PREVIEW_MODE: ${{ vars.PREVIEW_MODE || '' }}
+          PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '' }}
+          PREVIEW_TS_HOST: ${{ vars.PREVIEW_TS_HOST || '' }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
@@ -491,7 +494,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 15m
-          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN
+          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN,PREVIEW_MODE,PREVIEW_PORT_BASE,PREVIEW_TS_HOST
           script: |
             cd "$VPS_PATH"
             git fetch origin dev --depth 1
@@ -504,6 +507,9 @@ jobs:
           VPS_PATH: ${{ vars.VPS_REPO_PATH }}
           PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
           PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
+          PREVIEW_MODE: ${{ vars.PREVIEW_MODE || '' }}
+          PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '' }}
+          PREVIEW_TS_HOST: ${{ vars.PREVIEW_TS_HOST || '' }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
@@ -531,11 +537,21 @@ jobs:
           # same Traefik host rules.
           PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
           PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
+          # Optional templates for non-DNS exposure (tailnet-only previews via `tailscale serve`):
+          #   PREVIEW_URL_TEMPLATE=https://noob-root.tailcc6c5f.ts.net:{port}
+          #   PREVIEW_BACKEND_URL_TEMPLATE=https://noob-root.tailcc6c5f.ts.net:{port_api}
+          # Placeholders: {prefix} {issue} {domain} {port}=PREVIEW_PORT_BASE+issue {port_api}=port+1000.
+          # Unset → the historical DNS shape below, byte for byte.
+          PREVIEW_URL_TEMPLATE: ${{ vars.PREVIEW_URL_TEMPLATE || '' }}
+          PREVIEW_BACKEND_URL_TEMPLATE: ${{ vars.PREVIEW_BACKEND_URL_TEMPLATE || '' }}
+          PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '20000' }}
         run: |
-          PREVIEW_URL="https://${PREVIEW_PREFIX}${ISSUE_NUM}.${PREVIEW_DOMAIN}"
+          PORT=$((PREVIEW_PORT_BASE + ISSUE_NUM)); PORT_API=$((PORT + 1000))
+          render() { echo "$1" | sed -e "s/{prefix}/${PREVIEW_PREFIX}/g" -e "s/{issue}/${ISSUE_NUM}/g" -e "s/{domain}/${PREVIEW_DOMAIN}/g" -e "s/{port_api}/${PORT_API}/g" -e "s/{port}/${PORT}/g"; }
+          if [ -n "$PREVIEW_URL_TEMPLATE" ]; then PREVIEW_URL="$(render "$PREVIEW_URL_TEMPLATE")"; else PREVIEW_URL="https://${PREVIEW_PREFIX}${ISSUE_NUM}.${PREVIEW_DOMAIN}"; fi
           # Use flat subdomain (<prefix>N-api) so the *.<domain> wildcard cert covers it;
           # <prefix>N.api.<domain> is 3rd-level and not covered by the wildcard.
-          BACKEND_URL="https://${PREVIEW_PREFIX}${ISSUE_NUM}-api.${PREVIEW_DOMAIN}"
+          if [ -n "$PREVIEW_BACKEND_URL_TEMPLATE" ]; then BACKEND_URL="$(render "$PREVIEW_BACKEND_URL_TEMPLATE")"; else BACKEND_URL="https://${PREVIEW_PREFIX}${ISSUE_NUM}-api.${PREVIEW_DOMAIN}"; fi
           echo "preview_url=$PREVIEW_URL" >> "$GITHUB_OUTPUT"
           echo "backend_url=$BACKEND_URL" >> "$GITHUB_OUTPUT"
 
@@ -1035,10 +1051,17 @@ jobs:
           PREVIEW_DEPLOY_ENABLED: ${{ needs.read-config.outputs.preview_deploy }}
           PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
           PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
+          PREVIEW_BACKEND_URL_TEMPLATE: ${{ vars.PREVIEW_BACKEND_URL_TEMPLATE || '' }}
+          PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '20000' }}
         run: |
           EXISTING_PR=$(gh pr list --head "$ISSUE_HEAD" --base "$ISSUE_BASE" --json number --jq '.[0].number' 2>/dev/null || echo "")
           if [ "$PREVIEW_DEPLOY_ENABLED" = "true" ]; then
-            BACKEND_URL="https://${PREVIEW_PREFIX}${ISSUE_NUM}-api.${PREVIEW_DOMAIN}"
+            PORT=$((PREVIEW_PORT_BASE + ISSUE_NUM)); PORT_API=$((PORT + 1000))
+            if [ -n "$PREVIEW_BACKEND_URL_TEMPLATE" ]; then
+              BACKEND_URL="$(echo "$PREVIEW_BACKEND_URL_TEMPLATE" | sed -e "s/{prefix}/${PREVIEW_PREFIX}/g" -e "s/{issue}/${ISSUE_NUM}/g" -e "s/{domain}/${PREVIEW_DOMAIN}/g" -e "s/{port_api}/${PORT_API}/g" -e "s/{port}/${PORT}/g")"
+            else
+              BACKEND_URL="https://${PREVIEW_PREFIX}${ISSUE_NUM}-api.${PREVIEW_DOMAIN}"
+            fi
           else
             BACKEND_URL="disabled (preview deploy off)"
           fi
