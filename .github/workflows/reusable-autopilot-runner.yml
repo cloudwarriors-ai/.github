@@ -1305,13 +1305,14 @@ jobs:
               owner: targetOwner, repo: targetRepo,
               issue_number: targetIssue, per_page: 100,
             });
-            // Matched on the stable marker prefix — url/sha/pr change between runs.
-            const existingHeld = heldComments.find(c => (c.body || '').startsWith(markerPrefix));
-            if (existingHeld) {
-              await github.rest.issues.updateComment({
-                owner: targetOwner, repo: targetRepo,
-                comment_id: existingHeld.id, body,
-              });
+            // Praxis ingests issue_comment `created` only — an edited comment never reaches
+            // it (observed live: cube #56 needed a reality sweep to open the gate after a
+            // re-run). So a changed marker is always a NEW comment; Praxis trusts the newest
+            // marker. An unchanged marker (same url/sha/pr, e.g. a manual re-run of the same
+            // head) posts nothing — a duplicate would only re-fire the gate.
+            const existingHeld = heldComments.filter(c => (c.body || '').startsWith(markerPrefix)).pop();
+            if (existingHeld && (existingHeld.body || '').split('\n')[0].trim() === marker) {
+              console.log(`Preview marker unchanged (comment ${existingHeld.id}); nothing to post`);
             } else {
               await github.rest.issues.createComment({
                 owner: targetOwner, repo: targetRepo,
