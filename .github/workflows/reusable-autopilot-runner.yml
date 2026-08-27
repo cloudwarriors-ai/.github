@@ -1329,7 +1329,6 @@ jobs:
           PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
           PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
           PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '20000' }}
-          ISSUE_NUM: ${{ inputs.issue_number }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           ISSUE_NUM: ${{ inputs.issue_number }}
 
