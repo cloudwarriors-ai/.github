@@ -4,7 +4,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / ".github/workflows/reusable-autopilot-runner.yml"
-UPSTREAM_SHA = "66ec7079895f5c3aca9a7182dd2f76a6201b2f8d"
+UPSTREAM_SHA = "e5fe345623f53cb07e15afdba661a9e77bbcdd0f"
 
 
 class RunnerFailurePathContractTests(unittest.TestCase):
