@@ -131,6 +131,7 @@ jobs:
       app_test_command: ${{ steps.config.outputs.app_test_command }}
       db_migrate_command: ${{ steps.config.outputs.db_migrate_command }}
       health_endpoint: ${{ steps.config.outputs.health_endpoint }}
+      frontend_health_endpoint: ${{ steps.config.outputs.frontend_health_endpoint }}
       preview_deploy: ${{ steps.config.outputs.preview_deploy }}
       # Opt-in preview gate: hold a successful FEATURE preview for a human verdict
       # instead of tearing it down and merging. Finalize owns the hold decision.
@@ -165,6 +166,7 @@ jobs:
             echo "APP_TEST_EOF" >> "$GITHUB_OUTPUT"
             echo "db_migrate_command=$(echo "$CONFIG" | jq -r '.dbMigrateCommand // ""')" >> "$GITHUB_OUTPUT"
             echo "health_endpoint=$(echo "$CONFIG" | jq -r '.healthEndpoint // "/api/v1/health"')" >> "$GITHUB_OUTPUT"
+            echo "frontend_health_endpoint=$(echo "$CONFIG" | jq -r '.frontendHealthEndpoint // "/"')" >> "$GITHUB_OUTPUT"
             CONFIG_PREVIEW_DEPLOY=$(echo "$CONFIG" | jq -r '.previewDeploy // false')
             if [ "${DEPLOY_ENABLED,,}" = "false" ]; then
               echo "DEPLOY_ENABLED=false -- overriding previewDeploy to false"
@@ -187,6 +189,7 @@ jobs:
             echo "app_test_command=" >> "$GITHUB_OUTPUT"
             echo "db_migrate_command=" >> "$GITHUB_OUTPUT"
             echo "health_endpoint=/api/v1/health" >> "$GITHUB_OUTPUT"
+            echo "frontend_health_endpoint=/" >> "$GITHUB_OUTPUT"
             echo "preview_deploy=false" >> "$GITHUB_OUTPUT"
             echo "preview_gate=false" >> "$GITHUB_OUTPUT"
             echo "validation_state=active" >> "$GITHUB_OUTPUT"
@@ -536,17 +539,6 @@ jobs:
           PII_ENCRYPTION_KEY: ${{ secrets.PII_ENCRYPTION_KEY }}
           PII_HMAC_KEY: ${{ secrets.PII_HMAC_KEY }}
 
-      - name: Set preview deploy status
-        id: deploy-status
-        run: |
-          if [ "${{ steps.deploy-1.outcome }}" = "success" ] || [ "${{ steps.deploy-2.outcome }}" = "success" ]; then
-            echo "preview_deployed=true" >> "$GITHUB_OUTPUT"
-            echo "Preview deploy succeeded."
-          else
-            echo "preview_deployed=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Preview deploy failed after 2 attempts — downstream preview-dependent checks (API Validate, App Tests) will be skipped. PR creation will still proceed if bundle validation and preflight passed."
-          fi
-
       - name: Set preview URL output
         id: set-url
         env:
@@ -576,8 +568,11 @@ jobs:
           echo "backend_url=$BACKEND_URL" >> "$GITHUB_OUTPUT"
 
       - name: Verify preview is reachable
+        id: verify-preview
+        if: steps.deploy-1.outcome == 'success' || steps.deploy-2.outcome == 'success'
+        continue-on-error: true
         run: |
-          HEALTH="${{ needs.read-config.outputs.health_endpoint }}"
+          HEALTH="${{ needs.read-config.outputs.frontend_health_endpoint }}"
           URL="${{ steps.set-url.outputs.preview_url }}${HEALTH}"
           for i in $(seq 1 30); do
             if curl -sf --max-time 5 "$URL" > /dev/null 2>&1; then
@@ -586,21 +581,39 @@ jobs:
             fi
             sleep 10
           done
-          echo "WARNING: Preview not reachable at $URL"
+          echo "ERROR: Preview not reachable at $URL" >&2
+          exit 1
 
       - name: Verify backend URL is reachable
+        id: verify-backend
+        if: steps.deploy-1.outcome == 'success' || steps.deploy-2.outcome == 'success'
+        continue-on-error: true
         run: |
           HEALTH="${{ needs.read-config.outputs.health_endpoint }}"
           URL="${{ steps.set-url.outputs.backend_url }}${HEALTH}"
           for i in $(seq 1 18); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$URL" 2>/dev/null || echo "000")
-            if [ "$STATUS" != "000" ]; then
-              echo "Backend reachable at $URL (HTTP $STATUS)"
+            if curl -sf --max-time 5 "$URL" > /dev/null 2>&1; then
+              echo "Backend reachable at $URL"
               exit 0
             fi
             sleep 10
           done
-          echo "::warning::Backend not reachable at $URL after 180s — Sentinel may fail"
+          echo "ERROR: Backend not reachable at $URL after 180s" >&2
+          exit 1
+
+      - name: Set preview deploy status
+        id: deploy-status
+        if: always()
+        run: |
+          if { [ "${{ steps.deploy-1.outcome }}" = "success" ] || [ "${{ steps.deploy-2.outcome }}" = "success" ]; } \
+            && [ "${{ steps.verify-preview.outcome }}" = "success" ] \
+            && [ "${{ steps.verify-backend.outcome }}" = "success" ]; then
+            echo "preview_deployed=true" >> "$GITHUB_OUTPUT"
+            echo "Preview deploy and both reachability checks succeeded."
+          else
+            echo "preview_deployed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Preview deploy or reachability failed — downstream preview-dependent checks will be skipped and release readiness will fail closed."
+          fi
 
   # ── Job 6: Run tests ───────────────────────────────────────────────
   test:

@@ -21,6 +21,19 @@ on:
         description: 'Issue number whose preview should be torn down'
         required: true
         type: string
+    secrets:
+      WORKFLOW_PAT:
+        required: false
+      SSH_HOST:
+        required: true
+      SSH_USER:
+        required: true
+      SSH_PRIVATE_KEY:
+        required: true
+      TS_OAUTH_CLIENT_ID:
+        required: false
+      TS_OAUTH_SECRET:
+        required: false
 
 permissions:
   contents: read
