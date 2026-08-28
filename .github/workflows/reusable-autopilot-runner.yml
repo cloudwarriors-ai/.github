@@ -130,7 +130,6 @@ jobs:
       scout_model: ${{ inputs.scout_model }}
       claude_model: ${{ inputs.claude_model }}
     secrets:
-      workflow_PAT: ${{ secrets.WORKFLOW_PAT }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 
