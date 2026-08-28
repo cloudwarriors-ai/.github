@@ -59,6 +59,11 @@ on:
         required: false
         type: string
         default: 'anthropic/claude-opus-4.6'
+      shared_tools_ref:
+        description: 'Immutable cloudwarriors-ai/.github commit used for shared scripts'
+        required: false
+        type: string
+        default: '3e21e600cc5ba2a8ddf80903a76fd2dbb6f04283'
     secrets:
       WORKFLOW_PAT:
         required: true
@@ -89,22 +94,30 @@ on:
         required: false
       TS_OAUTH_SECRET:
         required: false
+      PREVIEW_MARKER_TOKEN:
+        # A separate, issues-only identity for the authoritative Praxis marker.
+        # It is never exposed to a job that executes feature-controlled code.
+        required: true
 
 concurrency:
   group: autopilot-runner-${{ inputs.issue_number }}-${{ github.repository }}
   cancel-in-progress: false
 
 permissions:
-  contents: write
-  pull-requests: write
-  issues: write
+  contents: read
+  pull-requests: read
+  issues: read
   actions: read
 
 jobs:
   # ── Job 1: Call RLM fix engine ──────────────────────────────────────
   rlm-fix:
     name: "RLM Fix (#${{ inputs.issue_number }})"
-    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@22482e8033d1f9b23b2fea9d8bd22c7ad6d30b5f
     with:
       issue_number: ${{ fromJSON(inputs.issue_number) }}
       head: ${{ inputs.head }}
@@ -116,7 +129,10 @@ jobs:
       rlm_model: ${{ inputs.rlm_model }}
       scout_model: ${{ inputs.scout_model }}
       claude_model: ${{ inputs.claude_model }}
-    secrets: inherit
+    secrets:
+      workflow_PAT: ${{ secrets.WORKFLOW_PAT }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 
   # ── Job 2: Read project config ──────────────────────────────────────
   read-config:
@@ -306,6 +322,7 @@ jobs:
         with:
           ref: ${{ needs.verify-fix-branch.outputs.head_sha }}
           token: ${{ secrets.WORKFLOW_PAT }}
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -313,8 +330,18 @@ jobs:
           node-version: '22'
 
       - name: Fetch shared scripts
+        env:
+          WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
+          SHARED_TOOLS_REF: ${{ inputs.shared_tools_ref }}
         run: |
-          git clone --depth 1 https://x-access-token:${{ secrets.WORKFLOW_PAT }}@github.com/cloudwarriors-ai/.github.git /tmp/org-github
+          set -euo pipefail
+          git init /tmp/org-github
+          git -C /tmp/org-github remote add origin \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/cloudwarriors-ai/.github.git"
+          git -C /tmp/org-github fetch --depth 1 origin "$SHARED_TOOLS_REF"
+          git -C /tmp/org-github remote set-url origin https://github.com/cloudwarriors-ai/.github.git
+          git -C /tmp/org-github checkout --detach FETCH_HEAD
+          test "$(git -C /tmp/org-github rev-parse HEAD)" = "$SHARED_TOOLS_REF"
 
       - name: Validate issue bundle
         id: validate
@@ -357,6 +384,7 @@ jobs:
         with:
           ref: ${{ needs.verify-fix-branch.outputs.head_sha }}
           token: ${{ secrets.WORKFLOW_PAT }}
+          persist-credentials: false
 
       - name: Run project preflight
         id: preflight
@@ -486,14 +514,13 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 25m
-          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_SHA,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN,PREVIEW_MODE,PREVIEW_PORT_BASE,PREVIEW_TS_HOST,PREVIEW_CAPACITY
+          envs: DEPLOY_HEAD,DEPLOY_SHA,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN,PREVIEW_MODE,PREVIEW_PORT_BASE,PREVIEW_TS_HOST,PREVIEW_CAPACITY
           script: |
             cd "$VPS_PATH"
             git fetch origin dev --depth 1
             git checkout origin/dev -- scripts/ .autopilot/
             "$VPS_PATH/scripts/preview-deploy.sh" "$DEPLOY_HEAD" "$DEPLOY_ISSUE" "$DEPLOY_SHA"
         env:
-          GITHUB_TOKEN: ${{ secrets.WORKFLOW_PAT }}
           DEPLOY_HEAD: ${{ steps.shadow-prep.outputs.deploy_head || inputs.head }}
           DEPLOY_SHA: ${{ steps.shadow-prep.outputs.deploy_sha || needs.verify-fix-branch.outputs.head_sha }}
           DEPLOY_ISSUE: ${{ inputs.issue_number }}
@@ -528,14 +555,13 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 25m
-          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_SHA,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN,PREVIEW_MODE,PREVIEW_PORT_BASE,PREVIEW_TS_HOST,PREVIEW_CAPACITY
+          envs: DEPLOY_HEAD,DEPLOY_SHA,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN,PREVIEW_MODE,PREVIEW_PORT_BASE,PREVIEW_TS_HOST,PREVIEW_CAPACITY
           script: |
             cd "$VPS_PATH"
             git fetch origin dev --depth 1
             git checkout origin/dev -- scripts/ .autopilot/
             "$VPS_PATH/scripts/preview-deploy.sh" "$DEPLOY_HEAD" "$DEPLOY_ISSUE" "$DEPLOY_SHA"
         env:
-          GITHUB_TOKEN: ${{ secrets.WORKFLOW_PAT }}
           DEPLOY_HEAD: ${{ steps.shadow-prep.outputs.deploy_head || inputs.head }}
           DEPLOY_SHA: ${{ steps.shadow-prep.outputs.deploy_sha || needs.verify-fix-branch.outputs.head_sha }}
           DEPLOY_ISSUE: ${{ inputs.issue_number }}
@@ -651,6 +677,28 @@ jobs:
         with:
           ref: ${{ needs.verify-fix-branch.outputs.head_sha }}
           token: ${{ secrets.WORKFLOW_PAT }}
+          persist-credentials: false
+
+      - name: Resolve preview URL inside this job
+        if: needs.deploy-preview.outputs.preview_deployed == 'true'
+        env:
+          OUTPUT_PREVIEW_URL: ${{ needs.deploy-preview.outputs.preview_url || '' }}
+          PREVIEW_URL_TEMPLATE: ${{ vars.PREVIEW_URL_TEMPLATE || '' }}
+          PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
+          PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
+          PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '20000' }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          port=$((PREVIEW_PORT_BASE + ISSUE_NUM)); port_api=$((port + 1000))
+          render() { echo "$1" | sed -e "s/{prefix}/${PREVIEW_PREFIX}/g" -e "s/{issue}/${ISSUE_NUM}/g" -e "s/{domain}/${PREVIEW_DOMAIN}/g" -e "s/{port_api}/${port_api}/g" -e "s/{port}/${port}/g"; }
+          url="$OUTPUT_PREVIEW_URL"
+          if [ -n "$PREVIEW_URL_TEMPLATE" ]; then url="$(render "$PREVIEW_URL_TEMPLATE")"; fi
+          if ! [[ "$url" =~ ^https://[^[:space:]]+$ ]]; then
+            echo "ERROR: could not derive the preview URL inside the test job" >&2
+            exit 1
+          fi
+          echo "TEST_BASE_URL=$url" >> "$GITHUB_ENV"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -683,8 +731,6 @@ jobs:
       - name: Run test command
         id: test
         continue-on-error: true
-        env:
-          TEST_BASE_URL: ${{ needs.deploy-preview.outputs.preview_url || '' }}
         run: ${{ needs.read-config.outputs.test_command }}
 
       - name: Determine result
@@ -772,13 +818,18 @@ jobs:
     if: |
       always() && !cancelled() &&
       needs.deploy-preview.result == 'success' &&
-      needs.deploy-preview.outputs.preview_deployed == 'true' &&
-      needs.deploy-preview.outputs.backend_url != ''
+      needs.deploy-preview.outputs.preview_deployed == 'true'
     uses: ./.github/workflows/reusable-validate.yml
     with:
       preview_url:   ${{ needs.deploy-preview.outputs.backend_url }}
+      preview_url_template: ${{ vars.PREVIEW_BACKEND_URL_TEMPLATE || '' }}
+      preview_prefix: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
+      preview_domain: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
+      preview_port_base: ${{ vars.PREVIEW_PORT_BASE || '20000' }}
       target_env:    ${{ inputs.base == 'main' && 'production' || 'dev' }}
       issue_number:  ${{ inputs.issue_number }}
+      sentinel_ref:  '4cc5e066f48898a5e1b5a72c021981cc794630f3'
+      shared_tools_ref: ${{ inputs.shared_tools_ref }}
       # For shadow runs, the validation manifest lives in the source repo, not the shadow.
       # source_repo is empty on non-shadow runs, so manifest_repo defaults to caller repo.
       manifest_repo: ${{ needs.deploy-preview.outputs.source_repo }}
@@ -816,10 +867,46 @@ jobs:
         with:
           ref: ${{ needs.verify-fix-branch.outputs.head_sha }}
           token: ${{ secrets.WORKFLOW_PAT }}
+          persist-credentials: false
 
       - name: Fetch shared scripts
+        env:
+          WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
+          SHARED_TOOLS_REF: ${{ inputs.shared_tools_ref }}
         run: |
-          git clone --depth 1 https://x-access-token:${{ secrets.WORKFLOW_PAT }}@github.com/cloudwarriors-ai/.github.git /tmp/org-github
+          set -euo pipefail
+          git init /tmp/org-github
+          git -C /tmp/org-github remote add origin \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/cloudwarriors-ai/.github.git"
+          git -C /tmp/org-github fetch --depth 1 origin "$SHARED_TOOLS_REF"
+          git -C /tmp/org-github remote set-url origin https://github.com/cloudwarriors-ai/.github.git
+          git -C /tmp/org-github checkout --detach FETCH_HEAD
+          test "$(git -C /tmp/org-github rev-parse HEAD)" = "$SHARED_TOOLS_REF"
+
+      - name: Resolve preview URLs inside this job
+        env:
+          OUTPUT_PREVIEW_URL: ${{ needs.deploy-preview.outputs.preview_url || '' }}
+          OUTPUT_BACKEND_URL: ${{ needs.deploy-preview.outputs.backend_url || '' }}
+          PREVIEW_URL_TEMPLATE: ${{ vars.PREVIEW_URL_TEMPLATE || '' }}
+          PREVIEW_BACKEND_URL_TEMPLATE: ${{ vars.PREVIEW_BACKEND_URL_TEMPLATE || '' }}
+          PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
+          PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
+          PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '20000' }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          port=$((PREVIEW_PORT_BASE + ISSUE_NUM)); port_api=$((port + 1000))
+          render() { echo "$1" | sed -e "s/{prefix}/${PREVIEW_PREFIX}/g" -e "s/{issue}/${ISSUE_NUM}/g" -e "s/{domain}/${PREVIEW_DOMAIN}/g" -e "s/{port_api}/${port_api}/g" -e "s/{port}/${port}/g"; }
+          preview_url="$OUTPUT_PREVIEW_URL"
+          backend_url="$OUTPUT_BACKEND_URL"
+          if [ -n "$PREVIEW_URL_TEMPLATE" ]; then preview_url="$(render "$PREVIEW_URL_TEMPLATE")"; fi
+          if [ -n "$PREVIEW_BACKEND_URL_TEMPLATE" ]; then backend_url="$(render "$PREVIEW_BACKEND_URL_TEMPLATE")"; fi
+          if ! [[ "$preview_url" =~ ^https://[^[:space:]]+$ ]] || ! [[ "$backend_url" =~ ^https://[^[:space:]]+$ ]]; then
+            echo "ERROR: could not derive both preview URLs inside the app-test job" >&2
+            exit 1
+          fi
+          echo "TEST_BASE_URL=$preview_url" >> "$GITHUB_ENV"
+          echo "SENTINEL_BASE_URL=$backend_url" >> "$GITHUB_ENV"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -858,8 +945,6 @@ jobs:
         id: app-tests
         continue-on-error: true
         env:
-          SENTINEL_BASE_URL: ${{ needs.deploy-preview.outputs.backend_url }}
-          TEST_BASE_URL: ${{ needs.deploy-preview.outputs.preview_url }}
           E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
           TEST_USER_EMAIL: ${{ secrets.E2E_EMAIL }}
@@ -888,7 +973,7 @@ jobs:
         if: always()
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           STATIC_BASELINE="tests/sentinel/baseline.json"
           DAILY_SNAPSHOT="tests/sentinel/daily-snapshot.json"
@@ -955,33 +1040,6 @@ jobs:
           echo "has_regressions=${HAS_REGS}" >> "$GITHUB_OUTPUT"
           echo "baseline_label=${BASELINE_LABEL}" >> "$GITHUB_OUTPUT"
 
-      - name: Post or update regression comment
-        if: always() && steps.compare.outputs.has_regressions == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
-          HEAD_REF: ${{ inputs.head }}
-          BASE_REF: ${{ inputs.base }}
-        run: |
-          set -euo pipefail
-          PR=$(gh pr list --head "$HEAD_REF" --base "$BASE_REF" --json number --jq '.[0].number' 2>/dev/null || echo "")
-          if [ -z "$PR" ]; then
-            echo "::notice::No open PR for head=$HEAD_REF base=$BASE_REF — regression comment skipped"
-            exit 0
-          fi
-          MARKER="<!-- app-tests-regression-report -->"
-          REPORT_BODY="$(cat /tmp/app-tests/regression-report.md)"
-          BODY="$(printf '%s\n%s' "$MARKER" "$REPORT_BODY")"
-          EXISTING=$(gh api "repos/$GITHUB_REPOSITORY/issues/${PR}/comments" --paginate \
-            --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" | head -n 1 || echo "")
-          if [ -n "$EXISTING" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING" \
-              -f body="$BODY" >/dev/null
-            echo "Updated existing regression comment (id=$EXISTING)"
-          else
-            gh pr comment "$PR" --body "$BODY"
-            echo "Posted new regression comment on PR #$PR"
-          fi
-
       - name: Upload app-test artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -1001,6 +1059,10 @@ jobs:
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
     outputs:
       pr_ready: ${{ steps.pr.outputs.pr_ready }}
       pr_number: ${{ steps.pr.outputs.pr_number }}
@@ -1023,6 +1085,7 @@ jobs:
           ref: ${{ needs.verify-fix-branch.outputs.head_sha }}
           token: ${{ secrets.WORKFLOW_PAT }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -1031,8 +1094,18 @@ jobs:
 
       - name: Fetch shared scripts
         if: needs.verify-fix-branch.outputs.already_fixed != 'true'
+        env:
+          WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
+          SHARED_TOOLS_REF: ${{ inputs.shared_tools_ref }}
         run: |
-          git clone --depth 1 https://x-access-token:${{ secrets.WORKFLOW_PAT }}@github.com/cloudwarriors-ai/.github.git /tmp/org-github
+          set -euo pipefail
+          git init /tmp/org-github
+          git -C /tmp/org-github remote add origin \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/cloudwarriors-ai/.github.git"
+          git -C /tmp/org-github fetch --depth 1 origin "$SHARED_TOOLS_REF"
+          git -C /tmp/org-github remote set-url origin https://github.com/cloudwarriors-ai/.github.git
+          git -C /tmp/org-github checkout --detach FETCH_HEAD
+          test "$(git -C /tmp/org-github rev-parse HEAD)" = "$SHARED_TOOLS_REF"
 
       - name: Build matrix
         if: always() && needs.verify-fix-branch.outputs.already_fixed != 'true'
@@ -1224,7 +1297,7 @@ jobs:
           steps.pr.outputs.pr_ready == 'true'
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.WORKFLOW_PAT }}
+          github-token: ${{ secrets.PREVIEW_MARKER_TOKEN }}
           script: |
             const prNumber = Number(process.env.PR_NUMBER);
             const issueNum = String(process.env.ISSUE_NUM || '');
@@ -1338,24 +1411,13 @@ jobs:
               '- `needs decision: <question>` — a product call is needed before this can proceed.',
             ].join('\n');
 
-            const heldComments = await github.paginate(github.rest.issues.listComments, {
+            // A marker is attempt-current evidence, not a revision singleton. A fresh run must
+            // always create a fresh comment even when url/sha/pr are unchanged; Praxis's attempt
+            // boundary and same-attempt idempotency decide whether that event advances state.
+            await github.rest.issues.createComment({
               owner: targetOwner, repo: targetRepo,
-              issue_number: targetIssue, per_page: 100,
+              issue_number: targetIssue, body,
             });
-            // Praxis ingests issue_comment `created` only — an edited comment never reaches
-            // it (observed live: cube #56 needed a reality sweep to open the gate after a
-            // re-run). So a changed marker is always a NEW comment; Praxis trusts the newest
-            // marker. An unchanged marker (same url/sha/pr, e.g. a manual re-run of the same
-            // head) posts nothing — a duplicate would only re-fire the gate.
-            const existingHeld = heldComments.filter(c => (c.body || '').startsWith(markerPrefix)).pop();
-            if (existingHeld && (existingHeld.body || '').split('\n')[0].trim() === marker) {
-              console.log(`Preview marker unchanged (comment ${existingHeld.id}); nothing to post`);
-            } else {
-              await github.rest.issues.createComment({
-                owner: targetOwner, repo: targetRepo,
-                issue_number: targetIssue, body,
-              });
-            }
             console.log(`Preview gate held ${targetOwner}/${targetRepo}#${targetIssue} on ${previewUrl}`);
         env:
           PREVIEW_URL: ${{ needs.deploy-preview.outputs.preview_url }}

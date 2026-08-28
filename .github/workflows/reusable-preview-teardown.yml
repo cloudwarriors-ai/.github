@@ -21,6 +21,10 @@ on:
         description: 'Issue number whose preview should be torn down'
         required: true
         type: string
+      correlation_id:
+        description: 'Stable Praxis outbox correlation carried into the run title and audit trail'
+        required: true
+        type: string
     secrets:
       WORKFLOW_PAT:
         required: false
@@ -40,7 +44,7 @@ permissions:
 
 jobs:
   teardown-preview:
-    name: "Teardown Preview (#${{ inputs.issue_number }})"
+    name: "Teardown Preview (#${{ inputs.issue_number }}, ${{ inputs.correlation_id }})"
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # Held previews are a features/dev-track concern, so the dev environment holds
