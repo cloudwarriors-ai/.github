@@ -819,6 +819,14 @@ jobs:
       always() && !cancelled() &&
       needs.deploy-preview.result == 'success' &&
       needs.deploy-preview.outputs.preview_deployed == 'true'
+    # The workflow default is deliberately read-only. This nested workflow
+    # updates the Sentinel verdict comment, so grant its calling job only the
+    # two write capabilities it requests; every other inherited job stays
+    # within the read-only default above.
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
     uses: ./.github/workflows/reusable-validate.yml
     with:
       preview_url:   ${{ needs.deploy-preview.outputs.backend_url }}
