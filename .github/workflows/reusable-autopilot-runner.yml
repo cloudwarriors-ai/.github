@@ -118,7 +118,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
-    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@3517b75d4eb9f400a5f940f90c6621b58fec334b
+    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@365a4f0bc33b399a5a08308b64e06238536785b9
     with:
       issue_number: ${{ fromJSON(inputs.issue_number) }}
       head: ${{ inputs.head }}
@@ -236,7 +236,9 @@ jobs:
         id: branch
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.WORKFLOW_PAT }}
+          # This step only reads a branch and compares commits. The ambient
+          # read-only token is sufficient and remains available on failure paths.
+          github-token: ${{ github.token }}
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
