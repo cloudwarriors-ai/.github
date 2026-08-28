@@ -95,7 +95,8 @@ on:
       TS_OAUTH_SECRET:
         required: false
       PREVIEW_MARKER_TOKEN:
-        # A separate, issues-only identity for the authoritative Praxis marker.
+        # A separate identity with Issues write plus Pull Requests/Contents read
+        # for the authoritative Praxis marker and shadow-source resolution.
         # It is never exposed to a job that executes feature-controlled code.
         required: true
 
@@ -117,7 +118,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
-    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@22482e8033d1f9b23b2fea9d8bd22c7ad6d30b5f
+    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@3517b75d4eb9f400a5f940f90c6621b58fec334b
     with:
       issue_number: ${{ fromJSON(inputs.issue_number) }}
       head: ${{ inputs.head }}
