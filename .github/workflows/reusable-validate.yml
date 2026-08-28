@@ -113,8 +113,8 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
-  issues: write
+  # The verdict comment uses the explicitly supplied WORKFLOW_PAT. Keep the
+  # ambient GITHUB_TOKEN read-only so nested callers do not need write grants.
 
 jobs:
   validate:
