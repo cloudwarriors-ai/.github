@@ -79,6 +79,16 @@ on:
         required: false
       PII_HMAC_KEY:
         required: false
+      SSH_HOST:
+        required: false
+      SSH_USER:
+        required: false
+      SSH_PRIVATE_KEY:
+        required: false
+      TS_OAUTH_CLIENT_ID:
+        required: false
+      TS_OAUTH_SECRET:
+        required: false
 
 concurrency:
   group: autopilot-runner-${{ inputs.issue_number }}-${{ github.repository }}
@@ -123,9 +133,9 @@ jobs:
       health_endpoint: ${{ steps.config.outputs.health_endpoint }}
       preview_deploy: ${{ steps.config.outputs.preview_deploy }}
       # Opt-in preview gate: hold a successful FEATURE preview for a human verdict
-      # instead of tearing it down and merging. See teardown-preview for the
-      # canonical hold expression.
+      # instead of tearing it down and merging. Finalize owns the hold decision.
       preview_gate: ${{ steps.config.outputs.preview_gate }}
+      validation_state: ${{ steps.config.outputs.validation_state }}
       auto_merge: ${{ steps.config.outputs.auto_merge }}
       runtime: ${{ steps.config.outputs.runtime }}
       python_version: ${{ steps.config.outputs.python_version }}
@@ -163,6 +173,7 @@ jobs:
               echo "preview_deploy=$CONFIG_PREVIEW_DEPLOY" >> "$GITHUB_OUTPUT"
             fi
             echo "preview_gate=$(echo "$CONFIG" | jq -r '.previewGate // false')" >> "$GITHUB_OUTPUT"
+            echo "validation_state=$(echo "$CONFIG" | jq -r '.validation.state // "active"')" >> "$GITHUB_OUTPUT"
             echo "auto_merge=$(echo "$CONFIG" | jq -r '.mergeRequirements.autoMerge // false')" >> "$GITHUB_OUTPUT"
             echo "runtime=$(echo "$CONFIG" | jq -r '.runtime // ""')" >> "$GITHUB_OUTPUT"
             echo "python_version=$(echo "$CONFIG" | jq -r '.pythonVersion // "3.11"')" >> "$GITHUB_OUTPUT"
@@ -178,6 +189,7 @@ jobs:
             echo "health_endpoint=/api/v1/health" >> "$GITHUB_OUTPUT"
             echo "preview_deploy=false" >> "$GITHUB_OUTPUT"
             echo "preview_gate=false" >> "$GITHUB_OUTPUT"
+            echo "validation_state=active" >> "$GITHUB_OUTPUT"
             echo "auto_merge=false" >> "$GITHUB_OUTPUT"
             echo "runtime=" >> "$GITHUB_OUTPUT"
             echo "python_version=3.11" >> "$GITHUB_OUTPUT"
@@ -357,7 +369,9 @@ jobs:
       vars.DEPLOY_ENABLED != 'false' &&
       needs.preflight.outputs.preflight_passed == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Capacity-four deploys have taken just over 13 minutes in live measurements.
+    # Leave room for one 25-minute attempt, backoff, and a second attempt.
+    timeout-minutes: 55
     environment: ${{ inputs.base == 'main' && 'production' || 'dev' }}
 
     outputs:
@@ -455,7 +469,7 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          command_timeout: 15m
+          command_timeout: 25m
           envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN,PREVIEW_MODE,PREVIEW_PORT_BASE,PREVIEW_TS_HOST,PREVIEW_CAPACITY
           script: |
             cd "$VPS_PATH"
@@ -496,7 +510,7 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          command_timeout: 15m
+          command_timeout: 25m
           envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN,PREVIEW_MODE,PREVIEW_PORT_BASE,PREVIEW_TS_HOST,PREVIEW_CAPACITY
           script: |
             cd "$VPS_PATH"
@@ -656,36 +670,17 @@ jobs:
           fi
 
   # ── Job 7: Teardown preview ────────────────────────────────────────
-  # PREVIEW GATE — the canonical hold expression is:
-  #
-  #     needs.read-config.outputs.preview_gate == 'true' &&
-  #     inputs.track == 'features' &&
-  #     needs.deploy-preview.outputs.preview_deployed == 'true' &&
-  #     needs.validate.outputs.validation_passed == 'true'
-  #
-  # The last clause is what guarantees the hold has something to hand the human.
-  # `validate` runs in parallel with `preflight`, and deploy-preview does not depend
-  # on it, so a preview can come up on a run whose bundle validation failed. Such a
-  # run never reaches finalize's Upsert PR, so without this clause the preview would
-  # be held with no PR to review and no teardown to reclaim it.
-  #
-  # When it holds, the run stops short of teardown and auto-merge and leaves the
-  # preview standing for a human verdict on the issue. The same expression is
-  # duplicated once, as finalize's PREVIEW_HOLD job env — a job-level `if:` has no
-  # `env` context, so the two copies must be changed together. Praxis tears a held
-  # preview down afterwards by dispatching a caller of
-  # .github/workflows/reusable-preview-teardown.yml.
+  # Finalize owns the preview-hold decision and reports true only after it has a
+  # reviewable PR and successfully posts the Praxis marker. Every other path tears
+  # down, including a failed marker step, so no preview can be stranded without a
+  # release mechanism. Praxis later reclaims a held preview through
+  # reusable-preview-teardown.yml.
   teardown-preview:
     name: "Teardown Preview (#${{ inputs.issue_number }})"
-    needs: [read-config, validate, deploy-preview, test, validate-api, app-tests]
+    needs: [read-config, deploy-preview, finalize]
     if: |
       always() && needs.deploy-preview.result != 'skipped' &&
-      !(
-        needs.read-config.outputs.preview_gate == 'true' &&
-        inputs.track == 'features' &&
-        needs.deploy-preview.outputs.preview_deployed == 'true' &&
-        needs.validate.outputs.validation_passed == 'true'
-      )
+      needs.finalize.outputs.preview_held != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: ${{ inputs.base == 'main' && 'production' || 'dev' }}
@@ -765,9 +760,9 @@ jobs:
       E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
       E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
 
-  # ── Job 7.6: Application test suite (advisory) ─────────────────────
+  # ── Job 7.6: Application test suite ────────────────────────────
   # Runs the app's own E2E/integration tests against the live preview.
-  # Advisory — a failure surfaces in the PR body but does not gate merge.
+  # Failures remain observable in the PR body and block release readiness.
   # Opt-in per app via `.autopilot/config.json → appTestCommand`.
   app-tests:
     name: "App Tests (#${{ inputs.issue_number }})"
@@ -880,7 +875,7 @@ jobs:
           # checkout — fix branches don't inherit it, and sync would delete it).
           BASELINE_FILE=""
           BASELINE_LABEL=""
-          SHADOW_REPO="${{ inputs.shadow_repo != '' && inputs.shadow_repo || github.repository }}"
+          SHADOW_REPO="$GITHUB_REPOSITORY"
           SNAPSHOT_CONTENT=$(gh api "repos/${SHADOW_REPO}/contents/tests/sentinel/daily-snapshot.json?ref=dev" \
             --jq '.content' 2>/dev/null || echo "")
           if [ -n "$SNAPSHOT_CONTENT" ]; then
@@ -980,13 +975,14 @@ jobs:
     outputs:
       pr_ready: ${{ steps.pr.outputs.pr_ready }}
       pr_number: ${{ steps.pr.outputs.pr_number }}
+      preview_held: ${{ steps.hold-status.outputs.preview_held }}
 
-    # PREVIEW GATE hold — the same expression teardown-preview's `if:` carries, kept
-    # in sync by hand (a job-level `if:` cannot read `env`). 'true' only when the
-    # repo opted in, the issue is on the features track, and the preview actually
-    # came up; every step that must not run on a held run tests env.PREVIEW_HOLD.
+    # RELEASE_READY is the one merge/readiness contract for gated and ungated work.
+    # PREVIEW_CANDIDATE adds the explicit feature-track preview opt-in. The held
+    # output is not true until the marker step itself succeeds.
     env:
-      PREVIEW_HOLD: ${{ needs.read-config.outputs.preview_gate == 'true' && inputs.track == 'features' && needs.deploy-preview.outputs.preview_deployed == 'true' && needs.validate.outputs.validation_passed == 'true' }}
+      RELEASE_READY: ${{ needs.rlm-fix.result == 'success' && needs.verify-fix-branch.outputs.branch_ready == 'true' && needs.validate.outputs.validation_passed == 'true' && needs.preflight.outputs.preflight_passed == 'true' && (needs.read-config.outputs.preview_deploy != 'true' || needs.deploy-preview.outputs.preview_deployed == 'true') && (needs.read-config.outputs.test_command == '' || needs.test.outputs.tests_passed == 'true') && (needs.read-config.outputs.preview_deploy != 'true' || (needs.validate-api.result == 'success' && needs.validate-api.outputs.api_validation_passed == 'true' && (needs.read-config.outputs.validation_state != 'active' || needs.validate-api.outputs.verdict != 'skipped'))) && (needs.read-config.outputs.app_test_command == '' || (needs.app-tests.result == 'success' && needs.app-tests.outputs.app_tests_passed == 'true' && needs.app-tests.outputs.app_tests_has_regressions != 'true')) }}
+      PREVIEW_CANDIDATE: ${{ needs.read-config.outputs.preview_gate == 'true' && inputs.track == 'features' && needs.rlm-fix.result == 'success' && needs.verify-fix-branch.outputs.branch_ready == 'true' && needs.validate.outputs.validation_passed == 'true' && needs.preflight.outputs.preflight_passed == 'true' && needs.deploy-preview.outputs.preview_deployed == 'true' && (needs.read-config.outputs.test_command == '' || needs.test.outputs.tests_passed == 'true') && needs.validate-api.result == 'success' && needs.validate-api.outputs.api_validation_passed == 'true' && (needs.read-config.outputs.validation_state != 'active' || needs.validate-api.outputs.verdict != 'skipped') && (needs.read-config.outputs.app_test_command == '' || (needs.app-tests.result == 'success' && needs.app-tests.outputs.app_tests_passed == 'true' && needs.app-tests.outputs.app_tests_has_regressions != 'true')) }}
 
     steps:
       - name: Checkout fix branch
@@ -1164,17 +1160,14 @@ jobs:
           fi
 
       # --- Auto-merge if configured and all checks pass ---
-      # A held run never merges, whatever mergeRequirements.autoMerge says: the PR
-      # waits on the human preview verdict.
+      # A preview candidate never merges here: it waits on the human verdict. Every
+      # other auto-merge still has to satisfy the complete release contract above.
       - name: Auto-merge
         if: |
-          env.PREVIEW_HOLD != 'true' &&
+          env.PREVIEW_CANDIDATE != 'true' &&
+          env.RELEASE_READY == 'true' &&
           steps.pr.outputs.pr_ready == 'true' &&
-          needs.read-config.outputs.auto_merge == 'true' &&
-          needs.validate.outputs.validation_passed == 'true' &&
-          needs.preflight.outputs.preflight_passed == 'true' &&
-          (needs.test.outputs.tests_passed == 'true' || needs.test.outputs.tests_passed == '') &&
-          (needs.validate-api.result == 'skipped' || needs.validate-api.outputs.api_validation_passed == 'true')
+          needs.read-config.outputs.auto_merge == 'true'
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
         run: |
@@ -1184,17 +1177,13 @@ jobs:
           fi
 
       # --- Preview gate: hold for a human verdict instead of finishing ---
-      # Runs only on a held run (see the PREVIEW_HOLD job env above). The PR is
+      # Runs only for a fully release-ready preview candidate. The PR is
       # already created and left un-merged; this labels the source issue
       # PREVIEW: Ready and posts the marker comment Praxis parses.
-      #
-      # Deliberately NOT gated on the downstream verification gates: the preview is
-      # standing and undestroyed either way, so the human and Praxis must be told
-      # about it even when a gate failed. A gate failure still surfaces separately
-      # through "On failure: label Follow-Up Required".
       - name: "On hold: label Preview Ready"
+        id: preview-hold
         if: |
-          env.PREVIEW_HOLD == 'true' &&
+          env.PREVIEW_CANDIDATE == 'true' &&
           steps.pr.outputs.pr_ready == 'true'
         uses: actions/github-script@v7
         with:
@@ -1343,13 +1332,10 @@ jobs:
       # A held run stops before In QA — the preview verdict decides that.
       - name: "On success: label In QA"
         if: |
-          env.PREVIEW_HOLD != 'true' &&
-          needs.rlm-fix.result == 'success' &&
-          needs.verify-fix-branch.outputs.branch_ready == 'true' &&
+          env.PREVIEW_CANDIDATE != 'true' &&
+          env.RELEASE_READY == 'true' &&
           steps.pr.outputs.pr_ready == 'true' &&
-          needs.validate.outputs.validation_passed == 'true' &&
-          needs.preflight.outputs.preflight_passed == 'true' &&
-          (needs.validate-api.result == 'skipped' || needs.validate-api.outputs.api_validation_passed == 'true')
+          needs.verify-fix-branch.outputs.already_fixed != 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -1458,12 +1444,9 @@ jobs:
         if: |
           needs.verify-fix-branch.outputs.already_fixed != 'true' &&
           (
-            needs.rlm-fix.result != 'success' ||
-            needs.verify-fix-branch.outputs.branch_ready != 'true' ||
+            env.RELEASE_READY != 'true' ||
             steps.pr.outputs.pr_ready != 'true' ||
-            needs.validate.outputs.validation_passed != 'true' ||
-            needs.preflight.outputs.preflight_passed != 'true' ||
-            (needs.validate-api.result != 'skipped' && needs.validate-api.outputs.api_validation_passed != 'true')
+            (env.PREVIEW_CANDIDATE == 'true' && steps.preview-hold.outcome != 'success')
           )
         env:
           RLM_RESULT: ${{ needs.rlm-fix.result }}
@@ -1703,16 +1686,27 @@ jobs:
             }
             console.log(`Cross-posted shadow ${prNumber ? 'PR' : 'follow-up'} to ${config.sourceRepo}#${sourceIssueNumber}`);
 
-      - name: Fail workflow when no reviewable PR was produced
+      # This is the only output teardown consumes. A candidate is held only when the
+      # human-facing label/comment contract was actually delivered successfully.
+      - name: Record preview hold status
+        id: hold-status
+        if: always()
+        env:
+          HOLD_STEP_OUTCOME: ${{ steps.preview-hold.outcome }}
+        run: |
+          if [ "$PREVIEW_CANDIDATE" = "true" ] && [ "$HOLD_STEP_OUTCOME" = "success" ]; then
+            echo "preview_held=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "preview_held=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fail workflow when no reviewable, gate-passing PR was produced
         if: |
           needs.verify-fix-branch.outputs.already_fixed != 'true' &&
           (
-            needs.rlm-fix.result != 'success' ||
-            needs.verify-fix-branch.outputs.branch_ready != 'true' ||
+            env.RELEASE_READY != 'true' ||
             steps.pr.outputs.pr_ready != 'true' ||
-            needs.validate.outputs.validation_passed != 'true' ||
-            needs.preflight.outputs.preflight_passed != 'true' ||
-            (needs.validate-api.result != 'skipped' && needs.validate-api.outputs.api_validation_passed != 'true')
+            (env.PREVIEW_CANDIDATE == 'true' && steps.preview-hold.outcome != 'success')
           )
         run: |
           echo "Autopilot did not produce a reviewable, gate-passing PR."
@@ -1720,4 +1714,7 @@ jobs:
           echo "Fix branch ready: ${{ needs.verify-fix-branch.outputs.branch_ready || 'false' }}"
           echo "Fix branch failure: ${{ needs.verify-fix-branch.outputs.failure_reason || '' }}"
           echo "PR ready: ${{ steps.pr.outputs.pr_ready || 'false' }}"
+          echo "Release ready: $RELEASE_READY"
+          echo "Preview candidate: $PREVIEW_CANDIDATE"
+          echo "Preview hold step: ${{ steps.preview-hold.outcome }}"
           exit 1

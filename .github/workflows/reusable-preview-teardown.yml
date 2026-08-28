@@ -3,7 +3,7 @@ name: "Reusable Autopilot: Preview Teardown"
 # Standalone teardown for a preview the runner deliberately left standing.
 #
 # reusable-autopilot-runner.yml skips its own teardown-preview job when the
-# preview gate holds (opted-in repo + features track + preview actually deployed),
+# preview gate holds (opted-in feature track + every release gate passed),
 # so the human can look at the preview before the PR merges. Praxis releases that
 # hold — on a `preview pass`, a `preview fail: ...`, or an expiry — by dispatching
 # a caller workflow in the app repo, which calls this. The steps, action pins and
