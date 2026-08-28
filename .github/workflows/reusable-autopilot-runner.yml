@@ -210,6 +210,7 @@ jobs:
     outputs:
       branch_ready: ${{ steps.branch.outputs.branch_ready }}
       has_changes: ${{ steps.branch.outputs.has_changes }}
+      head_sha: ${{ steps.branch.outputs.head_sha }}
       failure_reason: ${{ steps.branch.outputs.failure_reason }}
       already_fixed: ${{ steps.branch.outputs.already_fixed }}
       already_fixed_reason: ${{ steps.branch.outputs.already_fixed_reason }}
@@ -228,6 +229,7 @@ jobs:
 
             core.setOutput('branch_ready', 'false');
             core.setOutput('has_changes', 'false');
+            core.setOutput('head_sha', '');
             core.setOutput('failure_reason', '');
             core.setOutput('already_fixed', 'false');
             core.setOutput('already_fixed_reason', '');
@@ -246,8 +248,14 @@ jobs:
               return;
             }
 
+            let headSha = '';
             try {
-              await github.rest.repos.getBranch({ owner, repo, branch: head });
+              const { data: branch } = await github.rest.repos.getBranch({ owner, repo, branch: head });
+              headSha = branch.commit.sha;
+              if (!/^[0-9a-f]{40}$/.test(headSha)) {
+                core.setFailed(`Branch ${head} resolved to an invalid commit SHA`);
+                return;
+              }
             } catch (error) {
               if (error.status === 404) {
                 core.setOutput('failure_reason', 'missing-head-branch');
@@ -261,7 +269,7 @@ jobs:
               const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({
                 owner,
                 repo,
-                basehead: `${base}...${head}`,
+                basehead: `${base}...${headSha}`,
               });
               const changedFiles = comparison.files || [];
               if (changedFiles.length === 0) {
@@ -271,7 +279,8 @@ jobs:
               }
               core.setOutput('branch_ready', 'true');
               core.setOutput('has_changes', 'true');
-              core.notice(`Fix branch ${head} is ready with ${changedFiles.length} changed file(s)`);
+              core.setOutput('head_sha', headSha);
+              core.notice(`Fix branch ${head} is frozen at ${headSha} with ${changedFiles.length} changed file(s)`);
             } catch (error) {
               core.setOutput('failure_reason', 'compare-failed');
               core.setFailed(`Could not compare ${base}...${head}: ${error.message}`);
@@ -295,7 +304,7 @@ jobs:
         id: checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.head }}
+          ref: ${{ needs.verify-fix-branch.outputs.head_sha }}
           token: ${{ secrets.WORKFLOW_PAT }}
 
       - name: Setup Node.js
@@ -346,7 +355,7 @@ jobs:
         id: checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.head }}
+          ref: ${{ needs.verify-fix-branch.outputs.head_sha }}
           token: ${{ secrets.WORKFLOW_PAT }}
 
       - name: Run project preflight
@@ -380,6 +389,7 @@ jobs:
     outputs:
       preview_url:  ${{ steps.set-url.outputs.preview_url }}
       backend_url:  ${{ steps.set-url.outputs.backend_url }}
+      deployed_sha: ${{ steps.shadow-prep.outputs.deploy_sha || needs.verify-fix-branch.outputs.head_sha }}
       # source_repo is set on shadow runs; empty on non-shadow. Used by validate-api
       # to point Sentinel's manifest checkout at the source repo (which has validation.json).
       source_repo:  ${{ steps.shadow-prep.outputs.source_repo }}
@@ -402,7 +412,7 @@ jobs:
           WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
           ISSUE_NUM: ${{ inputs.issue_number }}
           BASE_BRANCH: ${{ inputs.base }}
-          HEAD_BRANCH: ${{ inputs.head }}
+          VERIFIED_HEAD_SHA: ${{ needs.verify-fix-branch.outputs.head_sha }}
         run: |
           set -euo pipefail
           git config --global user.name "Claude Code Bot"
@@ -420,8 +430,9 @@ jobs:
           # Fetch shadow fix branch and extract only application changes
           git clone --no-tags \
             "https://x-access-token:${WORKFLOW_PAT}@github.com/${SHADOW_REPO}.git" shadow
+          git -C shadow fetch origin "$VERIFIED_HEAD_SHA"
           git -C shadow diff --binary \
-            "origin/${BASE_BRANCH}...origin/${HEAD_BRANCH}" \
+            "origin/${BASE_BRANCH}...${VERIFIED_HEAD_SHA}" \
             -- . \
             ':(exclude).shadow' \
             ':(exclude).github/workflows/claude-ci.yml' \
@@ -431,6 +442,7 @@ jobs:
           if [ ! -s /tmp/shadow-preview.patch ]; then
             echo "::warning::No application changes found in shadow fix"
             echo "deploy_head=${BASE_BRANCH}" >> "$GITHUB_OUTPUT"
+            echo "deploy_sha=$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
             echo "source_repo=${SOURCE_REPO}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -440,6 +452,7 @@ jobs:
           git -C source push origin "HEAD:${PREVIEW_BRANCH}" --force
 
           echo "deploy_head=${PREVIEW_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "deploy_sha=$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "source_repo=${SOURCE_REPO}" >> "$GITHUB_OUTPUT"
           echo "Pushed shadow diff → ${SOURCE_REPO}:${PREVIEW_BRANCH}"
 
@@ -473,15 +486,16 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 25m
-          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN,PREVIEW_MODE,PREVIEW_PORT_BASE,PREVIEW_TS_HOST,PREVIEW_CAPACITY
+          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_SHA,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN,PREVIEW_MODE,PREVIEW_PORT_BASE,PREVIEW_TS_HOST,PREVIEW_CAPACITY
           script: |
             cd "$VPS_PATH"
             git fetch origin dev --depth 1
             git checkout origin/dev -- scripts/ .autopilot/
-            "$VPS_PATH/scripts/preview-deploy.sh" "$DEPLOY_HEAD" "$DEPLOY_ISSUE"
+            "$VPS_PATH/scripts/preview-deploy.sh" "$DEPLOY_HEAD" "$DEPLOY_ISSUE" "$DEPLOY_SHA"
         env:
           GITHUB_TOKEN: ${{ secrets.WORKFLOW_PAT }}
           DEPLOY_HEAD: ${{ steps.shadow-prep.outputs.deploy_head || inputs.head }}
+          DEPLOY_SHA: ${{ steps.shadow-prep.outputs.deploy_sha || needs.verify-fix-branch.outputs.head_sha }}
           DEPLOY_ISSUE: ${{ inputs.issue_number }}
           VPS_PATH: ${{ vars.VPS_REPO_PATH }}
           PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
@@ -514,15 +528,16 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           command_timeout: 25m
-          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN,PREVIEW_MODE,PREVIEW_PORT_BASE,PREVIEW_TS_HOST,PREVIEW_CAPACITY
+          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_SHA,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN,PREVIEW_MODE,PREVIEW_PORT_BASE,PREVIEW_TS_HOST,PREVIEW_CAPACITY
           script: |
             cd "$VPS_PATH"
             git fetch origin dev --depth 1
             git checkout origin/dev -- scripts/ .autopilot/
-            "$VPS_PATH/scripts/preview-deploy.sh" "$DEPLOY_HEAD" "$DEPLOY_ISSUE"
+            "$VPS_PATH/scripts/preview-deploy.sh" "$DEPLOY_HEAD" "$DEPLOY_ISSUE" "$DEPLOY_SHA"
         env:
           GITHUB_TOKEN: ${{ secrets.WORKFLOW_PAT }}
           DEPLOY_HEAD: ${{ steps.shadow-prep.outputs.deploy_head || inputs.head }}
+          DEPLOY_SHA: ${{ steps.shadow-prep.outputs.deploy_sha || needs.verify-fix-branch.outputs.head_sha }}
           DEPLOY_ISSUE: ${{ inputs.issue_number }}
           VPS_PATH: ${{ vars.VPS_REPO_PATH }}
           PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
@@ -550,8 +565,8 @@ jobs:
           PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
           PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
           # Optional templates for non-DNS exposure (tailnet-only previews via `tailscale serve`):
-          #   PREVIEW_URL_TEMPLATE=https://noob-root.tailcc6c5f.ts.net:{port}
-          #   PREVIEW_BACKEND_URL_TEMPLATE=https://noob-root.tailcc6c5f.ts.net:{port_api}
+          #   PREVIEW_URL_TEMPLATE=https://noob-root.tailcc6c5f.ts.net:{port_api}
+          #   PREVIEW_BACKEND_URL_TEMPLATE=https://noob-root.tailcc6c5f.ts.net:{port}
           # Placeholders: {prefix} {issue} {domain} {port}=PREVIEW_PORT_BASE+issue {port_api}=port+1000.
           # Unset → the historical DNS shape below, byte for byte.
           PREVIEW_URL_TEMPLATE: ${{ vars.PREVIEW_URL_TEMPLATE || '' }}
@@ -634,7 +649,7 @@ jobs:
         id: checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.head }}
+          ref: ${{ needs.verify-fix-branch.outputs.head_sha }}
           token: ${{ secrets.WORKFLOW_PAT }}
 
       - name: Setup Node.js
@@ -722,7 +737,7 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: DEPLOY_ISSUE,VPS_PATH
+          envs: DEPLOY_ISSUE,VPS_PATH,PREVIEW_PORT_BASE
           script: |
             cd "$VPS_PATH"
             git fetch origin dev --depth 1
@@ -731,6 +746,7 @@ jobs:
         env:
           DEPLOY_ISSUE: ${{ inputs.issue_number }}
           VPS_PATH: ${{ vars.VPS_REPO_PATH }}
+          PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '20000' }}
 
       - name: Delete shadow preview branch from source repo
         if: contains(github.repository, '-shadow')
@@ -752,7 +768,7 @@ jobs:
   # signed attestation that shadow-upstream-pr can verify without re-running.
   validate-api:
     name: "API Validate (#${{ inputs.issue_number }})"
-    needs: [read-config, deploy-preview]
+    needs: [read-config, verify-fix-branch, deploy-preview]
     if: |
       always() && !cancelled() &&
       needs.deploy-preview.result == 'success' &&
@@ -779,7 +795,7 @@ jobs:
   # Opt-in per app via `.autopilot/config.json → appTestCommand`.
   app-tests:
     name: "App Tests (#${{ inputs.issue_number }})"
-    needs: [read-config, deploy-preview]
+    needs: [read-config, verify-fix-branch, deploy-preview]
     if: |
       always() && !cancelled() &&
       needs.deploy-preview.result == 'success' &&
@@ -798,7 +814,7 @@ jobs:
         id: checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.head }}
+          ref: ${{ needs.verify-fix-branch.outputs.head_sha }}
           token: ${{ secrets.WORKFLOW_PAT }}
 
       - name: Fetch shared scripts
@@ -1004,7 +1020,7 @@ jobs:
         continue-on-error: true
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.head }}
+          ref: ${{ needs.verify-fix-branch.outputs.head_sha }}
           token: ${{ secrets.WORKFLOW_PAT }}
           fetch-depth: 0
 
@@ -1053,6 +1069,7 @@ jobs:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
           ISSUE_NUM: ${{ inputs.issue_number }}
           ISSUE_HEAD: ${{ inputs.head }}
+          EXPECTED_HEAD_SHA: ${{ needs.verify-fix-branch.outputs.head_sha }}
           ISSUE_BASE: ${{ inputs.base }}
           ISSUE_TRACK: ${{ inputs.track }}
           TESTS_RESULT: ${{ needs.test.outputs.tests_passed || 'skipped' }}
@@ -1154,8 +1171,7 @@ jobs:
 
           if [ -n "$EXISTING_PR" ]; then
             gh pr edit "$EXISTING_PR" --body "$PR_BODY"
-            echo "pr_number=$EXISTING_PR" >> "$GITHUB_OUTPUT"
-            echo "pr_ready=true" >> "$GITHUB_OUTPUT"
+            PR_NUM="$EXISTING_PR"
           else
             PR_URL=$(gh pr create \
               --head "$ISSUE_HEAD" \
@@ -1164,13 +1180,20 @@ jobs:
               --body "$PR_BODY" \
               --label "autopilot") || true
             PR_NUM=$(echo "$PR_URL" | grep -oE '[0-9]+$' || echo "")
-            echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
-            if [ -n "$PR_NUM" ]; then
-              echo "pr_ready=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "pr_ready=false" >> "$GITHUB_OUTPUT"
-            fi
           fi
+
+          echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
+          if [ -z "$PR_NUM" ]; then
+            echo "pr_ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          PR_HEAD_SHA=$(gh pr view "$PR_NUM" --json headRefOid --jq .headRefOid)
+          if [ "$PR_HEAD_SHA" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "::error::PR head drifted: expected ${EXPECTED_HEAD_SHA}, found ${PR_HEAD_SHA}"
+            echo "pr_ready=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "pr_ready=true" >> "$GITHUB_OUTPUT"
 
       # --- Auto-merge if configured and all checks pass ---
       # A preview candidate never merges here: it waits on the human verdict. Every
@@ -1183,10 +1206,11 @@ jobs:
           needs.read-config.outputs.auto_merge == 'true'
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          EXPECTED_HEAD_SHA: ${{ needs.verify-fix-branch.outputs.head_sha }}
         run: |
           PR="${{ steps.pr.outputs.pr_number }}"
           if [ -n "$PR" ]; then
-            gh pr merge "$PR" --squash --auto || echo "Auto-merge failed — PR may need reviews"
+            gh pr merge "$PR" --squash --auto --match-head-commit "$EXPECTED_HEAD_SHA" || echo "Auto-merge failed — PR may need reviews or its head changed"
           fi
 
       # --- Preview gate: hold for a human verdict instead of finishing ---
@@ -1226,6 +1250,11 @@ jobs:
             });
             const headSha = pr.head.sha;
             const prUrl = pr.html_url;
+            const expectedHeadSha = process.env.EXPECTED_HEAD_SHA;
+            if (headSha !== expectedHeadSha) {
+              core.setFailed(`hold: PR head drifted after verification (expected ${expectedHeadSha}, found ${headSha})`);
+              return;
+            }
 
             // Where the human verdict is expected. Non-shadow: this repo's issue.
             // Shadow: the upstream source issue, resolved exactly the way
@@ -1340,6 +1369,7 @@ jobs:
           PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '20000' }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           ISSUE_NUM: ${{ inputs.issue_number }}
+          EXPECTED_HEAD_SHA: ${{ needs.verify-fix-branch.outputs.head_sha }}
 
       # --- Update issue labels ---
       # A held run stops before In QA — the preview verdict decides that.

@@ -11,7 +11,7 @@ name: "Reusable Autopilot: Preview Teardown"
 # runner's teardown-preview job so a held preview is torn down exactly the way an
 # unheld one is.
 #
-# Secrets come from the caller via `secrets: inherit` — SSH_HOST, SSH_USER,
+# Secrets are mapped explicitly by the caller: SSH_HOST, SSH_USER,
 # SSH_PRIVATE_KEY, and the optional TS_OAUTH_* pair.
 
 on:
@@ -72,7 +72,7 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: DEPLOY_ISSUE,VPS_PATH
+          envs: DEPLOY_ISSUE,VPS_PATH,PREVIEW_PORT_BASE
           script: |
             cd "$VPS_PATH"
             git fetch origin dev --depth 1
@@ -81,6 +81,7 @@ jobs:
         env:
           DEPLOY_ISSUE: ${{ inputs.issue_number }}
           VPS_PATH: ${{ vars.VPS_REPO_PATH }}
+          PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '20000' }}
 
       - name: Delete shadow preview branch from source repo
         if: contains(github.repository, '-shadow')
