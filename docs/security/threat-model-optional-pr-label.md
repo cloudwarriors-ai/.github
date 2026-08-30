@@ -2,9 +2,10 @@
 
 ## Scope and boundaries
 
-The reusable Autopilot finalizer creates or updates a pull request only after
-the fix branch, preview deployment, validation, app tests, and project tests
-pass. GitHub Actions acts with the existing `WORKFLOW_PAT`; GitHub remains the
+The reusable Autopilot finalizer creates or updates a pull request after the fix
+branch, bundle validation, and preflight pass. The remaining app, project, and
+API gates still determine release readiness and whether a preview may be held.
+GitHub Actions acts with the existing `WORKFLOW_PAT`; GitHub remains the
 authorization boundary for pull-request and label mutations. The change makes
 the repository's `autopilot` label optional: pull-request creation completes
 first, then the workflow attempts to add the label and records a warning if the
