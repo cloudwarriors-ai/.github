@@ -137,6 +137,10 @@ jobs:
         if: inputs.manifest_repo == ''
         uses: actions/checkout@v4
         with:
+          # The autopilot runner supplies its already-validated base branch here.
+          # Do not let a branch-selected workflow dispatch substitute its own
+          # manifest before this job joins the tailnet.
+          ref: ${{ inputs.manifest_ref }}
           fetch-depth: 1
           persist-credentials: false
 

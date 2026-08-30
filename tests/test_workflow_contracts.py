@@ -58,6 +58,15 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         self.assertIn("tags: tag:ci", connect_step)
         self.assertNotIn("run:", connect_step)
 
+    def test_default_validation_checkout_honors_authorized_manifest_ref(self):
+        validate = VALIDATE.read_text()
+        default_checkout = validate.split(
+            "      - name: Checkout caller repo (default)", 1
+        )[1].split("\n      - name: Checkout manifest repo (override)", 1)[0]
+
+        self.assertIn("ref: ${{ inputs.manifest_ref }}", default_checkout)
+        self.assertIn("persist-credentials: false", default_checkout)
+
 
 if __name__ == "__main__":
     unittest.main()
