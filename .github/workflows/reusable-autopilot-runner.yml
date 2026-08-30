@@ -841,6 +841,8 @@ jobs:
       VALIDATION_ATTESTATION_KEY: ${{ secrets.VALIDATION_ATTESTATION_KEY }}
       E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
       E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+      TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+      TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
 
   # ── Job 7.6: Application test suite ────────────────────────────
   # Runs the app's own E2E/integration tests against the live preview.
