@@ -67,6 +67,21 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         self.assertIn("ref: ${{ inputs.manifest_ref }}", default_checkout)
         self.assertIn("persist-credentials: false", default_checkout)
 
+    def test_missing_optional_autopilot_label_cannot_block_pr_creation(self):
+        workflow = RUNNER.read_text()
+        create_pr = workflow.split("            PR_URL=$(gh pr create", 1)[1].split(
+            '            PR_NUM=$(echo "$PR_URL"', 1
+        )[0]
+        ready_pr = workflow.split(
+            '          if [ -z "$PR_NUM" ]; then', 1
+        )[1].split("          PR_HEAD_SHA=", 1)[0]
+
+        self.assertNotIn('--label "autopilot"', create_pr)
+        self.assertIn('gh pr edit "$PR_NUM" --add-label "autopilot" ||', ready_pr)
+        self.assertIn(
+            "Could not add optional 'autopilot' label", ready_pr
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

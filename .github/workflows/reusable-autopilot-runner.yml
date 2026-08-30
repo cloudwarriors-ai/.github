@@ -1254,8 +1254,7 @@ jobs:
               --head "$ISSUE_HEAD" \
               --base "$ISSUE_BASE" \
               --title "fix: resolve issue #${ISSUE_NUM}" \
-              --body "$PR_BODY" \
-              --label "autopilot") || true
+              --body "$PR_BODY") || true
             PR_NUM=$(echo "$PR_URL" | grep -oE '[0-9]+$' || echo "")
           fi
 
@@ -1264,6 +1263,8 @@ jobs:
             echo "pr_ready=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          gh pr edit "$PR_NUM" --add-label "autopilot" || \
+            echo "::warning::Could not add optional 'autopilot' label to PR #${PR_NUM}"
           PR_HEAD_SHA=$(gh pr view "$PR_NUM" --json headRefOid --jq .headRefOid)
           if [ "$PR_HEAD_SHA" != "$EXPECTED_HEAD_SHA" ]; then
             echo "::error::PR head drifted: expected ${EXPECTED_HEAD_SHA}, found ${PR_HEAD_SHA}"
