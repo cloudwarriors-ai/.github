@@ -1608,14 +1608,24 @@ jobs:
             // First line is a machine contract Praxis parses — single spaces, no
             // trailing text. Keep it byte-exact:
             //   <!-- praxis:preview url=<preview_url> sha=<40-hex head sha> pr=<pr number> -->
+            // The marker attests to the revision actually running on the preview.
+            // Non-shadow runs deploy the frozen PR head. Shadow runs deterministically
+            // project that frozen shadow head into the source preview branch, whose SHA
+            // is the deployed authority while the PR head remains the review authority.
+            const deployedSha = process.env.DEPLOYED_SHA || headSha;
+            if (!/^[0-9a-f]{40}$/.test(deployedSha)) {
+              core.setFailed(`hold: deployed preview resolved to an invalid commit SHA (${deployedSha})`);
+              return;
+            }
             const markerPrefix = '<!-- praxis:preview ';
-            const marker = `${markerPrefix}url=${previewUrl} sha=${headSha} pr=${prNumber} -->`;
+            const marker = `${markerPrefix}url=${previewUrl} sha=${deployedSha} pr=${prNumber} -->`;
             const body = [
               marker,
               '### Preview ready for review',
               '',
               `**Preview:** ${previewUrl}`,
-              `**Commit:** \`${headSha}\``,
+              `**Preview commit:** \`${deployedSha}\``,
+              `**PR commit:** \`${headSha}\``,
               `**PR:** ${prUrl}`,
               '',
               'This run is held: the preview is still up and the PR is not merged.',
@@ -1647,6 +1657,7 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
           ISSUE_NUM: ${{ inputs.issue_number }}
           EXPECTED_HEAD_SHA: ${{ needs.verify-fix-branch.outputs.head_sha }}
+          DEPLOYED_SHA: ${{ needs.deploy-preview.outputs.deployed_sha }}
 
       # --- Update issue labels ---
       # A held run stops before In QA — the preview verdict decides that.

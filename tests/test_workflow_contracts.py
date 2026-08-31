@@ -401,6 +401,69 @@ class RunnerFailurePathContractTests(unittest.TestCase):
             for directory in (app_tests, report, results):
                 self.assertFalse(directory.exists())
 
+    def test_preview_and_release_are_bound_to_the_frozen_revision(self):
+        """A moving branch cannot make preview evidence certify another revision."""
+        workflow = RUNNER.read_text()
+        frozen = "needs.verify-fix-branch.outputs.head_sha"
+        validate = workflow.split("  validate:", 1)[1].split(
+            "\n  # ── Job 4:", 1
+        )[0]
+        preflight = workflow.split("  preflight:", 1)[1].split(
+            "\n  # ── Job 5:", 1
+        )[0]
+        deploy = workflow.split("  deploy-preview:", 1)[1].split(
+            "\n  # ── Job 6:", 1
+        )[0]
+        test = workflow.split("  test:", 1)[1].split(
+            "\n  # ── Job 7: Teardown", 1
+        )[0]
+        finalize = workflow.split("  finalize:", 1)[1]
+        hold = finalize.split('      - name: "On hold: label Preview Ready"', 1)[1].split(
+            "\n      # --- Update issue labels ---", 1
+        )[0]
+        auto_merge = finalize.split("      - name: Auto-merge", 1)[1].split(
+            "      # --- Preview gate:", 1
+        )[0]
+
+        # Every executable non-shadow checkout and both preview deploy retries use
+        # the verifier's immutable output rather than the mutable branch input.
+        self.assertGreaterEqual(validate.count(f"ref: ${{{{ {frozen} }}}}"), 1)
+        self.assertGreaterEqual(preflight.count(f"ref: ${{{{ {frozen} }}}}"), 1)
+        self.assertGreaterEqual(test.count(f"ref: ${{{{ {frozen} }}}}"), 1)
+        self.assertEqual(
+            deploy.count(f"DEPLOY_SHA: ${{{{ steps.shadow-prep.outputs.deploy_sha || {frozen} }}}}"),
+            2,
+        )
+        self.assertEqual(
+            deploy.count(f"DEPLOY_HEAD: ${{{{ steps.shadow-prep.outputs.deploy_head || inputs.head }}}}"),
+            2,
+        )
+
+        # The PR is compared to the frozen head before the hold is published, and
+        # the merge guard repeats that exact SHA at the irreversible boundary.
+        self.assertIn(f"EXPECTED_HEAD_SHA: ${{{{ {frozen} }}}}", finalize)
+        self.assertIn('if [ "$PR_HEAD_SHA" != "$EXPECTED_HEAD_SHA" ]; then', finalize)
+        self.assertIn('--match-head-commit "$EXPECTED_HEAD_SHA"', auto_merge)
+
+        # Non-shadow deployed_sha resolves to the frozen SHA. A shadow run may use
+        # a source projection, but that projection must be built only from the
+        # frozen shadow SHA and become the marker's attested preview revision.
+        self.assertIn(
+            f"deployed_sha: ${{{{ steps.shadow-prep.outputs.deploy_sha || {frozen} }}}}",
+            deploy,
+        )
+        self.assertIn(f"VERIFIED_HEAD_SHA: ${{{{ {frozen} }}}}", deploy)
+        self.assertIn('git -C shadow fetch origin "$VERIFIED_HEAD_SHA"', deploy)
+        self.assertIn('"origin/${BASE_BRANCH}...${VERIFIED_HEAD_SHA}"', deploy)
+        self.assertIn('echo "deploy_sha=$(git -C source rev-parse HEAD)"', deploy)
+        self.assertIn(
+            "DEPLOYED_SHA: ${{ needs.deploy-preview.outputs.deployed_sha }}", hold
+        )
+        self.assertIn("const deployedSha = process.env.DEPLOYED_SHA || headSha;", hold)
+        self.assertIn("sha=${deployedSha} pr=${prNumber}", hold)
+        self.assertIn("const expectedHeadSha = process.env.EXPECTED_HEAD_SHA;", hold)
+        self.assertIn("if (headSha !== expectedHeadSha)", hold)
+
     def test_preview_receives_only_issue_scoped_throttle_bypass(self):
         workflow = RUNNER.read_text()
         deploy = workflow.split("  deploy-preview:", 1)[1].split("\n  test:", 1)[0]
