@@ -63,7 +63,7 @@ on:
         description: 'Immutable cloudwarriors-ai/.github commit used for shared scripts'
         required: false
         type: string
-        default: '8203521087a3dad5198f37c696d901f37cb485c2'
+        default: '8f83e52d35646082eba9a3333b895416a1c7bf2d'
     secrets:
       WORKFLOW_PAT:
         required: true

@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / ".github/workflows/reusable-autopilot-runner.yml"
 VALIDATE = ROOT / ".github/workflows/reusable-validate.yml"
 UPSTREAM_SHA = "e5fe345623f53cb07e15afdba661a9e77bbcdd0f"
-SHARED_TOOLS_SHA = "8203521087a3dad5198f37c696d901f37cb485c2"
+SHARED_TOOLS_SHA = "8f83e52d35646082eba9a3333b895416a1c7bf2d"
 ARTIFACT_GUARD = ROOT / "scripts/autopilot/verify-app-test-artifacts.sh"
 
 
