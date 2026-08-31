@@ -106,13 +106,25 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         app_tests = workflow.split("  app-tests:", 1)[1].split(
             "\n  finalize:", 1
         )[0]
+        resolve_index = app_tests.index("      - name: Resolve trusted base SHA")
+        checkout_index = app_tests.index("      - name: Checkout trusted base tests")
         install_index = app_tests.index("      - name: Install Python dependencies")
         connect_index = app_tests.index("      - name: Connect to Tailscale")
         run_index = app_tests.index("      - name: Run app test suite")
         connect_step = app_tests[connect_index:run_index]
+        checkout_step = app_tests[checkout_index:app_tests.index("      - name: Fetch shared scripts")]
 
+        self.assertLess(resolve_index, checkout_index)
         self.assertLess(install_index, connect_index)
         self.assertLess(connect_index, run_index)
+        self.assertIn("ref: ${{ steps.app_test_base.outputs.sha }}", checkout_step)
+        self.assertIn("token: ${{ github.token }}", checkout_step)
+        self.assertNotIn("secrets.WORKFLOW_PAT", checkout_step)
+        self.assertNotIn("needs.verify-fix-branch.outputs.head_sha", checkout_step)
+        self.assertIn(
+            'gh api "repos/${GITHUB_REPOSITORY}/commits/${ISSUE_BASE}"',
+            app_tests[resolve_index:checkout_index],
+        )
         self.assertIn("if: env.TS_OAUTH_CLIENT_ID != ''", connect_step)
         self.assertIn(
             "uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade",

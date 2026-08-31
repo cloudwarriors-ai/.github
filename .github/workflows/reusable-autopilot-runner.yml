@@ -865,12 +865,29 @@ jobs:
       baseline_label: ${{ steps.compare.outputs.baseline_label }}
 
     steps:
-      - name: Checkout fix branch
+      # App tests exercise the remote fix preview, but the code running beside
+      # OAuth inputs must come from the trusted base rather than the agent-written
+      # fix branch. Resolve once and checkout the immutable commit.
+      - name: Resolve trusted base SHA
+        id: app_test_base
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_BASE: ${{ inputs.base }}
+        run: |
+          set -euo pipefail
+          base_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${ISSUE_BASE}" --jq '.sha')
+          if ! [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Could not resolve trusted base SHA for ${ISSUE_BASE}"
+            exit 1
+          fi
+          echo "sha=$base_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout trusted base tests
         id: checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.verify-fix-branch.outputs.head_sha }}
-          token: ${{ secrets.WORKFLOW_PAT }}
+          ref: ${{ steps.app_test_base.outputs.sha }}
+          token: ${{ github.token }}
           persist-credentials: false
 
       - name: Fetch shared scripts
@@ -945,9 +962,9 @@ jobs:
           fi
           pip install httpx pytest pytest-asyncio
 
-      # Join only after dependency installation so package install hooks from
-      # the fix branch never receive tailnet reachability. The test command
-      # needs the scoped tag:ci identity to reach the private preview URLs.
+      # Join only after installing dependencies from the trusted base. The test
+      # command needs the scoped tag:ci identity to reach private preview URLs;
+      # no agent-written fix-branch code executes in this runner job.
       - name: Connect to Tailscale
         if: env.TS_OAUTH_CLIENT_ID != ''
         uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade
