@@ -946,7 +946,7 @@ jobs:
           pip install httpx pytest pytest-asyncio
 
       - name: Run app test suite
-        id: app-tests
+        id: app_tests
         continue-on-error: true
         env:
           E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
@@ -966,7 +966,7 @@ jobs:
         id: result
         if: always()
         run: |
-          if [ "${{ steps.app-tests.outcome }}" = "success" ]; then
+          if [ "${{ steps.app_tests.outcome }}" = "success" ]; then
             echo "app_tests_passed=true" >> "$GITHUB_OUTPUT"
           else
             echo "app_tests_passed=false" >> "$GITHUB_OUTPUT"
