@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / ".github/workflows/reusable-autopilot-runner.yml"
 VALIDATE = ROOT / ".github/workflows/reusable-validate.yml"
 UPSTREAM_SHA = "e5fe345623f53cb07e15afdba661a9e77bbcdd0f"
+SHARED_TOOLS_SHA = "8203521087a3dad5198f37c696d901f37cb485c2"
 ARTIFACT_GUARD = ROOT / "scripts/autopilot/verify-app-test-artifacts.sh"
 
 
@@ -32,6 +34,31 @@ class RunnerFailurePathContractTests(unittest.TestCase):
             f"reusable-claude-autofix-rlm.yml@{UPSTREAM_SHA}",
             workflow,
         )
+
+    def test_default_shared_tools_pin_contains_every_runtime_script(self):
+        workflow = RUNNER.read_text()
+        shared_tools_input = workflow.split("      shared_tools_ref:", 1)[1].split(
+            "    secrets:", 1
+        )[0]
+        self.assertIn(f"default: '{SHARED_TOOLS_SHA}'", shared_tools_input)
+
+        runtime_scripts = set(
+            re.findall(r"/tmp/org-github/(scripts/[A-Za-z0-9_./-]+)", workflow)
+        )
+        self.assertTrue(runtime_scripts)
+        for script in runtime_scripts:
+            completed = subprocess.run(
+                ["git", "cat-file", "-e", f"{SHARED_TOOLS_SHA}:{script}"],
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                f"{script} is absent from shared_tools_ref {SHARED_TOOLS_SHA}",
+            )
 
     def test_publisher_is_bound_to_dev_issue_branch_before_write_authority(self):
         workflow = RUNNER.read_text()
