@@ -975,7 +975,9 @@ jobs:
       - name: Compare against baseline
         id: compare
         if: always()
-        continue-on-error: true
+        # Missing artifacts/baselines are handled explicitly below. Any other
+        # comparison failure must fail the job so readiness cannot treat an
+        # empty regression output as approval.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

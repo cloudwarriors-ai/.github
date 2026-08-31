@@ -87,10 +87,14 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         app_tests = workflow.split("  app-tests:", 1)[1].split(
             "\n  finalize:", 1
         )[0]
+        comparison = app_tests.split(
+            "      - name: Compare against baseline", 1
+        )[1].split("\n      - name: Upload app-test artifacts", 1)[0]
 
         self.assertIn("        id: app_tests", app_tests)
         self.assertIn("steps.app_tests.outcome", app_tests)
         self.assertNotIn("steps.app-tests.outcome", app_tests)
+        self.assertNotIn("continue-on-error: true", comparison)
 
 
 if __name__ == "__main__":
