@@ -23,9 +23,9 @@ untrusted until review. No source, manifest, package hook, or shell command from
 either untrusted ref executes in the credential-bearing job. Preview responses
 and test credentials are INTERNAL. OAuth secrets, the throttle-bypass master,
 and each derived bearer capability are RESTRICTED. The master may exist only in
-GitHub Actions derivation steps; derived values must be masked, limited to the
-destination SSH/test step, cleared immediately afterward, and excluded from
-artifacts. GitHub Actions, the pinned action, and the tailnet ACL are separate
+GitHub Actions derivation steps; derived values must be masked, exposed only
+inside the destination SSH/test step, removed immediately afterward, and
+excluded from artifacts. GitHub Actions, the pinned action, and the tailnet ACL are separate
 authorization boundaries. This change adds one dedicated non-production
 credential but does not expose a public listener, grant authentication or merge
 authority, or permit a production target.
@@ -79,14 +79,16 @@ credential, the caller-ref command is forbidden, dependency installation
 precedes the join, and the join uses the pinned action and tag with no shell
 implementation. They also prove the throttle-bypass master is confined to two
 trusted derivation steps and only the issue-scoped value reaches the host and
-test command; it is cleared before later actions and comparison/artifact steps.
-The application-side contract must keep bypass authorization
+test command; wait, comparison, and artifact steps do not inherit it. Missing
+app-test artifacts or a trusted baseline fail the comparison and cannot be
+interpreted as approval. The application-side contract must keep bypass authorization
 limited to `APP_ENVIRONMENT=preview` (or DEBUG in an explicitly
 non-production runtime), use constant-time comparison, disable credential-bearing
-browser traces, and remain inert in production even when DEBUG is misconfigured.
-Before upload, the runner rejects any trace from a credential-bearing run and
-scans every candidate artifact for the derived value. On a match it deletes the
-candidate set and fails the job, so the upload step cannot publish it. Live proof
+browser captures, and remain inert in production even when DEBUG is misconfigured.
+Before upload, the runner rejects compressed and visual artifacts from a
+credential-bearing run and scans every remaining candidate artifact for the
+derived value. On a forbidden artifact or match it deletes the candidate set
+and fails the job, so the upload step cannot publish it. Live proof
 must show MagicDNS resolution and a successful App Tests outcome against a fresh
 preview.
 

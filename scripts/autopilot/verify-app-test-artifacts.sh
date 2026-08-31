@@ -24,11 +24,18 @@ cleanup_candidates() {
 
 safe=true
 if [ -f "$enabled_marker" ]; then
-  if find "$playwright_results_dir" -type f -name 'trace.zip' -print -quit \
-    2>/dev/null | grep -q .; then
-    echo "::error::Credential-bearing app-test runs must not create browser traces" >&2
-    safe=false
-  fi
+  for target in "$app_tests_dir" "$playwright_report_dir" "$playwright_results_dir"; do
+    if find "$target" -type f \
+      \( -iname '*.zip' -o -iname '*.tar' -o -iname '*.tgz' \
+      -o -iname '*.gz' -o -iname '*.bz2' -o -iname '*.xz' -o -iname '*.7z' \
+      -o -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \
+      -o -iname '*.webp' -o -iname '*.gif' -o -iname '*.mp4' \
+      -o -iname '*.webm' \) -print -quit 2>/dev/null | grep -q .; then
+      echo "::error::Credential-bearing app-test runs must not create compressed or visual artifacts" >&2
+      safe=false
+      break
+    fi
+  done
 
   if [ ! -s "$value_file" ]; then
     echo "::error::Scoped bypass audit value is unavailable; refusing artifact upload" >&2

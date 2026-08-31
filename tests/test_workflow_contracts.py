@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +32,27 @@ class RunnerFailurePathContractTests(unittest.TestCase):
             f"reusable-claude-autofix-rlm.yml@{UPSTREAM_SHA}",
             workflow,
         )
+
+    def test_publisher_is_bound_to_dev_issue_branch_before_write_authority(self):
+        workflow = RUNNER.read_text()
+        authorize = workflow.split("  authorize-target:", 1)[1].split(
+            "\n  rlm-fix:", 1
+        )[0]
+        rlm_fix = workflow.split("  rlm-fix:", 1)[1].split(
+            "\n  read-config:", 1
+        )[0]
+        deploy = workflow.split("  deploy-preview:", 1)[1].split(
+            "\n  test:", 1
+        )[0]
+
+        self.assertIn('if [ "$BASE" != "dev" ]; then', authorize)
+        self.assertIn("dev|main|master", authorize)
+        self.assertIn('expected="autofix/issue-${ISSUE_NUM}"', authorize)
+        self.assertIn('if [ "$HEAD" != "$expected" ]; then', authorize)
+        self.assertIn("    needs: authorize-target", rlm_fix)
+        self.assertIn("    environment: dev", deploy)
+        self.assertNotIn("environment: production", deploy)
+        self.assertNotIn("inputs.base == 'main'", deploy)
 
     def test_api_validation_joins_tailnet_with_forwarded_optional_secrets(self):
         runner = RUNNER.read_text()
@@ -104,6 +126,20 @@ class RunnerFailurePathContractTests(unittest.TestCase):
             "Daily snapshot content is invalid — falling back to static baseline",
             comparison,
         )
+        self.assertIn(
+            "Required app-test artifacts are missing; refusing readiness",
+            comparison,
+        )
+        self.assertIn(
+            "No trusted app-test baseline found; refusing readiness",
+            comparison,
+        )
+        self.assertGreaterEqual(comparison.count('echo "has_report=false"'), 2)
+        self.assertGreaterEqual(comparison.count('echo "has_regressions=true"'), 2)
+        self.assertIn("app_tests_has_report: ${{ steps.compare.outputs.has_report }}", app_tests)
+        finalize = workflow.split("  finalize:", 1)[1]
+        self.assertIn("app_tests_has_report == 'true'", finalize)
+        self.assertIn("app_tests_has_regressions == 'false'", finalize)
 
     def test_app_tests_join_tailnet_after_dependency_installation(self):
         workflow = RUNNER.read_text()
@@ -128,9 +164,6 @@ class RunnerFailurePathContractTests(unittest.TestCase):
             "      - name: Derive scoped preview throttle bypass"
         )
         run_index = app_tests.index("      - name: Run app test suite")
-        clear_index = app_tests.index(
-            "      - name: Clear scoped preview throttle bypass"
-        )
         parse_index = app_tests.index("      - name: Parse results")
         connect_step = app_tests[connect_index:derive_index]
         derive_step = app_tests[derive_index:run_index]
@@ -142,8 +175,7 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         self.assertLess(install_index, connect_index)
         self.assertLess(connect_index, derive_index)
         self.assertLess(derive_index, run_index)
-        self.assertLess(run_index, clear_index)
-        self.assertLess(clear_index, parse_index)
+        self.assertLess(run_index, parse_index)
         self.assertIn("ref: ${{ steps.base.outputs.sha }}", app_test_config)
         self.assertIn(
             "app_test_command: ${{ steps.config.outputs.app_test_command }}",
@@ -182,7 +214,6 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         )
         self.assertIn("openssl dgst -sha256 -hmac", derive_step)
         self.assertIn("echo \"::add-mask::$derived\"", derive_step)
-        self.assertIn("THROTTLE_BYPASS_SECRET=$derived", derive_step)
         self.assertIn(
             'printf \'%s\' "$derived" > "$RUNNER_TEMP/preview-throttle-bypass"',
             derive_step,
@@ -190,11 +221,12 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         self.assertIn(
             ': > "$RUNNER_TEMP/preview-throttle-bypass-enabled"', derive_step
         )
+        self.assertNotIn("GITHUB_ENV", derive_step)
         self.assertNotIn("PREVIEW_THROTTLE_BYPASS_KEY", run_step)
-        self.assertIn(
-            'echo "THROTTLE_BYPASS_SECRET=" >> "$GITHUB_ENV"',
-            app_tests[clear_index:parse_index],
-        )
+        self.assertIn('value_file="$RUNNER_TEMP/preview-throttle-bypass"', run_step)
+        self.assertIn('THROTTLE_BYPASS_SECRET=$(cat "$value_file")', run_step)
+        self.assertIn("export THROTTLE_BYPASS_SECRET", run_step)
+        self.assertNotIn("GITHUB_ENV", run_step)
 
     def test_app_test_artifacts_fail_closed_on_credential_material(self):
         workflow = RUNNER.read_text()
@@ -222,7 +254,7 @@ class RunnerFailurePathContractTests(unittest.TestCase):
             upload,
         )
 
-    def _run_artifact_guard(self, *, leak=False, trace=False):
+    def _run_artifact_guard(self, *, leak=False, archive=False, media=False):
         temp_dir = tempfile.TemporaryDirectory()
         root = Path(temp_dir.name)
         value_file = root / "value"
@@ -239,8 +271,15 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         (app_tests / "run.log").write_text(
             f"request={fake_value}" if leak else "credential-free"
         )
-        if trace:
-            (results / "trace.zip").write_bytes(b"not-a-real-trace")
+        if archive:
+            data = report / "data"
+            data.mkdir()
+            with zipfile.ZipFile(
+                data / "custom-trace.zip", "w", compression=zipfile.ZIP_DEFLATED
+            ) as bundle:
+                bundle.writestr("network.log", f"request-header={fake_value}")
+        if media:
+            (results / "failure.png").write_bytes(b"not-a-real-image")
 
         env = os.environ.copy()
         env.update(
@@ -282,9 +321,18 @@ class RunnerFailurePathContractTests(unittest.TestCase):
             for directory in (app_tests, report, results):
                 self.assertFalse(directory.exists())
 
-    def test_artifact_guard_rejects_and_deletes_browser_traces(self):
+    def test_artifact_guard_rejects_compressed_trace_in_any_uploaded_root(self):
         temp_dir, completed, _, _, app_tests, report, results = (
-            self._run_artifact_guard(trace=True)
+            self._run_artifact_guard(archive=True)
+        )
+        with temp_dir:
+            self.assertNotEqual(completed.returncode, 0)
+            for directory in (app_tests, report, results):
+                self.assertFalse(directory.exists())
+
+    def test_artifact_guard_rejects_visual_browser_artifacts(self):
+        temp_dir, completed, _, _, app_tests, report, results = (
+            self._run_artifact_guard(media=True)
         )
         with temp_dir:
             self.assertNotEqual(completed.returncode, 0)
@@ -301,21 +349,41 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         first_attempt_index = deploy.index(
             "      - name: Deploy preview to VPS (attempt 1)"
         )
+        expose_first_index = deploy.index(
+            "      - name: Expose scoped preview throttle bypass (attempt 1)"
+        )
+        clear_first_index = deploy.index(
+            "      - name: Clear scoped preview throttle bypass (attempt 1)"
+        )
+        wait_index = deploy.index("      - name: Wait before retry")
+        expose_second_index = deploy.index(
+            "      - name: Expose scoped preview throttle bypass (attempt 2)"
+        )
         second_attempt_index = deploy.index(
             "      - name: Deploy preview to VPS (attempt 2)"
         )
-        clear_index = deploy.index(
-            "      - name: Clear scoped preview throttle bypass"
+        clear_second_index = deploy.index(
+            "      - name: Clear scoped preview throttle bypass (attempt 2)"
+        )
+        remove_index = deploy.index(
+            "      - name: Remove scoped preview throttle bypass audit value"
         )
         set_url_index = deploy.index("      - name: Set preview URL output")
-        derive = deploy[derive_index:first_attempt_index]
+        derive = deploy[derive_index:expose_first_index]
+        expose_first = deploy[expose_first_index:first_attempt_index]
+        wait = deploy[wait_index:expose_second_index]
 
         self.assertIn("PREVIEW_THROTTLE_BYPASS_KEY:", workflow)
         self.assertLess(connect_index, derive_index)
-        self.assertLess(derive_index, first_attempt_index)
-        self.assertLess(first_attempt_index, second_attempt_index)
-        self.assertLess(second_attempt_index, clear_index)
-        self.assertLess(clear_index, set_url_index)
+        self.assertLess(derive_index, expose_first_index)
+        self.assertLess(expose_first_index, first_attempt_index)
+        self.assertLess(first_attempt_index, clear_first_index)
+        self.assertLess(clear_first_index, wait_index)
+        self.assertLess(wait_index, expose_second_index)
+        self.assertLess(expose_second_index, second_attempt_index)
+        self.assertLess(second_attempt_index, clear_second_index)
+        self.assertLess(clear_second_index, remove_index)
+        self.assertLess(remove_index, set_url_index)
         self.assertIn(
             "PREVIEW_THROTTLE_BYPASS_KEY: ${{ secrets.PREVIEW_THROTTLE_BYPASS_KEY }}",
             derive,
@@ -324,13 +392,19 @@ class RunnerFailurePathContractTests(unittest.TestCase):
             '"preview-throttle:${GITHUB_REPOSITORY}:${ISSUE_NUM}"', derive
         )
         self.assertIn("openssl dgst -sha256 -hmac", derive)
-        self.assertIn("PREVIEW_THROTTLE_BYPASS_SECRET=$derived", derive)
+        self.assertIn(
+            'printf \'%s\' "$derived" > "$RUNNER_TEMP/preview-deploy-throttle-bypass"',
+            derive,
+        )
+        self.assertNotIn("GITHUB_ENV", derive)
+        self.assertIn("PREVIEW_THROTTLE_BYPASS_SECRET=$derived", expose_first)
+        self.assertNotIn("PREVIEW_THROTTLE_BYPASS_SECRET", wait)
         self.assertIn(
             'echo "PREVIEW_THROTTLE_BYPASS_SECRET=" >> "$GITHUB_ENV"',
-            deploy[clear_index:set_url_index],
+            deploy[clear_first_index:wait_index],
         )
         self.assertNotIn(
-            "PREVIEW_THROTTLE_BYPASS_KEY", deploy[clear_index:]
+            "PREVIEW_THROTTLE_BYPASS_KEY", deploy[expose_first_index:]
         )
 
 
