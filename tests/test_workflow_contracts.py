@@ -124,6 +124,10 @@ class RunnerFailurePathContractTests(unittest.TestCase):
             "      - name: Derive scoped preview throttle bypass"
         )
         run_index = app_tests.index("      - name: Run app test suite")
+        clear_index = app_tests.index(
+            "      - name: Clear scoped preview throttle bypass"
+        )
+        parse_index = app_tests.index("      - name: Parse results")
         connect_step = app_tests[connect_index:derive_index]
         derive_step = app_tests[derive_index:run_index]
         checkout_step = app_tests[checkout_index:app_tests.index("      - name: Fetch shared scripts")]
@@ -134,6 +138,8 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         self.assertLess(install_index, connect_index)
         self.assertLess(connect_index, derive_index)
         self.assertLess(derive_index, run_index)
+        self.assertLess(run_index, clear_index)
+        self.assertLess(clear_index, parse_index)
         self.assertIn("ref: ${{ steps.base.outputs.sha }}", app_test_config)
         self.assertIn(
             "app_test_command: ${{ steps.config.outputs.app_test_command }}",
@@ -174,15 +180,36 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         self.assertIn("echo \"::add-mask::$derived\"", derive_step)
         self.assertIn("THROTTLE_BYPASS_SECRET=$derived", derive_step)
         self.assertNotIn("PREVIEW_THROTTLE_BYPASS_KEY", run_step)
+        self.assertIn(
+            'echo "THROTTLE_BYPASS_SECRET=" >> "$GITHUB_ENV"',
+            app_tests[clear_index:parse_index],
+        )
 
     def test_preview_receives_only_issue_scoped_throttle_bypass(self):
         workflow = RUNNER.read_text()
         deploy = workflow.split("  deploy-preview:", 1)[1].split("\n  test:", 1)[0]
-        derive = deploy.split(
-            "      - name: Derive scoped preview throttle bypass", 1
-        )[1].split("\n      - name: Connect to Tailscale", 1)[0]
+        connect_index = deploy.index("      - name: Connect to Tailscale")
+        derive_index = deploy.index(
+            "      - name: Derive scoped preview throttle bypass"
+        )
+        first_attempt_index = deploy.index(
+            "      - name: Deploy preview to VPS (attempt 1)"
+        )
+        second_attempt_index = deploy.index(
+            "      - name: Deploy preview to VPS (attempt 2)"
+        )
+        clear_index = deploy.index(
+            "      - name: Clear scoped preview throttle bypass"
+        )
+        set_url_index = deploy.index("      - name: Set preview URL output")
+        derive = deploy[derive_index:first_attempt_index]
 
         self.assertIn("PREVIEW_THROTTLE_BYPASS_KEY:", workflow)
+        self.assertLess(connect_index, derive_index)
+        self.assertLess(derive_index, first_attempt_index)
+        self.assertLess(first_attempt_index, second_attempt_index)
+        self.assertLess(second_attempt_index, clear_index)
+        self.assertLess(clear_index, set_url_index)
         self.assertIn(
             "PREVIEW_THROTTLE_BYPASS_KEY: ${{ secrets.PREVIEW_THROTTLE_BYPASS_KEY }}",
             derive,
@@ -192,13 +219,12 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         )
         self.assertIn("openssl dgst -sha256 -hmac", derive)
         self.assertIn("PREVIEW_THROTTLE_BYPASS_SECRET=$derived", derive)
-        self.assertEqual(
-            deploy.count("PREVIEW_THROTTLE_BYPASS_SECRET"),
-            4,
-            "derived value should appear in the empty fallback, output, and both SSH env lists",
+        self.assertIn(
+            'echo "PREVIEW_THROTTLE_BYPASS_SECRET=" >> "$GITHUB_ENV"',
+            deploy[clear_index:set_url_index],
         )
         self.assertNotIn(
-            "PREVIEW_THROTTLE_BYPASS_KEY", deploy.split("      - name: Connect to Tailscale", 1)[1]
+            "PREVIEW_THROTTLE_BYPASS_KEY", deploy[clear_index:]
         )
 
 

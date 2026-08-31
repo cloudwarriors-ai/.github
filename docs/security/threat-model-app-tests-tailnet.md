@@ -21,10 +21,14 @@ preview host and trusted tests; the master key remains in GitHub Actions.
 The fix-branch application, its responses, and the workflow-dispatch ref are
 untrusted until review. No source, manifest, package hook, or shell command from
 either untrusted ref executes in the credential-bearing job. Preview responses
-and test credentials are INTERNAL; OAuth secrets are RESTRICTED. GitHub
-Actions, the pinned action, and the tailnet ACL are separate authorization
-boundaries. This change does not expose a public listener, add a credential,
-grant merge authority, or permit a production target.
+and test credentials are INTERNAL. OAuth secrets, the throttle-bypass master,
+and each derived bearer capability are RESTRICTED. The master may exist only in
+GitHub Actions derivation steps; derived values must be masked, limited to the
+destination SSH/test step, cleared immediately afterward, and excluded from
+artifacts. GitHub Actions, the pinned action, and the tailnet ACL are separate
+authorization boundaries. This change adds one dedicated non-production
+credential but does not expose a public listener, grant authentication or merge
+authority, or permit a production target.
 
 ## Threats and controls
 
@@ -75,7 +79,8 @@ credential, the caller-ref command is forbidden, dependency installation
 precedes the join, and the join uses the pinned action and tag with no shell
 implementation. They also prove the throttle-bypass master is confined to two
 trusted derivation steps and only the issue-scoped value reaches the host and
-test command. The application-side contract must keep bypass authorization
+test command; it is cleared before later actions and comparison/artifact steps.
+The application-side contract must keep bypass authorization
 limited to `APP_ENVIRONMENT=preview` (or DEBUG), use constant-time comparison,
 and remain inert in production. Live proof must show MagicDNS resolution and a
 successful App Tests outcome against a fresh preview.
