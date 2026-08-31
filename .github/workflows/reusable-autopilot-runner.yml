@@ -1048,6 +1048,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$PREVIEW_THROTTLE_BYPASS_KEY" ]; then
+            rm -f "$RUNNER_TEMP/preview-throttle-bypass" \
+              "$RUNNER_TEMP/preview-throttle-bypass-enabled"
             echo "THROTTLE_BYPASS_SECRET=" >> "$GITHUB_ENV"
             exit 0
           fi
@@ -1055,6 +1057,9 @@ jobs:
             | openssl dgst -sha256 -hmac "$PREVIEW_THROTTLE_BYPASS_KEY" -binary \
             | openssl base64 -A)
           echo "::add-mask::$derived"
+          umask 077
+          printf '%s' "$derived" > "$RUNNER_TEMP/preview-throttle-bypass"
+          : > "$RUNNER_TEMP/preview-throttle-bypass-enabled"
           echo "THROTTLE_BYPASS_SECRET=$derived" >> "$GITHUB_ENV"
 
       - name: Run app test suite
@@ -1167,8 +1172,20 @@ jobs:
           echo "has_regressions=${HAS_REGS}" >> "$GITHUB_OUTPUT"
           echo "baseline_label=${BASELINE_LABEL}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload app-test artifacts
+      - name: Verify app-test artifacts are credential-free
+        id: artifact_safety
         if: always()
+        env:
+          PREVIEW_THROTTLE_VALUE_FILE: ${{ runner.temp }}/preview-throttle-bypass
+          PREVIEW_THROTTLE_ENABLED_MARKER: ${{ runner.temp }}/preview-throttle-bypass-enabled
+          APP_TESTS_ARTIFACT_DIR: /tmp/app-tests
+          PLAYWRIGHT_REPORT_DIR: ${{ github.workspace }}/playwright-report
+          PLAYWRIGHT_TEST_RESULTS_DIR: ${{ github.workspace }}/test-results
+        run: |
+          bash /tmp/org-github/scripts/autopilot/verify-app-test-artifacts.sh
+
+      - name: Upload app-test artifacts
+        if: always() && steps.artifact_safety.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: app-tests-${{ inputs.issue_number }}

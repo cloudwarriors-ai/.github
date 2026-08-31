@@ -81,9 +81,14 @@ implementation. They also prove the throttle-bypass master is confined to two
 trusted derivation steps and only the issue-scoped value reaches the host and
 test command; it is cleared before later actions and comparison/artifact steps.
 The application-side contract must keep bypass authorization
-limited to `APP_ENVIRONMENT=preview` (or DEBUG), use constant-time comparison,
-and remain inert in production. Live proof must show MagicDNS resolution and a
-successful App Tests outcome against a fresh preview.
+limited to `APP_ENVIRONMENT=preview` (or DEBUG in an explicitly
+non-production runtime), use constant-time comparison, disable credential-bearing
+browser traces, and remain inert in production even when DEBUG is misconfigured.
+Before upload, the runner rejects any trace from a credential-bearing run and
+scans every candidate artifact for the derived value. On a match it deletes the
+candidate set and fails the job, so the upload step cannot publish it. Live proof
+must show MagicDNS resolution and a successful App Tests outcome against a fresh
+preview.
 
 Residual risk is that trusted base tests and untrusted preview browser code
 still receive the network access needed for the flow and could reach any

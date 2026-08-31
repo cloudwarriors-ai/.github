@@ -1,4 +1,7 @@
+import os
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 
 
@@ -6,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / ".github/workflows/reusable-autopilot-runner.yml"
 VALIDATE = ROOT / ".github/workflows/reusable-validate.yml"
 UPSTREAM_SHA = "e5fe345623f53cb07e15afdba661a9e77bbcdd0f"
+ARTIFACT_GUARD = ROOT / "scripts/autopilot/verify-app-test-artifacts.sh"
 
 
 class RunnerFailurePathContractTests(unittest.TestCase):
@@ -179,11 +183,113 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         self.assertIn("openssl dgst -sha256 -hmac", derive_step)
         self.assertIn("echo \"::add-mask::$derived\"", derive_step)
         self.assertIn("THROTTLE_BYPASS_SECRET=$derived", derive_step)
+        self.assertIn(
+            'printf \'%s\' "$derived" > "$RUNNER_TEMP/preview-throttle-bypass"',
+            derive_step,
+        )
+        self.assertIn(
+            ': > "$RUNNER_TEMP/preview-throttle-bypass-enabled"', derive_step
+        )
         self.assertNotIn("PREVIEW_THROTTLE_BYPASS_KEY", run_step)
         self.assertIn(
             'echo "THROTTLE_BYPASS_SECRET=" >> "$GITHUB_ENV"',
             app_tests[clear_index:parse_index],
         )
+
+    def test_app_test_artifacts_fail_closed_on_credential_material(self):
+        workflow = RUNNER.read_text()
+        app_tests = workflow.split("  app-tests:", 1)[1].split(
+            "\n  finalize:", 1
+        )[0]
+        compare_index = app_tests.index("      - name: Compare against baseline")
+        safety_index = app_tests.index(
+            "      - name: Verify app-test artifacts are credential-free"
+        )
+        upload_index = app_tests.index("      - name: Upload app-test artifacts")
+        safety = app_tests[safety_index:upload_index]
+        upload = app_tests[upload_index:]
+
+        self.assertLess(compare_index, safety_index)
+        self.assertLess(safety_index, upload_index)
+        self.assertIn("        id: artifact_safety", safety)
+        self.assertIn("        if: always()", safety)
+        self.assertIn(
+            "bash /tmp/org-github/scripts/autopilot/verify-app-test-artifacts.sh",
+            safety,
+        )
+        self.assertIn(
+            "if: always() && steps.artifact_safety.outcome == 'success'",
+            upload,
+        )
+
+    def _run_artifact_guard(self, *, leak=False, trace=False):
+        temp_dir = tempfile.TemporaryDirectory()
+        root = Path(temp_dir.name)
+        value_file = root / "value"
+        marker = root / "enabled"
+        app_tests = root / "app-tests"
+        report = root / "playwright-report"
+        results = root / "test-results"
+        fake_value = "unit-test-scoped-value"
+
+        for directory in (app_tests, report, results):
+            directory.mkdir()
+        value_file.write_text(fake_value)
+        marker.touch()
+        (app_tests / "run.log").write_text(
+            f"request={fake_value}" if leak else "credential-free"
+        )
+        if trace:
+            (results / "trace.zip").write_bytes(b"not-a-real-trace")
+
+        env = os.environ.copy()
+        env.update(
+            {
+                "PREVIEW_THROTTLE_VALUE_FILE": str(value_file),
+                "PREVIEW_THROTTLE_ENABLED_MARKER": str(marker),
+                "APP_TESTS_ARTIFACT_DIR": str(app_tests),
+                "PLAYWRIGHT_REPORT_DIR": str(report),
+                "PLAYWRIGHT_TEST_RESULTS_DIR": str(results),
+            }
+        )
+        completed = subprocess.run(
+            ["bash", str(ARTIFACT_GUARD)],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        return temp_dir, completed, value_file, marker, app_tests, report, results
+
+    def test_artifact_guard_accepts_clean_artifacts_and_erases_audit_files(self):
+        temp_dir, completed, value_file, marker, app_tests, report, results = (
+            self._run_artifact_guard()
+        )
+        with temp_dir:
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse(value_file.exists())
+            self.assertFalse(marker.exists())
+            for directory in (app_tests, report, results):
+                self.assertTrue(directory.exists())
+
+    def test_artifact_guard_rejects_and_deletes_a_plaintext_match(self):
+        temp_dir, completed, _, _, app_tests, report, results = (
+            self._run_artifact_guard(leak=True)
+        )
+        with temp_dir:
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertNotIn("unit-test-scoped-value", completed.stderr)
+            for directory in (app_tests, report, results):
+                self.assertFalse(directory.exists())
+
+    def test_artifact_guard_rejects_and_deletes_browser_traces(self):
+        temp_dir, completed, _, _, app_tests, report, results = (
+            self._run_artifact_guard(trace=True)
+        )
+        with temp_dir:
+            self.assertNotEqual(completed.returncode, 0)
+            for directory in (app_tests, report, results):
+                self.assertFalse(directory.exists())
 
     def test_preview_receives_only_issue_scoped_throttle_bypass(self):
         workflow = RUNNER.read_text()
