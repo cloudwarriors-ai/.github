@@ -103,28 +103,54 @@ class RunnerFailurePathContractTests(unittest.TestCase):
 
     def test_app_tests_join_tailnet_after_dependency_installation(self):
         workflow = RUNNER.read_text()
+        app_test_config = workflow.split("  app-test-config:", 1)[1].split(
+            "\n  app-tests:", 1
+        )[0]
         app_tests = workflow.split("  app-tests:", 1)[1].split(
             "\n  finalize:", 1
         )[0]
-        resolve_index = app_tests.index("      - name: Resolve trusted base SHA")
+        finalize = workflow.split("  finalize:", 1)[1]
+        resolve_index = app_test_config.index("      - name: Resolve trusted base SHA")
+        config_checkout_index = app_test_config.index(
+            "      - name: Checkout trusted base config"
+        )
+        config_read_index = app_test_config.index(
+            "      - name: Read trusted App Tests config"
+        )
         checkout_index = app_tests.index("      - name: Checkout trusted base tests")
         install_index = app_tests.index("      - name: Install Python dependencies")
         connect_index = app_tests.index("      - name: Connect to Tailscale")
         run_index = app_tests.index("      - name: Run app test suite")
         connect_step = app_tests[connect_index:run_index]
         checkout_step = app_tests[checkout_index:app_tests.index("      - name: Fetch shared scripts")]
+        run_step = app_tests[run_index:app_tests.index("      - name: Parse results")]
 
-        self.assertLess(resolve_index, checkout_index)
+        self.assertLess(resolve_index, config_checkout_index)
+        self.assertLess(config_checkout_index, config_read_index)
         self.assertLess(install_index, connect_index)
         self.assertLess(connect_index, run_index)
-        self.assertIn("ref: ${{ steps.app_test_base.outputs.sha }}", checkout_step)
+        self.assertIn("ref: ${{ steps.base.outputs.sha }}", app_test_config)
+        self.assertIn(
+            "app_test_command: ${{ steps.config.outputs.app_test_command }}",
+            app_test_config,
+        )
+        self.assertIn(
+            "ref: ${{ needs.app-test-config.outputs.base_sha }}", checkout_step
+        )
         self.assertIn("token: ${{ github.token }}", checkout_step)
         self.assertNotIn("secrets.WORKFLOW_PAT", checkout_step)
         self.assertNotIn("needs.verify-fix-branch.outputs.head_sha", checkout_step)
         self.assertIn(
             'gh api "repos/${GITHUB_REPOSITORY}/commits/${ISSUE_BASE}"',
-            app_tests[resolve_index:checkout_index],
+            app_test_config[resolve_index:config_checkout_index],
         )
+        self.assertIn(
+            "APP_TEST_CMD: ${{ needs.app-test-config.outputs.app_test_command }}",
+            run_step,
+        )
+        self.assertNotIn("needs.read-config.outputs.app_test_command", app_tests)
+        self.assertNotIn("needs.read-config.outputs.app_test_command", finalize)
+        self.assertIn("needs.app-test-config.result == 'success'", finalize)
         self.assertIn("if: env.TS_OAUTH_CLIENT_ID != ''", connect_step)
         self.assertIn(
             "uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade",

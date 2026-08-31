@@ -847,29 +847,23 @@ jobs:
   # ── Job 7.6: Application test suite ────────────────────────────
   # Runs the app's own E2E/integration tests against the live preview.
   # Failures remain observable in the PR body and block release readiness.
-  # Opt-in per app via `.autopilot/config.json → appTestCommand`.
-  app-tests:
-    name: "App Tests (#${{ inputs.issue_number }})"
-    needs: [read-config, verify-fix-branch, deploy-preview]
-    if: |
-      always() && !cancelled() &&
-      needs.deploy-preview.result == 'success' &&
-      needs.deploy-preview.outputs.preview_deployed == 'true' &&
-      needs.read-config.outputs.app_test_command != ''
+  # Resolve every executable App Tests setting from one immutable trusted-base
+  # checkout. The caller event ref may be agent-authored and is not an authority
+  # for commands that run in the credential-bearing App Tests job.
+  app-test-config:
+    name: "Resolve App Test Config"
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-
+    timeout-minutes: 2
     outputs:
-      app_tests_passed: ${{ steps.result.outputs.app_tests_passed }}
-      app_tests_has_regressions: ${{ steps.compare.outputs.has_regressions }}
-      baseline_label: ${{ steps.compare.outputs.baseline_label }}
+      base_sha: ${{ steps.base.outputs.sha }}
+      app_test_command: ${{ steps.config.outputs.app_test_command }}
+      runtime: ${{ steps.config.outputs.runtime }}
+      python_version: ${{ steps.config.outputs.python_version }}
+      python_requirements: ${{ steps.config.outputs.python_requirements }}
 
     steps:
-      # App tests exercise the remote fix preview, but the code running beside
-      # OAuth inputs must come from the trusted base rather than the agent-written
-      # fix branch. Resolve once and checkout the immutable commit.
       - name: Resolve trusted base SHA
-        id: app_test_base
+        id: base
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_BASE: ${{ inputs.base }}
@@ -882,11 +876,57 @@ jobs:
           fi
           echo "sha=$base_sha" >> "$GITHUB_OUTPUT"
 
+      - name: Checkout trusted base config
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.base.outputs.sha }}
+          token: ${{ github.token }}
+          persist-credentials: false
+
+      - name: Read trusted App Tests config
+        id: config
+        run: |
+          set -euo pipefail
+          if [ -f .autopilot/config.json ]; then
+            config=$(cat .autopilot/config.json)
+          else
+            config='{}'
+          fi
+          app_test_command=$(echo "$config" | jq -r '.appTestCommand // ""')
+          echo "app_test_command<<APP_TEST_EOF" >> "$GITHUB_OUTPUT"
+          echo "$app_test_command" >> "$GITHUB_OUTPUT"
+          echo "APP_TEST_EOF" >> "$GITHUB_OUTPUT"
+          echo "runtime=$(echo "$config" | jq -r '.runtime // ""')" >> "$GITHUB_OUTPUT"
+          echo "python_version=$(echo "$config" | jq -r '.pythonVersion // "3.11"')" >> "$GITHUB_OUTPUT"
+          echo "python_requirements=$(echo "$config" | jq -r '.pythonRequirements // "service/requirements.txt"')" >> "$GITHUB_OUTPUT"
+
+  # Opt-in per app via the trusted base's `.autopilot/config.json →
+  # appTestCommand`.
+  app-tests:
+    name: "App Tests (#${{ inputs.issue_number }})"
+    needs: [app-test-config, verify-fix-branch, deploy-preview]
+    if: |
+      always() && !cancelled() &&
+      needs.app-test-config.result == 'success' &&
+      needs.deploy-preview.result == 'success' &&
+      needs.deploy-preview.outputs.preview_deployed == 'true' &&
+      needs.app-test-config.outputs.app_test_command != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    outputs:
+      app_tests_passed: ${{ steps.result.outputs.app_tests_passed }}
+      app_tests_has_regressions: ${{ steps.compare.outputs.has_regressions }}
+      baseline_label: ${{ steps.compare.outputs.baseline_label }}
+
+    steps:
+      # App tests exercise the remote fix preview, but both the checked-out code
+      # and executable configuration are bound to the same trusted-base SHA.
       - name: Checkout trusted base tests
         id: checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.app_test_base.outputs.sha }}
+          ref: ${{ needs.app-test-config.outputs.base_sha }}
           token: ${{ github.token }}
           persist-credentials: false
 
@@ -945,16 +985,16 @@ jobs:
           fi
 
       - name: Setup Python
-        if: needs.read-config.outputs.runtime == 'python'
+        if: needs.app-test-config.outputs.runtime == 'python'
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ needs.read-config.outputs.python_version }}
+          python-version: ${{ needs.app-test-config.outputs.python_version }}
           cache: pip
 
       - name: Install Python dependencies
-        if: needs.read-config.outputs.runtime == 'python'
+        if: needs.app-test-config.outputs.runtime == 'python'
         env:
-          REQS: ${{ needs.read-config.outputs.python_requirements }}
+          REQS: ${{ needs.app-test-config.outputs.python_requirements }}
         run: |
           if [ -f "$REQS" ]; then
             python -m pip install --upgrade pip
@@ -986,7 +1026,7 @@ jobs:
           TEST_USER_PASSWORD: ${{ secrets.E2E_PASSWORD }}
           BROWSERBASE_LOCAL: 'true'
           CI: 'true'
-          APP_TEST_CMD: ${{ needs.read-config.outputs.app_test_command }}
+          APP_TEST_CMD: ${{ needs.app-test-config.outputs.app_test_command }}
         run: |
           set -o pipefail
           mkdir -p /tmp/app-tests
@@ -1097,7 +1137,7 @@ jobs:
   # ── Job 8: Upsert PR and update labels ─────────────────────────────
   finalize:
     name: "Finalize (#${{ inputs.issue_number }})"
-    needs: [rlm-fix, read-config, verify-fix-branch, validate, preflight, deploy-preview, test, validate-api, app-tests]
+    needs: [rlm-fix, read-config, app-test-config, verify-fix-branch, validate, preflight, deploy-preview, test, validate-api, app-tests]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -1114,8 +1154,8 @@ jobs:
     # PREVIEW_CANDIDATE adds the explicit feature-track preview opt-in. The held
     # output is not true until the marker step itself succeeds.
     env:
-      RELEASE_READY: ${{ needs.rlm-fix.result == 'success' && needs.verify-fix-branch.outputs.branch_ready == 'true' && needs.validate.outputs.validation_passed == 'true' && needs.preflight.outputs.preflight_passed == 'true' && (needs.read-config.outputs.preview_deploy != 'true' || needs.deploy-preview.outputs.preview_deployed == 'true') && (needs.read-config.outputs.test_command == '' || needs.test.outputs.tests_passed == 'true') && (needs.read-config.outputs.preview_deploy != 'true' || (needs.validate-api.result == 'success' && needs.validate-api.outputs.api_validation_passed == 'true' && (needs.read-config.outputs.validation_state != 'active' || needs.validate-api.outputs.verdict != 'skipped'))) && (needs.read-config.outputs.app_test_command == '' || (needs.app-tests.result == 'success' && needs.app-tests.outputs.app_tests_passed == 'true' && needs.app-tests.outputs.app_tests_has_regressions != 'true')) }}
-      PREVIEW_CANDIDATE: ${{ needs.read-config.outputs.preview_gate == 'true' && inputs.track == 'features' && needs.rlm-fix.result == 'success' && needs.verify-fix-branch.outputs.branch_ready == 'true' && needs.validate.outputs.validation_passed == 'true' && needs.preflight.outputs.preflight_passed == 'true' && needs.deploy-preview.outputs.preview_deployed == 'true' && (needs.read-config.outputs.test_command == '' || needs.test.outputs.tests_passed == 'true') && needs.validate-api.result == 'success' && needs.validate-api.outputs.api_validation_passed == 'true' && (needs.read-config.outputs.validation_state != 'active' || needs.validate-api.outputs.verdict != 'skipped') && (needs.read-config.outputs.app_test_command == '' || (needs.app-tests.result == 'success' && needs.app-tests.outputs.app_tests_passed == 'true' && needs.app-tests.outputs.app_tests_has_regressions != 'true')) }}
+      RELEASE_READY: ${{ needs.rlm-fix.result == 'success' && needs.app-test-config.result == 'success' && needs.verify-fix-branch.outputs.branch_ready == 'true' && needs.validate.outputs.validation_passed == 'true' && needs.preflight.outputs.preflight_passed == 'true' && (needs.read-config.outputs.preview_deploy != 'true' || needs.deploy-preview.outputs.preview_deployed == 'true') && (needs.read-config.outputs.test_command == '' || needs.test.outputs.tests_passed == 'true') && (needs.read-config.outputs.preview_deploy != 'true' || (needs.validate-api.result == 'success' && needs.validate-api.outputs.api_validation_passed == 'true' && (needs.read-config.outputs.validation_state != 'active' || needs.validate-api.outputs.verdict != 'skipped'))) && (needs.app-test-config.outputs.app_test_command == '' || (needs.app-tests.result == 'success' && needs.app-tests.outputs.app_tests_passed == 'true' && needs.app-tests.outputs.app_tests_has_regressions != 'true')) }}
+      PREVIEW_CANDIDATE: ${{ needs.read-config.outputs.preview_gate == 'true' && inputs.track == 'features' && needs.rlm-fix.result == 'success' && needs.app-test-config.result == 'success' && needs.verify-fix-branch.outputs.branch_ready == 'true' && needs.validate.outputs.validation_passed == 'true' && needs.preflight.outputs.preflight_passed == 'true' && needs.deploy-preview.outputs.preview_deployed == 'true' && (needs.read-config.outputs.test_command == '' || needs.test.outputs.tests_passed == 'true') && needs.validate-api.result == 'success' && needs.validate-api.outputs.api_validation_passed == 'true' && (needs.read-config.outputs.validation_state != 'active' || needs.validate-api.outputs.verdict != 'skipped') && (needs.app-test-config.outputs.app_test_command == '' || (needs.app-tests.result == 'success' && needs.app-tests.outputs.app_tests_passed == 'true' && needs.app-tests.outputs.app_tests_has_regressions != 'true')) }}
 
     steps:
       - name: Checkout fix branch
