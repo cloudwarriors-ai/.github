@@ -120,15 +120,20 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         checkout_index = app_tests.index("      - name: Checkout trusted base tests")
         install_index = app_tests.index("      - name: Install Python dependencies")
         connect_index = app_tests.index("      - name: Connect to Tailscale")
+        derive_index = app_tests.index(
+            "      - name: Derive scoped preview throttle bypass"
+        )
         run_index = app_tests.index("      - name: Run app test suite")
-        connect_step = app_tests[connect_index:run_index]
+        connect_step = app_tests[connect_index:derive_index]
+        derive_step = app_tests[derive_index:run_index]
         checkout_step = app_tests[checkout_index:app_tests.index("      - name: Fetch shared scripts")]
         run_step = app_tests[run_index:app_tests.index("      - name: Parse results")]
 
         self.assertLess(resolve_index, config_checkout_index)
         self.assertLess(config_checkout_index, config_read_index)
         self.assertLess(install_index, connect_index)
-        self.assertLess(connect_index, run_index)
+        self.assertLess(connect_index, derive_index)
+        self.assertLess(derive_index, run_index)
         self.assertIn("ref: ${{ steps.base.outputs.sha }}", app_test_config)
         self.assertIn(
             "app_test_command: ${{ steps.config.outputs.app_test_command }}",
@@ -158,6 +163,43 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         )
         self.assertIn("tags: tag:ci", connect_step)
         self.assertNotIn("run:", connect_step)
+        self.assertIn(
+            "PREVIEW_THROTTLE_BYPASS_KEY: ${{ secrets.PREVIEW_THROTTLE_BYPASS_KEY }}",
+            derive_step,
+        )
+        self.assertIn(
+            '"preview-throttle:${GITHUB_REPOSITORY}:${ISSUE_NUM}"', derive_step
+        )
+        self.assertIn("openssl dgst -sha256 -hmac", derive_step)
+        self.assertIn("echo \"::add-mask::$derived\"", derive_step)
+        self.assertIn("THROTTLE_BYPASS_SECRET=$derived", derive_step)
+        self.assertNotIn("PREVIEW_THROTTLE_BYPASS_KEY", run_step)
+
+    def test_preview_receives_only_issue_scoped_throttle_bypass(self):
+        workflow = RUNNER.read_text()
+        deploy = workflow.split("  deploy-preview:", 1)[1].split("\n  test:", 1)[0]
+        derive = deploy.split(
+            "      - name: Derive scoped preview throttle bypass", 1
+        )[1].split("\n      - name: Connect to Tailscale", 1)[0]
+
+        self.assertIn("PREVIEW_THROTTLE_BYPASS_KEY:", workflow)
+        self.assertIn(
+            "PREVIEW_THROTTLE_BYPASS_KEY: ${{ secrets.PREVIEW_THROTTLE_BYPASS_KEY }}",
+            derive,
+        )
+        self.assertIn(
+            '"preview-throttle:${GITHUB_REPOSITORY}:${ISSUE_NUM}"', derive
+        )
+        self.assertIn("openssl dgst -sha256 -hmac", derive)
+        self.assertIn("PREVIEW_THROTTLE_BYPASS_SECRET=$derived", derive)
+        self.assertEqual(
+            deploy.count("PREVIEW_THROTTLE_BYPASS_SECRET"),
+            4,
+            "derived value should appear in the empty fallback, output, and both SSH env lists",
+        )
+        self.assertNotIn(
+            "PREVIEW_THROTTLE_BYPASS_KEY", deploy.split("      - name: Connect to Tailscale", 1)[1]
+        )
 
 
 if __name__ == "__main__":

@@ -12,6 +12,12 @@ commit-pinned Tailscale action exchanges the existing OAuth secret references
 for the existing `tag:ci` identity. The test command then receives preview
 reachability plus the existing E2E test-user credentials.
 
+Scopely's high-volume Sentinel suite also receives an issue-scoped throttle
+bypass value so test traffic does not lock out its synthetic user. Trusted
+runner steps derive that value with HMAC from a dedicated GitHub secret, the
+repository identity, and issue number. Only the derived value reaches the
+preview host and trusted tests; the master key remains in GitHub Actions.
+
 The fix-branch application, its responses, and the workflow-dispatch ref are
 untrusted until review. No source, manifest, package hook, or shell command from
 either untrusted ref executes in the credential-bearing job. Preview responses
@@ -33,6 +39,9 @@ grant merge authority, or permit a production target.
   executable setting crosses into the job. The join is also ordered after
   trusted-base dependency installation, and contracts enforce provenance and
   ordering.
+- **Cross-preview credential reuse:** agent-authored preview code can read its
+  own derived bypass value. The value is HMAC-bound to repository and issue, so
+  it cannot bypass a sibling preview and does not reveal the master key.
 - **Repudiation:** preview access could be detached from its source revision.
   The job records the resolved trusted-base SHA; GitHub and Tailscale retain the
   workflow/device identity, and artifacts bind results to the run and remote
@@ -64,8 +73,12 @@ prove the non-credential job derives executable settings from an immutable base
 SHA, the App Tests job checks out that same SHA without the broader workflow
 credential, the caller-ref command is forbidden, dependency installation
 precedes the join, and the join uses the pinned action and tag with no shell
-implementation. Live proof must show MagicDNS resolution and a successful App
-Tests outcome against a fresh preview.
+implementation. They also prove the throttle-bypass master is confined to two
+trusted derivation steps and only the issue-scoped value reaches the host and
+test command. The application-side contract must keep bypass authorization
+limited to `APP_ENVIRONMENT=preview` (or DEBUG), use constant-time comparison,
+and remain inert in production. Live proof must show MagicDNS resolution and a
+successful App Tests outcome against a fresh preview.
 
 Residual risk is that trusted base tests and untrusted preview browser code
 still receive the network access needed for the flow and could reach any
