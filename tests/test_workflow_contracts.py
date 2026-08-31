@@ -281,7 +281,15 @@ class RunnerFailurePathContractTests(unittest.TestCase):
             upload,
         )
 
-    def _run_artifact_guard(self, *, leak=False, archive=False, media=False):
+    def _run_artifact_guard(
+        self,
+        *,
+        leak=False,
+        archive=False,
+        media=False,
+        renamed_archive=False,
+        renamed_media=False,
+    ):
         temp_dir = tempfile.TemporaryDirectory()
         root = Path(temp_dir.name)
         value_file = root / "value"
@@ -298,15 +306,24 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         (app_tests / "run.log").write_text(
             f"request={fake_value}" if leak else "credential-free"
         )
-        if archive:
+        if archive or renamed_archive:
             data = report / "data"
             data.mkdir()
             with zipfile.ZipFile(
-                data / "custom-trace.zip", "w", compression=zipfile.ZIP_DEFLATED
+                data / ("trace.data" if renamed_archive else "custom-trace.zip"),
+                "w",
+                compression=zipfile.ZIP_DEFLATED,
             ) as bundle:
                 bundle.writestr("network.log", f"request-header={fake_value}")
         if media:
             (results / "failure.png").write_bytes(b"not-a-real-image")
+        if renamed_media:
+            (results / "failure.data").write_bytes(
+                bytes.fromhex(
+                    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+                    "0000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082"
+                )
+            )
 
         env = os.environ.copy()
         env.update(
@@ -360,6 +377,24 @@ class RunnerFailurePathContractTests(unittest.TestCase):
     def test_artifact_guard_rejects_visual_browser_artifacts(self):
         temp_dir, completed, _, _, app_tests, report, results = (
             self._run_artifact_guard(media=True)
+        )
+        with temp_dir:
+            self.assertNotEqual(completed.returncode, 0)
+            for directory in (app_tests, report, results):
+                self.assertFalse(directory.exists())
+
+    def test_artifact_guard_rejects_renamed_compressed_content(self):
+        temp_dir, completed, _, _, app_tests, report, results = (
+            self._run_artifact_guard(renamed_archive=True)
+        )
+        with temp_dir:
+            self.assertNotEqual(completed.returncode, 0)
+            for directory in (app_tests, report, results):
+                self.assertFalse(directory.exists())
+
+    def test_artifact_guard_rejects_renamed_visual_content(self):
+        temp_dir, completed, _, _, app_tests, report, results = (
+            self._run_artifact_guard(renamed_media=True)
         )
         with temp_dir:
             self.assertNotEqual(completed.returncode, 0)

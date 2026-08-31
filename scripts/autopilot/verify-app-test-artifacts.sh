@@ -24,6 +24,11 @@ cleanup_candidates() {
 
 safe=true
 if [ -f "$enabled_marker" ]; then
+  if ! command -v file >/dev/null 2>&1; then
+    echo "::error::Artifact content classifier is unavailable; refusing credential-bearing upload" >&2
+    safe=false
+  fi
+
   for target in "$app_tests_dir" "$playwright_report_dir" "$playwright_results_dir"; do
     if find "$target" -type f \
       \( -iname '*.zip' -o -iname '*.tar' -o -iname '*.tgz' \
@@ -33,6 +38,27 @@ if [ -f "$enabled_marker" ]; then
       -o -iname '*.webm' \) -print -quit 2>/dev/null | grep -q .; then
       echo "::error::Credential-bearing app-test runs must not create compressed or visual artifacts" >&2
       safe=false
+      break
+    fi
+
+    if [ "$safe" = "true" ]; then
+      while IFS= read -r -d '' artifact; do
+        if ! mime_type=$(LC_ALL=C file --brief --mime-type -- "$artifact"); then
+          echo "::error::Artifact content classification failed; refusing credential-bearing upload" >&2
+          safe=false
+          break
+        fi
+        case "$mime_type" in
+          application/gzip|application/x-7z-compressed|application/x-bzip2|application/x-compress|application/x-tar|application/x-xz|application/zip|image/*|video/*)
+            echo "::error::Credential-bearing app-test runs must not create compressed or visual artifacts" >&2
+            safe=false
+            break
+            ;;
+        esac
+      done < <(find "$target" -type f -print0 2>/dev/null)
+    fi
+
+    if [ "$safe" != "true" ]; then
       break
     fi
   done
