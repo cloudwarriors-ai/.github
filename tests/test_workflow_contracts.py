@@ -95,6 +95,31 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         self.assertIn("steps.app_tests.outcome", app_tests)
         self.assertNotIn("steps.app-tests.outcome", app_tests)
         self.assertNotIn("continue-on-error: true", comparison)
+        self.assertIn("tr -d '\\r\\n' | base64 -d", comparison)
+        self.assertIn(
+            "Daily snapshot content is invalid — falling back to static baseline",
+            comparison,
+        )
+
+    def test_app_tests_join_tailnet_after_dependency_installation(self):
+        workflow = RUNNER.read_text()
+        app_tests = workflow.split("  app-tests:", 1)[1].split(
+            "\n  finalize:", 1
+        )[0]
+        install_index = app_tests.index("      - name: Install Python dependencies")
+        connect_index = app_tests.index("      - name: Connect to Tailscale")
+        run_index = app_tests.index("      - name: Run app test suite")
+        connect_step = app_tests[connect_index:run_index]
+
+        self.assertLess(install_index, connect_index)
+        self.assertLess(connect_index, run_index)
+        self.assertIn("if: env.TS_OAUTH_CLIENT_ID != ''", connect_step)
+        self.assertIn(
+            "uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade",
+            connect_step,
+        )
+        self.assertIn("tags: tag:ci", connect_step)
+        self.assertNotIn("run:", connect_step)
 
 
 if __name__ == "__main__":

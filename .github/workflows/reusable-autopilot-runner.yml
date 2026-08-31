@@ -945,6 +945,20 @@ jobs:
           fi
           pip install httpx pytest pytest-asyncio
 
+      # Join only after dependency installation so package install hooks from
+      # the fix branch never receive tailnet reachability. The test command
+      # needs the scoped tag:ci identity to reach the private preview URLs.
+      - name: Connect to Tailscale
+        if: env.TS_OAUTH_CLIENT_ID != ''
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: 1.98.8
+        env:
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+
       - name: Run app test suite
         id: app_tests
         continue-on-error: true
@@ -999,19 +1013,24 @@ jobs:
           SNAPSHOT_CONTENT=$(gh api "repos/${SHADOW_REPO}/contents/tests/sentinel/daily-snapshot.json?ref=dev" \
             --jq '.content' 2>/dev/null || echo "")
           if [ -n "$SNAPSHOT_CONTENT" ]; then
-            echo "$SNAPSHOT_CONTENT" | base64 -d > /tmp/app-tests/daily-snapshot.json
-            GENERATED_AT=$(python3 -c "import json; d=json.load(open('/tmp/app-tests/daily-snapshot.json')); print(d.get('generated_at',''))" 2>/dev/null || echo "")
-            if [ -n "$GENERATED_AT" ]; then
-              SNAPSHOT_AGE=$(python3 -c "from datetime import datetime,timezone; t=datetime.fromisoformat('${GENERATED_AT}'.replace('Z','+00:00')); print(int((datetime.now(timezone.utc)-t).total_seconds()))" 2>/dev/null || echo "999999")
-              if [ "$SNAPSHOT_AGE" -lt 86400 ]; then
-                SNAPSHOT_DATE=$(python3 -c "from datetime import datetime; t=datetime.fromisoformat('${GENERATED_AT}'.replace('Z','+00:00')); print(t.strftime('%Y-%m-%d %H:%M UTC'))" 2>/dev/null || echo "$GENERATED_AT")
-                BASELINE_FILE="/tmp/app-tests/daily-snapshot.json"
-                BASELINE_LABEL="daily snapshot (${SNAPSHOT_DATE})"
-                echo "::notice::Using daily snapshot from ${SNAPSHOT_DATE}"
-              else
-                SNAPSHOT_HOURS=$(( SNAPSHOT_AGE / 3600 ))
-                echo "::warning::Daily snapshot is ${SNAPSHOT_HOURS}h old — falling back to static baseline"
+            if printf '%s' "$SNAPSHOT_CONTENT" | tr -d '\r\n' | base64 -d > /tmp/app-tests/daily-snapshot.json 2>/dev/null && \
+               python3 -m json.tool /tmp/app-tests/daily-snapshot.json >/dev/null 2>&1; then
+              GENERATED_AT=$(python3 -c "import json; d=json.load(open('/tmp/app-tests/daily-snapshot.json')); print(d.get('generated_at',''))" 2>/dev/null || echo "")
+              if [ -n "$GENERATED_AT" ]; then
+                SNAPSHOT_AGE=$(python3 -c "from datetime import datetime,timezone; t=datetime.fromisoformat('${GENERATED_AT}'.replace('Z','+00:00')); print(int((datetime.now(timezone.utc)-t).total_seconds()))" 2>/dev/null || echo "999999")
+                if [ "$SNAPSHOT_AGE" -lt 86400 ]; then
+                  SNAPSHOT_DATE=$(python3 -c "from datetime import datetime; t=datetime.fromisoformat('${GENERATED_AT}'.replace('Z','+00:00')); print(t.strftime('%Y-%m-%d %H:%M UTC'))" 2>/dev/null || echo "$GENERATED_AT")
+                  BASELINE_FILE="/tmp/app-tests/daily-snapshot.json"
+                  BASELINE_LABEL="daily snapshot (${SNAPSHOT_DATE})"
+                  echo "::notice::Using daily snapshot from ${SNAPSHOT_DATE}"
+                else
+                  SNAPSHOT_HOURS=$(( SNAPSHOT_AGE / 3600 ))
+                  echo "::warning::Daily snapshot is ${SNAPSHOT_HOURS}h old — falling back to static baseline"
+                fi
               fi
+            else
+              echo "::warning::Daily snapshot content is invalid — falling back to static baseline"
+              SNAPSHOT_CONTENT=""
             fi
           fi
 
