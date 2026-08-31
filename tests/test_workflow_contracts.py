@@ -446,8 +446,11 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         self.assertIn('--match-head-commit "$EXPECTED_HEAD_SHA"', auto_merge)
 
         # Non-shadow deployed_sha resolves to the frozen SHA. A shadow run may use
-        # a source projection, but that projection must be built only from the
-        # frozen shadow SHA and become the marker's attested preview revision.
+        # a deterministic source projection built only from the frozen shadow SHA.
+        # Its commit identity is intentionally distinct from the review identity:
+        # later promotion creates a fresh source PR from that same shadow head, and
+        # Praxis's exact-head merge guard must receive the review PR SHA in the
+        # marker rather than the ephemeral source-preview commit SHA.
         self.assertIn(
             f"deployed_sha: ${{{{ steps.shadow-prep.outputs.deploy_sha || {frozen} }}}}",
             deploy,
@@ -456,11 +459,8 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         self.assertIn('git -C shadow fetch origin "$VERIFIED_HEAD_SHA"', deploy)
         self.assertIn('"origin/${BASE_BRANCH}...${VERIFIED_HEAD_SHA}"', deploy)
         self.assertIn('echo "deploy_sha=$(git -C source rev-parse HEAD)"', deploy)
-        self.assertIn(
-            "DEPLOYED_SHA: ${{ needs.deploy-preview.outputs.deployed_sha }}", hold
-        )
-        self.assertIn("const deployedSha = process.env.DEPLOYED_SHA || headSha;", hold)
-        self.assertIn("sha=${deployedSha} pr=${prNumber}", hold)
+        self.assertIn("const marker = `${markerPrefix}url=${previewUrl} sha=${headSha} pr=${prNumber} -->`;", hold)
+        self.assertNotIn("DEPLOYED_SHA:", hold)
         self.assertIn("const expectedHeadSha = process.env.EXPECTED_HEAD_SHA;", hold)
         self.assertIn("if (headSha !== expectedHeadSha)", hold)
 
