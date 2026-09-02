@@ -10,12 +10,24 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / ".github/workflows/reusable-autopilot-runner.yml"
 VALIDATE = ROOT / ".github/workflows/reusable-validate.yml"
-UPSTREAM_SHA = "1d40793f26822445d3a990be5c35c90148b98b76"
+UPSTREAM_SHA = "28861f9c215f398613de376333511216fd93d1e1"
 SHARED_TOOLS_SHA = "8f83e52d35646082eba9a3333b895416a1c7bf2d"
 ARTIFACT_GUARD = ROOT / "scripts/autopilot/verify-app-test-artifacts.sh"
 
 
 class RunnerFailurePathContractTests(unittest.TestCase):
+    def test_final_turn_exhaustion_is_exposed_to_the_caller(self):
+        workflow = RUNNER.read_text()
+        workflow_call = workflow.split("  workflow_call:", 1)[1].split(
+            "\n\nconcurrency:", 1
+        )[0]
+
+        self.assertIn("max_turns_reached:", workflow_call)
+        self.assertIn(
+            "value: ${{ jobs.rlm-fix.outputs.max_turns_reached }}",
+            workflow_call,
+        )
+
     def test_writer_receives_base_owned_validation_contract(self):
         workflow = RUNNER.read_text()
         read_config = workflow.split("  read-config:", 1)[1].split(

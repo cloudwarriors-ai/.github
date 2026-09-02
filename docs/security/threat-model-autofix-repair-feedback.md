@@ -11,6 +11,9 @@ repository validation commands fail. The relevant actors and boundaries are:
 3. Validation output crosses from feature-controlled commands into the model continuation.
 4. A separate publisher job, which never executes candidate code, applies the resulting patch to
    the frozen authorized branch and is the only writer-path job with repository write authority.
+5. The writer exports a boolean final-turn-exhaustion result through the reusable-workflow boundary
+   to a trusted repository-specific coordinator. The shared workflow does not choose retry labels
+   or dispatch policy.
 
 Issue text, candidate code, and validation output are untrusted. Repository and model credentials
 are restricted. No production data enters this flow.
@@ -26,6 +29,8 @@ are restricted. No production data enters this flow.
 | Unbounded cost or retry loops | Writer turns and job wall clock are bounded | Validation failures had no explicit repair fuse | Permit exactly one continuation, cap it at 20 turns, and divide the configured wall-clock budget between primary and repair phases |
 | False success after a failed repair | Downstream release gates fail closed | A continuation could claim success without proving it | The trusted workflow reruns every configured command after the continuation and publishes no patch unless they all exit zero |
 | Denial of service through oversized output | GitHub job logs have platform limits | Refeeding an entire log can amplify cost | Keep only the last 24,000 sanitized characters in the repair prompt |
+| Spoofed or over-broad Large retry | The writer already records the structured Claude result subtype | Generic failure text could be misclassified as turn exhaustion | Export only the final `max_turns_reached` boolean from the credential-isolated writer; callers must not parse logs or treat timeouts, validation failures, or other writer errors as exhaustion |
+| Retry loop or duplicated model spend | Writer and repair budgets are bounded per run | A caller could repeatedly requeue the same exhausted issue | Keep retry policy outside the shared workflow and require the repository coordinator to enforce one normal-to-Large transition with durable idempotency evidence |
 
 ## Authorization behavior
 
@@ -36,6 +41,8 @@ are restricted. No production data enters this flow.
   exact force-with-lease for the authorized issue branch.
 - Contract tests assert the new repair fuse, credential removal, validation rerun, and retained
   publisher separation.
+- The shared workflow exposes exhaustion as data only. It receives no added Issues or Actions
+  authority and cannot apply labels or dispatch a retry itself.
 
 ## Considered but not credible
 
@@ -49,4 +56,6 @@ are restricted. No production data enters this flow.
 Redaction is pattern-based and cannot prove arbitrary candidate output contains no sensitive value.
 The stronger control is that validation commands run with model and repository-write credentials
 removed. A repository may still print non-credential internal fixture data; repository owners must
-keep Autofix validation commands suitable for model-visible diagnostics.
+keep Autofix validation commands suitable for model-visible diagnostics. A compromised trusted
+repository coordinator can still spend its configured Large budget; the shared workflow cannot
+enforce repository-specific retry counts.

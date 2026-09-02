@@ -64,6 +64,10 @@ on:
         required: false
         type: string
         default: '8f83e52d35646082eba9a3333b895416a1c7bf2d'
+    outputs:
+      max_turns_reached:
+        description: 'true only when the final writer or repair continuation exhausted its turn budget'
+        value: ${{ jobs.rlm-fix.outputs.max_turns_reached }}
     secrets:
       WORKFLOW_PAT:
         required: true
@@ -154,7 +158,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
-    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@1d40793f26822445d3a990be5c35c90148b98b76
+    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@28861f9c215f398613de376333511216fd93d1e1
     with:
       issue_number: ${{ fromJSON(inputs.issue_number) }}
       head: ${{ inputs.head }}
