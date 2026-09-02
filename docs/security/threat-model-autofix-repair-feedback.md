@@ -11,9 +11,10 @@ repository validation commands fail. The relevant actors and boundaries are:
 3. Validation output crosses from feature-controlled commands into the model continuation.
 4. A separate publisher job, which never executes candidate code, applies the resulting patch to
    the frozen authorized branch and is the only writer-path job with repository write authority.
-5. The writer exports a boolean final-turn-exhaustion result through the reusable-workflow boundary
-   to a trusted repository-specific coordinator. The shared workflow does not choose retry labels
-   or dispatch policy.
+5. The writer exports final-turn exhaustion and bounded process timeout booleans through the
+   reusable-workflow boundary. The publisher separately exports `base-drift` only after comparing
+   the frozen writer SHA with the current authorized base. A trusted repository-specific
+   coordinator owns retry labels and dispatch policy.
 
 Issue text, candidate code, and validation output are untrusted. Repository and model credentials
 are restricted. No production data enters this flow.
@@ -26,10 +27,10 @@ are restricted. No production data enters this flow.
 | Credential disclosure through logs | GitHub masks console secrets; writer has no repository-write token | Local captured logs are not protected by GitHub masking | Validation subprocesses run with model credentials removed; the feedback sanitizer redacts credential-shaped values before the model sees the excerpt (ASVS V8.3) |
 | Tool-authority escalation | Writer and publisher are separate jobs | A repair continuation could accidentally acquire publisher authority | Resume inside the same read-only writer job with the same restricted tools; keep all repository writes in the fresh publisher job (ASVS V4.1) |
 | Branch tampering between validation and publish | Publisher verifies the frozen base SHA and uses force-with-lease | A continuation adds another mutation phase | The continuation stays in the frozen writer workspace; the publisher still rejects base drift and unexpected remote-head changes (ASVS V4.2) |
-| Unbounded cost or retry loops | Writer turns and job wall clock are bounded | Validation failures had no explicit repair fuse | Permit exactly one continuation, cap it at 20 turns, and divide the configured wall-clock budget between primary and repair phases |
+| Unbounded cost or retry loops | Writer turns and processes are bounded | The writer process deadline also killed trusted validation, while callers could not distinguish a process timeout | Keep the process budget separate from a caller-sized total job budget, export a timeout boolean, and leave retry count to the trusted coordinator |
 | False success after a failed repair | Downstream release gates fail closed | A continuation could claim success without proving it | The trusted workflow reruns every configured command after the continuation and publishes no patch unless they all exit zero |
 | Denial of service through oversized output | GitHub job logs have platform limits | Refeeding an entire log can amplify cost | Keep only the last 24,000 sanitized characters in the repair prompt |
-| Spoofed or over-broad Large retry | The writer already records the structured Claude result subtype | Generic failure text could be misclassified as turn exhaustion | Export only the final `max_turns_reached` boolean from the credential-isolated writer; callers must not parse logs or treat timeouts, validation failures, or other writer errors as exhaustion |
+| Spoofed or over-broad retry | The writer records structured result subtypes and the publisher owns the base comparison | Generic failure text could be misclassified as recoverable | Export only typed `max_turns_reached`, `writer_timed_out`, and `base-drift` signals from trusted jobs; callers must not parse issue text or logs |
 | Retry loop or duplicated model spend | Writer and repair budgets are bounded per run | A caller could repeatedly requeue the same exhausted issue | Keep retry policy outside the shared workflow and require the repository coordinator to enforce one normal-to-Large transition with durable idempotency evidence |
 
 ## Authorization behavior
@@ -41,8 +42,8 @@ are restricted. No production data enters this flow.
   exact force-with-lease for the authorized issue branch.
 - Contract tests assert the new repair fuse, credential removal, validation rerun, and retained
   publisher separation.
-- The shared workflow exposes exhaustion as data only. It receives no added Issues or Actions
-  authority and cannot apply labels or dispatch a retry itself.
+- The shared workflow exposes typed recovery signals as data only. It receives no added Issues or
+  Actions authority and cannot apply labels or dispatch a retry itself.
 
 ## Considered but not credible
 

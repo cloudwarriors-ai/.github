@@ -10,7 +10,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / ".github/workflows/reusable-autopilot-runner.yml"
 VALIDATE = ROOT / ".github/workflows/reusable-validate.yml"
-UPSTREAM_SHA = "28861f9c215f398613de376333511216fd93d1e1"
+UPSTREAM_SHA = "591791ae76d69830bbb6d463ec84eade1f63a958"
 SHARED_TOOLS_SHA = "8f83e52d35646082eba9a3333b895416a1c7bf2d"
 ARTIFACT_GUARD = ROOT / "scripts/autopilot/verify-app-test-artifacts.sh"
 
@@ -26,6 +26,23 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         self.assertIn(
             "value: ${{ jobs.rlm-fix.outputs.max_turns_reached }}",
             workflow_call,
+        )
+
+    def test_bounded_recovery_signals_and_validation_margin_are_forwarded(self):
+        workflow = RUNNER.read_text()
+        workflow_call = workflow.split("  workflow_call:", 1)[1].split(
+            "\n\nconcurrency:", 1
+        )[0]
+        rlm_fix = workflow.split("  rlm-fix:", 1)[1].split(
+            "\n  read-config:", 1
+        )[0]
+
+        self.assertIn("writer_timed_out:", workflow_call)
+        self.assertIn("retry_reason:", workflow_call)
+        self.assertIn("writer_job_timeout_minutes:", workflow_call)
+        self.assertIn(
+            "writer_job_timeout_minutes: ${{ inputs.writer_job_timeout_minutes }}",
+            rlm_fix,
         )
 
     def test_writer_receives_base_owned_validation_contract(self):
