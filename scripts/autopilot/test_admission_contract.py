@@ -16,6 +16,7 @@ class AdmissionContractTests(unittest.TestCase):
         intake = self.text("reusable-autopilot-intake.yml")
         self.assertNotIn("listWorkflowRunsForRepo", intake)
         self.assertNotIn(".includes('autopilot')", intake)
+        self.assertIn("github.paginate(github.rest.actions.listWorkflowRuns", intake)
         self.assertIn("workflow_id: 'autopilot-runner.yml'", intake)
         self.assertIn("run.status !== 'completed'", intake)
         self.assertIn("|| 'legacy'", intake)
@@ -32,6 +33,7 @@ class AdmissionContractTests(unittest.TestCase):
             self.assertNotIn("listWorkflowRunsForRepo", workflow, name)
             self.assertNotIn(".includes('autopilot')", workflow, name)
             self.assertIn("workflow_id: 'autopilot-runner.yml'", workflow, name)
+            self.assertIn("github.paginate(github.rest.actions.listWorkflowRuns", workflow, name)
 
     def test_runner_publishes_attempt_run_bound_start_and_release(self):
         runner = self.text("reusable-autopilot-runner.yml")
@@ -51,6 +53,11 @@ class AdmissionContractTests(unittest.TestCase):
         self.assertIn("String(intent.repo) === expectedRepo", runner)
         self.assertIn("No live trusted Praxis admission intent binds attempt", runner)
         self.assertIn("state=(started|released)", runner)
+        self.assertIn("praxis_claim_url:", runner)
+        self.assertIn("const claimUrl = String(process.env.PRAXIS_CLAIM_URL", runner)
+        self.assertIn("await fetch(claimUrl", runner)
+        self.assertIn("claim.accepted !== true", runner)
+        self.assertLess(runner.index("await fetch(claimUrl"), runner.index("state=started conclusion="))
 
 
 if __name__ == "__main__":

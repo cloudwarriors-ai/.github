@@ -40,7 +40,7 @@ Label issue "AUTOFIX: Ready"
 | Workflow | Purpose |
 |----------|---------|
 | `reusable-autopilot-intake.yml` | Kill switch, fail-closed serialized exact/non-terminal-runner legacy guard, Praxis admission lineage, context resolution, dispatches runner |
-| `reusable-autopilot-runner.yml` | Full pipeline plus trusted repository/issue/attempt intent and strict attempt/run-bound Praxis start and terminal release evidence |
+| `reusable-autopilot-runner.yml` | Full pipeline plus trusted intent, synchronous exact-run Praxis claim before compute, and strict attempt/run-bound start/release evidence |
 | `reusable-autopilot-cleanup.yml` | Cron: delete stale autopilot branches and orphaned preview containers |
 | `reusable-autopilot-report.yml` | Weekly metrics: success rate, PRs merged, pipeline health |
 
@@ -163,8 +163,8 @@ jobs:
 ### Safety Controls
 
 - **Kill switches** — `AUTOPILOT: Disabled` label (global), `AUTOPILOT: Skip` label (per-issue), `DEPLOY_ENABLED=false` (per-environment)
-- **Rate limiting** — Max 5 exact runner executions per repo; transient intake/comment workflows do not count, and an unreadable occupancy signal fails admission closed
-- **Praxis admission authority** — Centrally admitted compute requires the authenticated publisher's strict, fresh repository/issue/attempt/nonce-bound intent and rejects attempts already started or released; a numeric attempt input alone is rejected
+- **Rate limiting** — Max 5 exact runner executions per repo; every page of the exact workflow is counted, transient intake/comment workflows do not count, and an unreadable occupancy signal fails admission closed
+- **Praxis admission authority** — Centrally admitted compute requires the authenticated publisher's strict, fresh repository/issue/attempt/nonce-bound intent and an accepted HTTPS claim for that PAT-authenticated exact active Actions run; a stale/released attempt or unavailable authority aborts before compute
 - **Queue drain** — Shadow repos can hold more than 5 `AUTOFIX: Ready` issues; the queue drain starts the oldest eligible items when runner slots open
 - **Queue agent** — Shadow repos can promote source issues into `AUTOFIX: Ready` from a human-approved `AUTOPILOT: Queue` pool, keeping up to 5 runners busy with a small Ready buffer
 - **Concurrency groups** — One intake and one runner per issue, no overlapping runs

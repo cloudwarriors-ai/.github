@@ -246,7 +246,7 @@ jobs:
             }
 
             const runResponses = await Promise.all(activeStatuses.map((status) =>
-              github.rest.actions.listWorkflowRuns({
+              github.paginate(github.rest.actions.listWorkflowRuns, {
                 owner: shadowOwner,
                 repo: shadowRepo,
                 workflow_id: 'autopilot-runner.yml',
@@ -255,9 +255,9 @@ jobs:
               })
             ));
             const activeStatusSet = new Set(activeStatuses);
-            const activeRuns = runResponses
-              .flatMap((response) => response.data.workflow_runs)
-              .filter((run) => activeStatusSet.has(run.status));
+            const activeRuns = [...new Map(
+              runResponses.flat().map((run) => [run.id, run])
+            ).values()].filter((run) => activeStatusSet.has(run.status));
             const activeCount = activeRuns.length;
 
             const readyShadowIssues = await github.paginate(github.rest.issues.listForRepo, {

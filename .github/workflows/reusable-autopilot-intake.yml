@@ -174,13 +174,13 @@ jobs:
                 core.setOutput('reason', '');
                 return;
               }
-              const runs = await github.rest.actions.listWorkflowRuns({
+              const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 workflow_id: 'autopilot-runner.yml',
                 per_page: 100,
               });
-              const activeRuns = runs.data.workflow_runs.filter(run => run.status !== 'completed');
+              const activeRuns = runs.filter(run => run.status !== 'completed');
               if (activeRuns.length >= 5) {
                 core.setOutput('disabled', 'true');
                 core.setOutput('reason', `Rate limit: ${activeRuns.length} real runner runs (max 5)`);
