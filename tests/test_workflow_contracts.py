@@ -10,12 +10,64 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / ".github/workflows/reusable-autopilot-runner.yml"
 VALIDATE = ROOT / ".github/workflows/reusable-validate.yml"
-UPSTREAM_SHA = "e5fe345623f53cb07e15afdba661a9e77bbcdd0f"
+UPSTREAM_SHA = "1d40793f26822445d3a990be5c35c90148b98b76"
 SHARED_TOOLS_SHA = "8f83e52d35646082eba9a3333b895416a1c7bf2d"
 ARTIFACT_GUARD = ROOT / "scripts/autopilot/verify-app-test-artifacts.sh"
 
 
 class RunnerFailurePathContractTests(unittest.TestCase):
+    def test_writer_receives_base_owned_validation_contract(self):
+        workflow = RUNNER.read_text()
+        read_config = workflow.split("  read-config:", 1)[1].split(
+            "\n  # ── Job 2.5:", 1
+        )[0]
+        rlm_fix = workflow.split("  rlm-fix:", 1)[1].split(
+            "\n  read-config:", 1
+        )[0]
+
+        self.assertIn("validation_commands_b64:", read_config)
+        self.assertIn(".buildCommand", read_config)
+        self.assertIn(".lintCommand", read_config)
+        self.assertIn(".testCommand", read_config)
+        self.assertIn("needs: [authorize-target, read-config]", rlm_fix)
+        self.assertIn(
+            "validation_commands_b64: ${{ needs.read-config.outputs.validation_commands_b64 }}",
+            rlm_fix,
+        )
+        self.assertIn("repair_turns: 20", rlm_fix)
+        self.assertIn("runtime: ${{ needs.read-config.outputs.runtime }}", rlm_fix)
+        self.assertIn(
+            "python_version: ${{ needs.read-config.outputs.python_version }}",
+            rlm_fix,
+        )
+
+    def test_configured_build_and_lint_gate_preview_allocation(self):
+        workflow = RUNNER.read_text()
+        preflight = workflow.split("  preflight:", 1)[1].split(
+            "\n  # ── Job 5:", 1
+        )[0]
+        deploy = workflow.split("  deploy-preview:", 1)[1].split(
+            "\n  # ── Job 6:", 1
+        )[0]
+
+        self.assertIn("Install Node dependencies for configured preflight", preflight)
+        self.assertIn("Install Python dependencies for configured preflight", preflight)
+        self.assertIn("Run configured build and lint", preflight)
+        self.assertIn('bash -eo pipefail -c "$BUILD_COMMAND"', preflight)
+        self.assertIn('bash -eo pipefail -c "$LINT_COMMAND"', preflight)
+        self.assertIn('echo "passed=false"', preflight)
+        self.assertIn("needs.preflight.outputs.preflight_passed == 'true'", deploy)
+
+    def test_failure_report_separates_infrastructure_from_code(self):
+        workflow = RUNNER.read_text()
+        finalize = workflow.split("  finalize:", 1)[1]
+
+        self.assertIn("return 'infrastructure'", finalize)
+        self.assertIn("return 'code'", finalize)
+        self.assertIn("**Failure class:**", finalize)
+        self.assertIn("do not merge until the required gate is green", finalize)
+        self.assertNotIn("Consider re-running the API Validate job or merging", finalize)
+
     def test_branch_verifier_uses_ambient_read_only_token(self):
         workflow = RUNNER.read_text()
         verifier = workflow.split("  verify-fix-branch:", 1)[1].split(
@@ -76,7 +128,7 @@ class RunnerFailurePathContractTests(unittest.TestCase):
         self.assertIn("dev|main|master", authorize)
         self.assertIn('expected="autofix/issue-${ISSUE_NUM}"', authorize)
         self.assertIn('if [ "$HEAD" != "$expected" ]; then', authorize)
-        self.assertIn("    needs: authorize-target", rlm_fix)
+        self.assertIn("    needs: [authorize-target, read-config]", rlm_fix)
         self.assertIn("    environment: dev", deploy)
         self.assertNotIn("environment: production", deploy)
         self.assertNotIn("inputs.base == 'main'", deploy)

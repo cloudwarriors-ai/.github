@@ -149,18 +149,23 @@ jobs:
   # ── Job 1: Call RLM fix engine ──────────────────────────────────────
   rlm-fix:
     name: "RLM Fix (#${{ inputs.issue_number }})"
-    needs: authorize-target
+    needs: [authorize-target, read-config]
     permissions:
       contents: write
       pull-requests: write
       issues: write
-    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@e5fe345623f53cb07e15afdba661a9e77bbcdd0f
+    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@1d40793f26822445d3a990be5c35c90148b98b76
     with:
       issue_number: ${{ fromJSON(inputs.issue_number) }}
       head: ${{ inputs.head }}
       base: ${{ inputs.base }}
       max_claude_turns: ${{ inputs.max_claude_turns }}
       writer_timeout_minutes: ${{ inputs.writer_timeout_minutes }}
+      repair_turns: 20
+      validation_commands_b64: ${{ needs.read-config.outputs.validation_commands_b64 }}
+      runtime: ${{ needs.read-config.outputs.runtime }}
+      python_version: ${{ needs.read-config.outputs.python_version }}
+      python_requirements: ${{ needs.read-config.outputs.python_requirements }}
       claude_provider: ${{ inputs.claude_provider }}
       max_rlm_cost: ${{ inputs.max_rlm_cost }}
       rlm_model: ${{ inputs.rlm_model }}
@@ -194,6 +199,7 @@ jobs:
       runtime: ${{ steps.config.outputs.runtime }}
       python_version: ${{ steps.config.outputs.python_version }}
       python_requirements: ${{ steps.config.outputs.python_requirements }}
+      validation_commands_b64: ${{ steps.config.outputs.validation_commands_b64 }}
     steps:
       - name: Checkout caller repo
         uses: actions/checkout@v4
@@ -233,6 +239,9 @@ jobs:
             echo "runtime=$(echo "$CONFIG" | jq -r '.runtime // ""')" >> "$GITHUB_OUTPUT"
             echo "python_version=$(echo "$CONFIG" | jq -r '.pythonVersion // "3.11"')" >> "$GITHUB_OUTPUT"
             echo "python_requirements=$(echo "$CONFIG" | jq -r '.pythonRequirements // "service/requirements.txt"')" >> "$GITHUB_OUTPUT"
+            VALIDATION_COMMANDS=$(echo "$CONFIG" | jq -c \
+              '[.buildCommand // "", .lintCommand // "", .testCommand // ""] | map(select(length > 0))')
+            echo "validation_commands_b64=$(printf '%s' "$VALIDATION_COMMANDS" | base64 -w0)" >> "$GITHUB_OUTPUT"
           else
             echo "No .autopilot/config.json found — using defaults" >&2
             echo "config_json={}" >> "$GITHUB_OUTPUT"
@@ -250,6 +259,7 @@ jobs:
             echo "runtime=" >> "$GITHUB_OUTPUT"
             echo "python_version=3.11" >> "$GITHUB_OUTPUT"
             echo "python_requirements=service/requirements.txt" >> "$GITHUB_OUTPUT"
+            echo "validation_commands_b64=W10=" >> "$GITHUB_OUTPUT"
           fi
 
   # ── Job 2.5: Verify fix branch exists before gates ─────────────────
@@ -425,17 +435,68 @@ jobs:
           token: ${{ secrets.WORKFLOW_PAT }}
           persist-credentials: false
 
+      - name: Setup Node.js for configured preflight
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Node dependencies for configured preflight
+        run: |
+          set -euo pipefail
+          if [ -f package.json ]; then npm ci; fi
+
+      - name: Setup Python for configured preflight
+        if: needs.read-config.outputs.runtime == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ needs.read-config.outputs.python_version }}
+          cache: pip
+
+      - name: Install Python dependencies for configured preflight
+        if: needs.read-config.outputs.runtime == 'python'
+        env:
+          REQS: ${{ needs.read-config.outputs.python_requirements }}
+        run: |
+          set -euo pipefail
+          if [ -f "$REQS" ]; then
+            python -m pip install --upgrade pip
+            pip install -r "$REQS"
+          fi
+
+      - name: Run configured build and lint
+        id: configured
+        continue-on-error: true
+        env:
+          BUILD_COMMAND: ${{ needs.read-config.outputs.build_command }}
+          LINT_COMMAND: ${{ needs.read-config.outputs.lint_command }}
+        run: |
+          set -euo pipefail
+          if [ -n "$BUILD_COMMAND" ]; then bash -eo pipefail -c "$BUILD_COMMAND"; fi
+          if [ -n "$LINT_COMMAND" ]; then bash -eo pipefail -c "$LINT_COMMAND"; fi
+
       - name: Run project preflight
-        id: preflight
+        id: project
         continue-on-error: true
         run: |
+          set -euo pipefail
           if [ -f .autopilot/preflight.sh ]; then
             chmod +x .autopilot/preflight.sh
             ./.autopilot/preflight.sh
-            echo "passed=true" >> "$GITHUB_OUTPUT"
           else
             echo "No .autopilot/preflight.sh — skipping"
+          fi
+
+      - name: Determine preflight result
+        id: preflight
+        if: always()
+        env:
+          CONFIGURED_OUTCOME: ${{ steps.configured.outcome }}
+          PROJECT_OUTCOME: ${{ steps.project.outcome }}
+        run: |
+          if [ "$CONFIGURED_OUTCOME" = "success" ] && [ "$PROJECT_OUTCOME" = "success" ]; then
             echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
           fi
 
   # ── Job 5: Deploy preview container ────────────────────────────────
@@ -1819,6 +1880,12 @@ jobs:
             const apiExtra = apiFailureReason ? `reason: \`${apiFailureReason}\`` : (process.env.API_VERDICT && process.env.API_VERDICT !== 'skipped' ? `verdict: ${process.env.API_VERDICT}` : '');
             const branchExtra = process.env.FIX_BRANCH_FAILURE ? `reason: \`${process.env.FIX_BRANCH_FAILURE}\`` : '';
             const previewExtra = process.env.DEPLOY_PREVIEW_STATUS === 'false' ? 'preview unavailable — preview-dependent checks skipped' : '';
+            const failureClass = (() => {
+              if (process.env.RLM_RESULT !== 'success') return 'writer';
+              if (process.env.DEPLOY_PREVIEW_STATUS === 'false' || apiFailureReason === 'preview-unreachable' || apiFailureReason === 'transient-http') return 'infrastructure';
+              if (process.env.FIX_BRANCH_READY !== 'true' || process.env.VALIDATION_RESULT !== 'true' || process.env.PREFLIGHT_RESULT !== 'true' || process.env.TESTS_RESULT === 'false' || process.env.API_VERDICT === 'regression' || process.env.APP_TESTS_RESULT === 'false') return 'code';
+              return 'release-contract';
+            })();
             const gateRows = [
               gateRow('RLM fix',           process.env.RLM_RESULT === 'success' ? 'true' : 'false'),
               gateRow('Fix branch',        process.env.FIX_BRANCH_READY, branchExtra),
@@ -1853,7 +1920,7 @@ jobs:
                 return 'Sentinel could not reach the preview environment. The VPS deploy may have failed or DNS for the preview URL is not propagating. Check Deploy Preview job and the preview URL.';
               }
               if (apiFailureReason === 'transient-http' || (process.env.API_VALIDATION_RESULT === 'false' && process.env.DEPLOY_PREVIEW_STATUS === 'false')) {
-                return 'Likely infrastructure flake. Consider re-running the API Validate job or merging if the PR diff itself looks good.';
+                return 'Infrastructure failed. Retry the pipeline; do not merge until the required gate is green.';
               }
               if (process.env.API_VERDICT === 'regression' || apiFailureReason === 'goldens-drift') {
                 return 'Sentinel detected an API regression — review the validation report before merging.';
@@ -1864,6 +1931,8 @@ jobs:
             const followUpBody = [
               followUpMarker,
               '### Autopilot — Follow-Up Required',
+              '',
+              `**Failure class:** \`${failureClass}\``,
               '',
               prLine,
               '',
