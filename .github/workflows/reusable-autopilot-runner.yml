@@ -17,11 +17,6 @@ on:
         required: false
         type: string
         default: ''
-      praxis_claim_url:
-        description: 'HTTPS endpoint that atomically accepts a centrally admitted runner claim'
-        required: false
-        type: string
-        default: ''
       track:
         description: 'Track: bugs or features'
         required: true
@@ -116,7 +111,6 @@ jobs:
         env:
           ISSUE_NUMBER: ${{ inputs.issue_number }}
           PRAXIS_ATTEMPT_ID: ${{ inputs.praxis_attempt_id }}
-          PRAXIS_CLAIM_URL: ${{ inputs.praxis_claim_url }}
           PRAXIS_CLAIM_TOKEN: ${{ secrets.WORKFLOW_PAT }}
         with:
           github-token: ${{ secrets.WORKFLOW_PAT }}
@@ -176,16 +170,14 @@ jobs:
               core.setOutput('accepted', 'false');
               return;
             }
-            const claimUrl = String(process.env.PRAXIS_CLAIM_URL || '').trim();
-            if (!/^https:\/\//.test(claimUrl)) {
-              core.setOutput('accepted', 'false');
-              core.setFailed('A centrally admitted runner requires an HTTPS Praxis claim URL');
-              return;
-            }
+            // This origin/path is an immutable trust boundary. Never attach WORKFLOW_PAT to a
+            // caller-controlled URL, and never follow redirects that could move the credential.
+            const claimUrl = 'https://molty-dev.cloudwarriors.ai/praxis/webhooks/autofix-claim';
             let claimResponse;
             try {
               claimResponse = await fetch(claimUrl, {
                 method: 'POST',
+                redirect: 'error',
                 headers: {
                   'Accept': 'application/json',
                   'Authorization': `Bearer ${process.env.PRAXIS_CLAIM_TOKEN}`,

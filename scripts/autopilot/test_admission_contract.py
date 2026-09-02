@@ -53,8 +53,12 @@ class AdmissionContractTests(unittest.TestCase):
         self.assertIn("String(intent.repo) === expectedRepo", runner)
         self.assertIn("No live trusted Praxis admission intent binds attempt", runner)
         self.assertIn("state=(started|released)", runner)
-        self.assertIn("praxis_claim_url:", runner)
-        self.assertIn("const claimUrl = String(process.env.PRAXIS_CLAIM_URL", runner)
+        self.assertNotIn("praxis_claim_url:", runner)
+        self.assertIn(
+            "const claimUrl = 'https://molty-dev.cloudwarriors.ai/praxis/webhooks/autofix-claim'",
+            runner,
+        )
+        self.assertIn("redirect: 'error'", runner)
         self.assertIn("await fetch(claimUrl", runner)
         self.assertIn("claim.accepted !== true", runner)
         self.assertLess(runner.index("await fetch(claimUrl"), runner.index("state=started conclusion="))
