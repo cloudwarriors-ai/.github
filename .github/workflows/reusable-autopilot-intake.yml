@@ -343,19 +343,24 @@ jobs:
         with:
           github-token: ${{ secrets.WORKFLOW_PAT }}
           script: |
+            const runnerInputs = {
+              issue_number: String(${{ inputs.issue_number }}),
+              issue_title: (process.env.ISSUE_TITLE || '').slice(0, 200),
+              track: process.env.ISSUE_TRACK,
+              base: process.env.ISSUE_BASE,
+              head: process.env.ISSUE_HEAD,
+            };
+            const praxisAttempt = '${{ inputs.praxis_attempt_id }}'.trim();
+            // Existing repository-local runner workflows do not declare this new input. GitHub
+            // rejects unknown workflow_dispatch inputs, so preserve their published contract by
+            // adding the lineage only for centrally admitted Praxis calls.
+            if (praxisAttempt) runnerInputs.praxis_attempt_id = praxisAttempt;
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: 'autopilot-runner.yml',
               ref: process.env.RUNNER_REF,
-              inputs: {
-                issue_number: String(${{ inputs.issue_number }}),
-                issue_title: (process.env.ISSUE_TITLE || '').slice(0, 200),
-                track: process.env.ISSUE_TRACK,
-                base: process.env.ISSUE_BASE,
-                head: process.env.ISSUE_HEAD,
-                praxis_attempt_id: '${{ inputs.praxis_attempt_id }}',
-              },
+              inputs: runnerInputs,
             });
 
       # --- Set STATUS: In Progress label ---

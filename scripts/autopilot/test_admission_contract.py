@@ -22,7 +22,11 @@ class AdmissionContractTests(unittest.TestCase):
         self.assertIn("|| 'legacy'", intake)
         self.assertIn("Admission unavailable: runner occupancy read failed", intake)
         self.assertNotIn("core.warning(`Rate limit check failed", intake)
-        self.assertIn("praxis_attempt_id: '${{ inputs.praxis_attempt_id }}'", intake)
+        self.assertIn("const praxisAttempt = '${{ inputs.praxis_attempt_id }}'.trim()", intake)
+        self.assertIn("if (praxisAttempt) runnerInputs.praxis_attempt_id = praxisAttempt", intake)
+        dispatch = intake.split("await github.rest.actions.createWorkflowDispatch", 1)[1]
+        self.assertIn("inputs: runnerInputs", dispatch)
+        self.assertNotIn("praxis_attempt_id: '${{ inputs.praxis_attempt_id }}'", dispatch)
 
     def test_queue_helpers_count_only_exact_runner(self):
         for name in (
