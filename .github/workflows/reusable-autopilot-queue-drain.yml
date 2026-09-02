@@ -101,19 +101,17 @@ jobs:
             const marker = '<!-- AUTOPILOT_QUEUE_DRAIN -->';
 
             const runResponses = await Promise.all(activeStatuses.map((status) =>
-              github.rest.actions.listWorkflowRunsForRepo({
+              github.rest.actions.listWorkflowRuns({
                 owner,
                 repo,
+                workflow_id: 'autopilot-runner.yml',
                 status,
                 per_page: 100,
               })
             ));
             const runs = runResponses.flatMap((response) => response.data.workflow_runs);
             const activeStatusSet = new Set(activeStatuses);
-            const activeAutopilotRuns = runs.filter((run) =>
-              activeStatusSet.has(run.status) &&
-              String(run.name || '').toLowerCase().includes('autopilot')
-            );
+            const activeAutopilotRuns = runs.filter((run) => activeStatusSet.has(run.status));
             const availableSlots = Math.max(0, maxConcurrent - activeAutopilotRuns.length);
             const dispatchLimit = Math.min(availableSlots, batchSize);
 

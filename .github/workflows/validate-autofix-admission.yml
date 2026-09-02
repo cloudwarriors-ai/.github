@@ -1,0 +1,22 @@
+name: "Validate: Autofix Admission Contracts"
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/*autopilot*.yml'
+      - 'scripts/autopilot/test_admission_contract.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Prove exact occupancy and runner lineage
+        run: python scripts/autopilot/test_admission_contract.py -v

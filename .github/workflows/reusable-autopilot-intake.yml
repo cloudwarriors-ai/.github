@@ -12,6 +12,11 @@ on:
         required: false
         type: string
         default: ''
+      praxis_attempt_id:
+        description: 'Praxis admission attempt; bypasses only the legacy local count'
+        required: false
+        type: string
+        default: ''
       linked_pr_override:
         description: 'Optional linked PR override'
         required: false
@@ -158,20 +163,25 @@ jobs:
               core.warning(`Issue label check failed: ${err.message}`);
             }
 
-            // Rate limit: max 5 concurrent autopilot runs
+            // Praxis owns atomic admission when it supplies an attempt. Legacy callers count only
+            // exact runner executions, never transient workflows with "Autopilot" in their name.
             try {
-              const runs = await github.rest.actions.listWorkflowRunsForRepo({
+              if ('${{ inputs.praxis_attempt_id }}') {
+                core.notice('Praxis already reserved runner capacity');
+                core.setOutput('disabled', 'false');
+                core.setOutput('reason', '');
+                return;
+              }
+              const runs = await github.rest.actions.listWorkflowRuns({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
+                workflow_id: 'autopilot-runner.yml',
                 status: 'in_progress',
                 per_page: 100,
               });
-              const autopilotRuns = runs.data.workflow_runs.filter(r =>
-                r.name && r.name.toLowerCase().includes('autopilot')
-              );
-              if (autopilotRuns.length >= 5) {
+              if (runs.data.workflow_runs.length >= 5) {
                 core.setOutput('disabled', 'true');
-                core.setOutput('reason', `Rate limit: ${autopilotRuns.length} concurrent runs (max 5)`);
+                core.setOutput('reason', `Rate limit: ${runs.data.workflow_runs.length} real runner runs (max 5)`);
                 return;
               }
             } catch (err) {
@@ -340,6 +350,7 @@ jobs:
                 track: process.env.ISSUE_TRACK,
                 base: process.env.ISSUE_BASE,
                 head: process.env.ISSUE_HEAD,
+                praxis_attempt_id: '${{ inputs.praxis_attempt_id }}',
               },
             });
 
