@@ -58,6 +58,9 @@ class AdmissionContractTests(unittest.TestCase):
         self.assertIn("await fetch(claimUrl", runner)
         self.assertIn("claim.accepted !== true", runner)
         self.assertLess(runner.index("await fetch(claimUrl"), runner.index("state=started conclusion="))
+        release_header = runner.split("\n  admission-release:", 1)[1].split("\n    runs-on:", 1)[0]
+        self.assertIn("if: always() && inputs.praxis_attempt_id != ''", release_header)
+        self.assertNotIn("needs.admission-start.outputs.accepted", release_header)
 
 
 if __name__ == "__main__":

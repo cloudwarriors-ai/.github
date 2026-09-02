@@ -1645,7 +1645,7 @@ jobs:
       - validate-api
       - app-tests
       - finalize
-    if: always() && inputs.praxis_attempt_id != '' && needs.admission-start.outputs.accepted == 'true'
+    if: always() && inputs.praxis_attempt_id != ''
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions:
