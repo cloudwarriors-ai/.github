@@ -187,7 +187,9 @@ jobs:
                 return;
               }
             } catch (err) {
-              core.warning(`Rate limit check failed: ${err.message}`);
+              core.setOutput('disabled', 'true');
+              core.setOutput('reason', `Admission unavailable: runner occupancy read failed (${err.message})`);
+              return;
             }
 
             core.setOutput('disabled', 'false');

@@ -19,6 +19,8 @@ class AdmissionContractTests(unittest.TestCase):
         self.assertIn("workflow_id: 'autopilot-runner.yml'", intake)
         self.assertIn("run.status !== 'completed'", intake)
         self.assertIn("|| 'legacy'", intake)
+        self.assertIn("Admission unavailable: runner occupancy read failed", intake)
+        self.assertNotIn("core.warning(`Rate limit check failed", intake)
         self.assertIn("praxis_attempt_id: '${{ inputs.praxis_attempt_id }}'", intake)
 
     def test_queue_helpers_count_only_exact_runner(self):
@@ -40,8 +42,15 @@ class AdmissionContractTests(unittest.TestCase):
         self.assertIn("if: always()", runner)
         self.assertIn("users.getAuthenticated()", runner)
         self.assertIn("comment.user?.login", runner)
-        self.assertIn("startPattern = /^<!-- praxis:autofix-runner", runner)
+        self.assertIn("lifecyclePattern = /^<!-- praxis:autofix-runner", runner)
         self.assertIn("firstLine === marker", runner)
+        self.assertIn("const hasAdmissionIntent = comments.some", runner)
+        self.assertIn("process.env.PRAXIS_ATTEMPT_ID", runner)
+        self.assertIn("const intentMaxAgeMs = 180 * 60 * 1000", runner)
+        self.assertIn("String(intent.attempt_id) === attempt", runner)
+        self.assertIn("String(intent.repo) === expectedRepo", runner)
+        self.assertIn("No live trusted Praxis admission intent binds attempt", runner)
+        self.assertIn("state=(started|released)", runner)
 
 
 if __name__ == "__main__":
