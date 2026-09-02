@@ -169,7 +169,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
-    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@591791ae76d69830bbb6d463ec84eade1f63a958
+    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@931d41d584042d824a7d7aa11d0305c13303c4c0
     with:
       issue_number: ${{ fromJSON(inputs.issue_number) }}
       head: ${{ inputs.head }}
