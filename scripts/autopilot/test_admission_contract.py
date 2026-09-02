@@ -17,6 +17,8 @@ class AdmissionContractTests(unittest.TestCase):
         self.assertNotIn("listWorkflowRunsForRepo", intake)
         self.assertNotIn(".includes('autopilot')", intake)
         self.assertIn("workflow_id: 'autopilot-runner.yml'", intake)
+        self.assertIn("run.status !== 'completed'", intake)
+        self.assertIn("|| 'legacy'", intake)
         self.assertIn("praxis_attempt_id: '${{ inputs.praxis_attempt_id }}'", intake)
 
     def test_queue_helpers_count_only_exact_runner(self):
@@ -36,6 +38,10 @@ class AdmissionContractTests(unittest.TestCase):
         self.assertIn("state=released conclusion=${conclusion}", runner)
         self.assertIn("admission-release:", runner)
         self.assertIn("if: always()", runner)
+        self.assertIn("users.getAuthenticated()", runner)
+        self.assertIn("comment.user?.login", runner)
+        self.assertIn("startPattern = /^<!-- praxis:autofix-runner", runner)
+        self.assertIn("firstLine === marker", runner)
 
 
 if __name__ == "__main__":

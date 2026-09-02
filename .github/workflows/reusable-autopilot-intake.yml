@@ -27,7 +27,9 @@ on:
         required: true
 
 concurrency:
-  group: autopilot-intake-${{ inputs.issue_number }}-${{ github.repository }}
+  # Praxis admissions are already atomic and remain issue-scoped. Legacy entries serialize their
+  # exact-runner count + dispatch across the repository so concurrent issues cannot race the cap.
+  group: autopilot-intake-${{ inputs.praxis_attempt_id != '' && format('praxis-{0}', inputs.issue_number) || 'legacy' }}-${{ github.repository }}
   cancel-in-progress: false
 
 permissions:
@@ -176,12 +178,12 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 workflow_id: 'autopilot-runner.yml',
-                status: 'in_progress',
                 per_page: 100,
               });
-              if (runs.data.workflow_runs.length >= 5) {
+              const activeRuns = runs.data.workflow_runs.filter(run => run.status !== 'completed');
+              if (activeRuns.length >= 5) {
                 core.setOutput('disabled', 'true');
-                core.setOutput('reason', `Rate limit: ${runs.data.workflow_runs.length} real runner runs (max 5)`);
+                core.setOutput('reason', `Rate limit: ${activeRuns.length} real runner runs (max 5)`);
                 return;
               }
             } catch (err) {

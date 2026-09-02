@@ -39,8 +39,8 @@ Label issue "AUTOFIX: Ready"
 
 | Workflow | Purpose |
 |----------|---------|
-| `reusable-autopilot-intake.yml` | Kill switch, exact-runner legacy guard, Praxis admission lineage, context resolution, dispatches runner |
-| `reusable-autopilot-runner.yml` | Full pipeline plus attempt/run-bound Praxis start and terminal release evidence |
+| `reusable-autopilot-intake.yml` | Kill switch, serialized exact/non-terminal-runner legacy guard, Praxis admission lineage, context resolution, dispatches runner |
+| `reusable-autopilot-runner.yml` | Full pipeline plus trusted-author, strict attempt/run-bound Praxis start and terminal release evidence |
 | `reusable-autopilot-cleanup.yml` | Cron: delete stale autopilot branches and orphaned preview containers |
 | `reusable-autopilot-report.yml` | Weekly metrics: success rate, PRs merged, pipeline health |
 

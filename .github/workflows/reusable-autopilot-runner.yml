@@ -125,8 +125,16 @@ jobs:
               owner: context.repo.owner, repo: context.repo.repo,
               issue_number: Number('${{ inputs.issue_number }}'), per_page: 100,
             });
-            const prefix = `<!-- praxis:autofix-runner attempt=${attempt} `;
-            if (comments.some(comment => String(comment.body || '').startsWith(prefix))) {
+            const identity = await github.rest.users.getAuthenticated();
+            const trustedLogin = String(identity.data.login || '').toLowerCase();
+            const startPattern = /^<!-- praxis:autofix-runner attempt=([1-9][0-9]*) run=([1-9][0-9]*) state=started conclusion= -->$/;
+            const duplicate = comments.some(comment => {
+              const firstLine = String(comment.body || '').split(/\r?\n/, 1)[0].trim();
+              const match = firstLine.match(startPattern);
+              return String(comment.user?.login || '').toLowerCase() === trustedLogin &&
+                match && match[1] === attempt;
+            });
+            if (duplicate) {
               core.notice(`Attempt ${attempt} already has a runner; duplicate run ${context.runId} exits`);
               core.setOutput('accepted', 'false');
               return;
@@ -1583,7 +1591,14 @@ jobs:
               owner: context.repo.owner, repo: context.repo.repo,
               issue_number: Number('${{ inputs.issue_number }}'), per_page: 100,
             });
-            if (!comments.some(comment => String(comment.body || '').startsWith(marker))) {
+            const identity = await github.rest.users.getAuthenticated();
+            const trustedLogin = String(identity.data.login || '').toLowerCase();
+            const alreadyReleased = comments.some(comment => {
+              const firstLine = String(comment.body || '').split(/\r?\n/, 1)[0].trim();
+              return String(comment.user?.login || '').toLowerCase() === trustedLogin &&
+                firstLine === marker;
+            });
+            if (!alreadyReleased) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner, repo: context.repo.repo,
                 issue_number: Number('${{ inputs.issue_number }}'),
