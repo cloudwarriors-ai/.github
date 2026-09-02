@@ -1,0 +1,22 @@
+name: Workflow contracts
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # Pull-request checks run on a synthetic merge commit; full history is
+          # required to prove that the immutable shared-tools ancestor exists.
+          fetch-depth: 0
+      - name: Verify reusable-workflow contracts
+        run: python -m unittest discover -s tests -p 'test_*.py'

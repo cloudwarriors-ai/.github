@@ -59,6 +59,15 @@ on:
         required: false
         type: string
         default: 'anthropic/claude-opus-4.6'
+      shared_tools_ref:
+        description: 'Immutable cloudwarriors-ai/.github commit used for shared scripts'
+        required: false
+        type: string
+        default: '8f83e52d35646082eba9a3333b895416a1c7bf2d'
+    outputs:
+      max_turns_reached:
+        description: 'true only when the final writer or repair continuation exhausted its turn budget'
+        value: ${{ jobs.rlm-fix.outputs.max_turns_reached }}
     secrets:
       WORKFLOW_PAT:
         required: true
@@ -79,38 +88,101 @@ on:
         required: false
       PII_HMAC_KEY:
         required: false
+      SSH_HOST:
+        required: false
+      SSH_USER:
+        required: false
+      SSH_PRIVATE_KEY:
+        required: false
+      TS_OAUTH_CLIENT_ID:
+        required: false
+      TS_OAUTH_SECRET:
+        required: false
+      PREVIEW_THROTTLE_BYPASS_KEY:
+        # Master key used only in trusted runner steps to derive an
+        # issue-scoped preview throttle-bypass value. The master never reaches
+        # application code or the preview host.
+        required: false
+      PREVIEW_MARKER_TOKEN:
+        # A separate identity with Issues write plus Pull Requests/Contents read
+        # for the authoritative Praxis marker and shadow-source resolution.
+        # It is never exposed to a job that executes feature-controlled code.
+        required: true
 
 concurrency:
   group: autopilot-runner-${{ inputs.issue_number }}-${{ github.repository }}
   cancel-in-progress: false
 
 permissions:
-  contents: write
-  pull-requests: write
-  issues: write
+  contents: read
+  pull-requests: read
+  issues: read
   actions: read
 
 jobs:
+  # ── Job 0: Bound publisher authority ────────────────────────────────
+  authorize-target:
+    name: "Authorize Target (#${{ inputs.issue_number }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Enforce dev-only issue branch
+        env:
+          BASE: ${{ inputs.base }}
+          HEAD: ${{ inputs.head }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          if [ "$BASE" != "dev" ]; then
+            echo "::error::Autopilot publisher is authorized only for base=dev"
+            exit 1
+          fi
+          case "$HEAD" in
+            dev|main|master)
+              echo "::error::Autopilot publisher may not write protected branch '$HEAD'"
+              exit 1
+              ;;
+          esac
+          expected="autofix/issue-${ISSUE_NUM}"
+          if [ "$HEAD" != "$expected" ]; then
+            echo "::error::Autopilot head must be the issue-bound branch '$expected'"
+            exit 1
+          fi
+
   # ── Job 1: Call RLM fix engine ──────────────────────────────────────
   rlm-fix:
     name: "RLM Fix (#${{ inputs.issue_number }})"
-    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@main
+    needs: [authorize-target, read-config]
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@28861f9c215f398613de376333511216fd93d1e1
     with:
       issue_number: ${{ fromJSON(inputs.issue_number) }}
       head: ${{ inputs.head }}
       base: ${{ inputs.base }}
       max_claude_turns: ${{ inputs.max_claude_turns }}
       writer_timeout_minutes: ${{ inputs.writer_timeout_minutes }}
+      repair_turns: 20
+      validation_commands_b64: ${{ needs.read-config.outputs.validation_commands_b64 }}
+      runtime: ${{ needs.read-config.outputs.runtime }}
+      python_version: ${{ needs.read-config.outputs.python_version }}
+      python_requirements: ${{ needs.read-config.outputs.python_requirements }}
       claude_provider: ${{ inputs.claude_provider }}
       max_rlm_cost: ${{ inputs.max_rlm_cost }}
       rlm_model: ${{ inputs.rlm_model }}
       scout_model: ${{ inputs.scout_model }}
       claude_model: ${{ inputs.claude_model }}
-    secrets: inherit
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 
   # ── Job 2: Read project config ──────────────────────────────────────
   read-config:
     name: "Read Config"
+    needs: authorize-target
     runs-on: ubuntu-latest
     timeout-minutes: 2
     outputs:
@@ -121,11 +193,17 @@ jobs:
       app_test_command: ${{ steps.config.outputs.app_test_command }}
       db_migrate_command: ${{ steps.config.outputs.db_migrate_command }}
       health_endpoint: ${{ steps.config.outputs.health_endpoint }}
+      frontend_health_endpoint: ${{ steps.config.outputs.frontend_health_endpoint }}
       preview_deploy: ${{ steps.config.outputs.preview_deploy }}
+      # Opt-in preview gate: hold a successful FEATURE preview for a human verdict
+      # instead of tearing it down and merging. Finalize owns the hold decision.
+      preview_gate: ${{ steps.config.outputs.preview_gate }}
+      validation_state: ${{ steps.config.outputs.validation_state }}
       auto_merge: ${{ steps.config.outputs.auto_merge }}
       runtime: ${{ steps.config.outputs.runtime }}
       python_version: ${{ steps.config.outputs.python_version }}
       python_requirements: ${{ steps.config.outputs.python_requirements }}
+      validation_commands_b64: ${{ steps.config.outputs.validation_commands_b64 }}
     steps:
       - name: Checkout caller repo
         uses: actions/checkout@v4
@@ -151,6 +229,7 @@ jobs:
             echo "APP_TEST_EOF" >> "$GITHUB_OUTPUT"
             echo "db_migrate_command=$(echo "$CONFIG" | jq -r '.dbMigrateCommand // ""')" >> "$GITHUB_OUTPUT"
             echo "health_endpoint=$(echo "$CONFIG" | jq -r '.healthEndpoint // "/api/v1/health"')" >> "$GITHUB_OUTPUT"
+            echo "frontend_health_endpoint=$(echo "$CONFIG" | jq -r '.frontendHealthEndpoint // "/"')" >> "$GITHUB_OUTPUT"
             CONFIG_PREVIEW_DEPLOY=$(echo "$CONFIG" | jq -r '.previewDeploy // false')
             if [ "${DEPLOY_ENABLED,,}" = "false" ]; then
               echo "DEPLOY_ENABLED=false -- overriding previewDeploy to false"
@@ -158,10 +237,15 @@ jobs:
             else
               echo "preview_deploy=$CONFIG_PREVIEW_DEPLOY" >> "$GITHUB_OUTPUT"
             fi
+            echo "preview_gate=$(echo "$CONFIG" | jq -r '.previewGate // false')" >> "$GITHUB_OUTPUT"
+            echo "validation_state=$(echo "$CONFIG" | jq -r '.validation.state // "active"')" >> "$GITHUB_OUTPUT"
             echo "auto_merge=$(echo "$CONFIG" | jq -r '.mergeRequirements.autoMerge // false')" >> "$GITHUB_OUTPUT"
             echo "runtime=$(echo "$CONFIG" | jq -r '.runtime // ""')" >> "$GITHUB_OUTPUT"
             echo "python_version=$(echo "$CONFIG" | jq -r '.pythonVersion // "3.11"')" >> "$GITHUB_OUTPUT"
             echo "python_requirements=$(echo "$CONFIG" | jq -r '.pythonRequirements // "service/requirements.txt"')" >> "$GITHUB_OUTPUT"
+            VALIDATION_COMMANDS=$(echo "$CONFIG" | jq -c \
+              '[.buildCommand // "", .lintCommand // "", .testCommand // ""] | map(select(length > 0))')
+            echo "validation_commands_b64=$(printf '%s' "$VALIDATION_COMMANDS" | base64 -w0)" >> "$GITHUB_OUTPUT"
           else
             echo "No .autopilot/config.json found — using defaults" >&2
             echo "config_json={}" >> "$GITHUB_OUTPUT"
@@ -171,11 +255,15 @@ jobs:
             echo "app_test_command=" >> "$GITHUB_OUTPUT"
             echo "db_migrate_command=" >> "$GITHUB_OUTPUT"
             echo "health_endpoint=/api/v1/health" >> "$GITHUB_OUTPUT"
+            echo "frontend_health_endpoint=/" >> "$GITHUB_OUTPUT"
             echo "preview_deploy=false" >> "$GITHUB_OUTPUT"
+            echo "preview_gate=false" >> "$GITHUB_OUTPUT"
+            echo "validation_state=active" >> "$GITHUB_OUTPUT"
             echo "auto_merge=false" >> "$GITHUB_OUTPUT"
             echo "runtime=" >> "$GITHUB_OUTPUT"
             echo "python_version=3.11" >> "$GITHUB_OUTPUT"
             echo "python_requirements=service/requirements.txt" >> "$GITHUB_OUTPUT"
+            echo "validation_commands_b64=W10=" >> "$GITHUB_OUTPUT"
           fi
 
   # ── Job 2.5: Verify fix branch exists before gates ─────────────────
@@ -189,6 +277,7 @@ jobs:
     outputs:
       branch_ready: ${{ steps.branch.outputs.branch_ready }}
       has_changes: ${{ steps.branch.outputs.has_changes }}
+      head_sha: ${{ steps.branch.outputs.head_sha }}
       failure_reason: ${{ steps.branch.outputs.failure_reason }}
       already_fixed: ${{ steps.branch.outputs.already_fixed }}
       already_fixed_reason: ${{ steps.branch.outputs.already_fixed_reason }}
@@ -198,7 +287,9 @@ jobs:
         id: branch
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.WORKFLOW_PAT }}
+          # This step only reads a branch and compares commits. The ambient
+          # read-only token is sufficient and remains available on failure paths.
+          github-token: ${{ github.token }}
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
@@ -207,6 +298,7 @@ jobs:
 
             core.setOutput('branch_ready', 'false');
             core.setOutput('has_changes', 'false');
+            core.setOutput('head_sha', '');
             core.setOutput('failure_reason', '');
             core.setOutput('already_fixed', 'false');
             core.setOutput('already_fixed_reason', '');
@@ -225,8 +317,14 @@ jobs:
               return;
             }
 
+            let headSha = '';
             try {
-              await github.rest.repos.getBranch({ owner, repo, branch: head });
+              const { data: branch } = await github.rest.repos.getBranch({ owner, repo, branch: head });
+              headSha = branch.commit.sha;
+              if (!/^[0-9a-f]{40}$/.test(headSha)) {
+                core.setFailed(`Branch ${head} resolved to an invalid commit SHA`);
+                return;
+              }
             } catch (error) {
               if (error.status === 404) {
                 core.setOutput('failure_reason', 'missing-head-branch');
@@ -240,7 +338,7 @@ jobs:
               const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({
                 owner,
                 repo,
-                basehead: `${base}...${head}`,
+                basehead: `${base}...${headSha}`,
               });
               const changedFiles = comparison.files || [];
               if (changedFiles.length === 0) {
@@ -250,7 +348,8 @@ jobs:
               }
               core.setOutput('branch_ready', 'true');
               core.setOutput('has_changes', 'true');
-              core.notice(`Fix branch ${head} is ready with ${changedFiles.length} changed file(s)`);
+              core.setOutput('head_sha', headSha);
+              core.notice(`Fix branch ${head} is frozen at ${headSha} with ${changedFiles.length} changed file(s)`);
             } catch (error) {
               core.setOutput('failure_reason', 'compare-failed');
               core.setFailed(`Could not compare ${base}...${head}: ${error.message}`);
@@ -274,8 +373,9 @@ jobs:
         id: checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.head }}
+          ref: ${{ needs.verify-fix-branch.outputs.head_sha }}
           token: ${{ secrets.WORKFLOW_PAT }}
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -283,8 +383,18 @@ jobs:
           node-version: '22'
 
       - name: Fetch shared scripts
+        env:
+          WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
+          SHARED_TOOLS_REF: ${{ inputs.shared_tools_ref }}
         run: |
-          git clone --depth 1 https://x-access-token:${{ secrets.WORKFLOW_PAT }}@github.com/cloudwarriors-ai/.github.git /tmp/org-github
+          set -euo pipefail
+          git init /tmp/org-github
+          git -C /tmp/org-github remote add origin \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/cloudwarriors-ai/.github.git"
+          git -C /tmp/org-github fetch --depth 1 origin "$SHARED_TOOLS_REF"
+          git -C /tmp/org-github remote set-url origin https://github.com/cloudwarriors-ai/.github.git
+          git -C /tmp/org-github checkout --detach FETCH_HEAD
+          test "$(git -C /tmp/org-github rev-parse HEAD)" = "$SHARED_TOOLS_REF"
 
       - name: Validate issue bundle
         id: validate
@@ -325,38 +435,93 @@ jobs:
         id: checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.head }}
+          ref: ${{ needs.verify-fix-branch.outputs.head_sha }}
           token: ${{ secrets.WORKFLOW_PAT }}
+          persist-credentials: false
+
+      - name: Setup Node.js for configured preflight
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Node dependencies for configured preflight
+        run: |
+          set -euo pipefail
+          if [ -f package.json ]; then npm ci; fi
+
+      - name: Setup Python for configured preflight
+        if: needs.read-config.outputs.runtime == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ needs.read-config.outputs.python_version }}
+          cache: pip
+
+      - name: Install Python dependencies for configured preflight
+        if: needs.read-config.outputs.runtime == 'python'
+        env:
+          REQS: ${{ needs.read-config.outputs.python_requirements }}
+        run: |
+          set -euo pipefail
+          if [ -f "$REQS" ]; then
+            python -m pip install --upgrade pip
+            pip install -r "$REQS"
+          fi
+
+      - name: Run configured build and lint
+        id: configured
+        continue-on-error: true
+        env:
+          BUILD_COMMAND: ${{ needs.read-config.outputs.build_command }}
+          LINT_COMMAND: ${{ needs.read-config.outputs.lint_command }}
+        run: |
+          set -euo pipefail
+          if [ -n "$BUILD_COMMAND" ]; then bash -eo pipefail -c "$BUILD_COMMAND"; fi
+          if [ -n "$LINT_COMMAND" ]; then bash -eo pipefail -c "$LINT_COMMAND"; fi
 
       - name: Run project preflight
-        id: preflight
+        id: project
         continue-on-error: true
         run: |
+          set -euo pipefail
           if [ -f .autopilot/preflight.sh ]; then
             chmod +x .autopilot/preflight.sh
             ./.autopilot/preflight.sh
-            echo "passed=true" >> "$GITHUB_OUTPUT"
           else
             echo "No .autopilot/preflight.sh — skipping"
+          fi
+
+      - name: Determine preflight result
+        id: preflight
+        if: always()
+        env:
+          CONFIGURED_OUTCOME: ${{ steps.configured.outcome }}
+          PROJECT_OUTCOME: ${{ steps.project.outcome }}
+        run: |
+          if [ "$CONFIGURED_OUTCOME" = "success" ] && [ "$PROJECT_OUTCOME" = "success" ]; then
             echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
           fi
 
   # ── Job 5: Deploy preview container ────────────────────────────────
   deploy-preview:
     name: "Deploy Preview (#${{ inputs.issue_number }})"
-    needs: [rlm-fix, read-config, verify-fix-branch, preflight]
+    needs: [authorize-target, rlm-fix, read-config, verify-fix-branch, preflight]
     if: |
       needs.verify-fix-branch.outputs.branch_ready == 'true' &&
       needs.read-config.outputs.preview_deploy == 'true' &&
       vars.DEPLOY_ENABLED != 'false' &&
       needs.preflight.outputs.preflight_passed == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment: ${{ inputs.base == 'main' && 'production' || 'dev' }}
+    # Capacity-four deploys have taken just over 13 minutes in live measurements.
+    # Leave room for one 25-minute attempt, backoff, and a second attempt.
+    timeout-minutes: 55
+    environment: dev
 
     outputs:
       preview_url:  ${{ steps.set-url.outputs.preview_url }}
       backend_url:  ${{ steps.set-url.outputs.backend_url }}
+      deployed_sha: ${{ steps.shadow-prep.outputs.deploy_sha || needs.verify-fix-branch.outputs.head_sha }}
       # source_repo is set on shadow runs; empty on non-shadow. Used by validate-api
       # to point Sentinel's manifest checkout at the source repo (which has validation.json).
       source_repo:  ${{ steps.shadow-prep.outputs.source_repo }}
@@ -379,7 +544,7 @@ jobs:
           WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
           ISSUE_NUM: ${{ inputs.issue_number }}
           BASE_BRANCH: ${{ inputs.base }}
-          HEAD_BRANCH: ${{ inputs.head }}
+          VERIFIED_HEAD_SHA: ${{ needs.verify-fix-branch.outputs.head_sha }}
         run: |
           set -euo pipefail
           git config --global user.name "Claude Code Bot"
@@ -397,8 +562,9 @@ jobs:
           # Fetch shadow fix branch and extract only application changes
           git clone --no-tags \
             "https://x-access-token:${WORKFLOW_PAT}@github.com/${SHADOW_REPO}.git" shadow
+          git -C shadow fetch origin "$VERIFIED_HEAD_SHA"
           git -C shadow diff --binary \
-            "origin/${BASE_BRANCH}...origin/${HEAD_BRANCH}" \
+            "origin/${BASE_BRANCH}...${VERIFIED_HEAD_SHA}" \
             -- . \
             ':(exclude).shadow' \
             ':(exclude).github/workflows/claude-ci.yml' \
@@ -408,6 +574,7 @@ jobs:
           if [ ! -s /tmp/shadow-preview.patch ]; then
             echo "::warning::No application changes found in shadow fix"
             echo "deploy_head=${BASE_BRANCH}" >> "$GITHUB_OUTPUT"
+            echo "deploy_sha=$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
             echo "source_repo=${SOURCE_REPO}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -417,6 +584,7 @@ jobs:
           git -C source push origin "HEAD:${PREVIEW_BRANCH}" --force
 
           echo "deploy_head=${PREVIEW_BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "deploy_sha=$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "source_repo=${SOURCE_REPO}" >> "$GITHUB_OUTPUT"
           echo "Pushed shadow diff → ${SOURCE_REPO}:${PREVIEW_BRANCH}"
 
@@ -441,6 +609,36 @@ jobs:
           version: 1.98.8
         env:
           TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+
+      - name: Derive scoped preview throttle bypass
+        env:
+          PREVIEW_THROTTLE_BYPASS_KEY: ${{ secrets.PREVIEW_THROTTLE_BYPASS_KEY }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PREVIEW_THROTTLE_BYPASS_KEY" ]; then
+            rm -f "$RUNNER_TEMP/preview-deploy-throttle-bypass"
+            exit 0
+          fi
+          derived=$(printf '%s' "preview-throttle:${GITHUB_REPOSITORY}:${ISSUE_NUM}" \
+            | openssl dgst -sha256 -hmac "$PREVIEW_THROTTLE_BYPASS_KEY" -binary \
+            | openssl base64 -A)
+          echo "::add-mask::$derived"
+          umask 077
+          printf '%s' "$derived" > "$RUNNER_TEMP/preview-deploy-throttle-bypass"
+
+      - name: Expose scoped preview throttle bypass (attempt 1)
+        run: |
+          set -euo pipefail
+          value_file="$RUNNER_TEMP/preview-deploy-throttle-bypass"
+          if [ -s "$value_file" ]; then
+            derived=$(cat "$value_file")
+            echo "::add-mask::$derived"
+            echo "PREVIEW_THROTTLE_BYPASS_SECRET=$derived" >> "$GITHUB_ENV"
+          else
+            echo "PREVIEW_THROTTLE_BYPASS_SECRET=" >> "$GITHUB_ENV"
+          fi
+
       - name: Deploy preview to VPS (attempt 1)
         id: deploy-1
         continue-on-error: true
@@ -449,31 +647,54 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          command_timeout: 15m
-          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN
+          command_timeout: 25m
+          envs: DEPLOY_HEAD,DEPLOY_SHA,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN,PREVIEW_MODE,PREVIEW_PORT_BASE,PREVIEW_TS_HOST,PREVIEW_CAPACITY,PREVIEW_THROTTLE_BYPASS_SECRET
           script: |
             cd "$VPS_PATH"
             git fetch origin dev --depth 1
             git checkout origin/dev -- scripts/ .autopilot/
-            "$VPS_PATH/scripts/preview-deploy.sh" "$DEPLOY_HEAD" "$DEPLOY_ISSUE"
+            "$VPS_PATH/scripts/preview-deploy.sh" "$DEPLOY_HEAD" "$DEPLOY_ISSUE" "$DEPLOY_SHA"
         env:
-          GITHUB_TOKEN: ${{ secrets.WORKFLOW_PAT }}
           DEPLOY_HEAD: ${{ steps.shadow-prep.outputs.deploy_head || inputs.head }}
+          DEPLOY_SHA: ${{ steps.shadow-prep.outputs.deploy_sha || needs.verify-fix-branch.outputs.head_sha }}
           DEPLOY_ISSUE: ${{ inputs.issue_number }}
           VPS_PATH: ${{ vars.VPS_REPO_PATH }}
           PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
           PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
+          PREVIEW_MODE: ${{ vars.PREVIEW_MODE || '' }}
+          PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '' }}
+          # Capacity belt for the repo's preview-deploy.sh: the host refuses to stand up more
+          # previews than this (Praxis is the authority; this catches manual/out-of-band runs).
+          PREVIEW_CAPACITY: ${{ vars.PREVIEW_CAPACITY || '' }}
+          PREVIEW_TS_HOST: ${{ vars.PREVIEW_TS_HOST || '' }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
           PII_ENCRYPTION_KEY: ${{ secrets.PII_ENCRYPTION_KEY }}
           PII_HMAC_KEY: ${{ secrets.PII_HMAC_KEY }}
 
+      - name: Clear scoped preview throttle bypass (attempt 1)
+        if: always()
+        run: echo "PREVIEW_THROTTLE_BYPASS_SECRET=" >> "$GITHUB_ENV"
+
       - name: Wait before retry
         if: steps.deploy-1.outcome == 'failure'
         run: |
           echo "First deploy attempt failed — waiting 60s before retry."
           sleep 60
+
+      - name: Expose scoped preview throttle bypass (attempt 2)
+        if: steps.deploy-1.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          value_file="$RUNNER_TEMP/preview-deploy-throttle-bypass"
+          if [ -s "$value_file" ]; then
+            derived=$(cat "$value_file")
+            echo "::add-mask::$derived"
+            echo "PREVIEW_THROTTLE_BYPASS_SECRET=$derived" >> "$GITHUB_ENV"
+          else
+            echo "PREVIEW_THROTTLE_BYPASS_SECRET=" >> "$GITHUB_ENV"
+          fi
 
       - name: Deploy preview to VPS (attempt 2)
         id: deploy-2
@@ -484,36 +705,39 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          command_timeout: 15m
-          envs: GITHUB_TOKEN,DEPLOY_HEAD,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN
+          command_timeout: 25m
+          envs: DEPLOY_HEAD,DEPLOY_SHA,DEPLOY_ISSUE,VPS_PATH,DATABASE_URL,E2E_EMAIL,E2E_PASSWORD,PII_ENCRYPTION_KEY,PII_HMAC_KEY,PREVIEW_PREFIX,PREVIEW_DOMAIN,PREVIEW_MODE,PREVIEW_PORT_BASE,PREVIEW_TS_HOST,PREVIEW_CAPACITY,PREVIEW_THROTTLE_BYPASS_SECRET
           script: |
             cd "$VPS_PATH"
             git fetch origin dev --depth 1
             git checkout origin/dev -- scripts/ .autopilot/
-            "$VPS_PATH/scripts/preview-deploy.sh" "$DEPLOY_HEAD" "$DEPLOY_ISSUE"
+            "$VPS_PATH/scripts/preview-deploy.sh" "$DEPLOY_HEAD" "$DEPLOY_ISSUE" "$DEPLOY_SHA"
         env:
-          GITHUB_TOKEN: ${{ secrets.WORKFLOW_PAT }}
           DEPLOY_HEAD: ${{ steps.shadow-prep.outputs.deploy_head || inputs.head }}
+          DEPLOY_SHA: ${{ steps.shadow-prep.outputs.deploy_sha || needs.verify-fix-branch.outputs.head_sha }}
           DEPLOY_ISSUE: ${{ inputs.issue_number }}
           VPS_PATH: ${{ vars.VPS_REPO_PATH }}
           PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
           PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
+          PREVIEW_MODE: ${{ vars.PREVIEW_MODE || '' }}
+          PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '' }}
+          # Capacity belt for the repo's preview-deploy.sh: the host refuses to stand up more
+          # previews than this (Praxis is the authority; this catches manual/out-of-band runs).
+          PREVIEW_CAPACITY: ${{ vars.PREVIEW_CAPACITY || '' }}
+          PREVIEW_TS_HOST: ${{ vars.PREVIEW_TS_HOST || '' }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
           PII_ENCRYPTION_KEY: ${{ secrets.PII_ENCRYPTION_KEY }}
           PII_HMAC_KEY: ${{ secrets.PII_HMAC_KEY }}
 
-      - name: Set preview deploy status
-        id: deploy-status
-        run: |
-          if [ "${{ steps.deploy-1.outcome }}" = "success" ] || [ "${{ steps.deploy-2.outcome }}" = "success" ]; then
-            echo "preview_deployed=true" >> "$GITHUB_OUTPUT"
-            echo "Preview deploy succeeded."
-          else
-            echo "preview_deployed=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Preview deploy failed after 2 attempts — downstream preview-dependent checks (API Validate, App Tests) will be skipped. PR creation will still proceed if bundle validation and preflight passed."
-          fi
+      - name: Clear scoped preview throttle bypass (attempt 2)
+        if: always()
+        run: echo "PREVIEW_THROTTLE_BYPASS_SECRET=" >> "$GITHUB_ENV"
+
+      - name: Remove scoped preview throttle bypass audit value
+        if: always()
+        run: rm -f "$RUNNER_TEMP/preview-deploy-throttle-bypass"
 
       - name: Set preview URL output
         id: set-url
@@ -525,17 +749,30 @@ jobs:
           # same Traefik host rules.
           PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
           PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
+          # Optional templates for non-DNS exposure (tailnet-only previews via `tailscale serve`):
+          #   PREVIEW_URL_TEMPLATE=https://noob-root.tailcc6c5f.ts.net:{port_api}
+          #   PREVIEW_BACKEND_URL_TEMPLATE=https://noob-root.tailcc6c5f.ts.net:{port}
+          # Placeholders: {prefix} {issue} {domain} {port}=PREVIEW_PORT_BASE+issue {port_api}=port+1000.
+          # Unset → the historical DNS shape below, byte for byte.
+          PREVIEW_URL_TEMPLATE: ${{ vars.PREVIEW_URL_TEMPLATE || '' }}
+          PREVIEW_BACKEND_URL_TEMPLATE: ${{ vars.PREVIEW_BACKEND_URL_TEMPLATE || '' }}
+          PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '20000' }}
         run: |
-          PREVIEW_URL="https://${PREVIEW_PREFIX}${ISSUE_NUM}.${PREVIEW_DOMAIN}"
+          PORT=$((PREVIEW_PORT_BASE + ISSUE_NUM)); PORT_API=$((PORT + 1000))
+          render() { echo "$1" | sed -e "s/{prefix}/${PREVIEW_PREFIX}/g" -e "s/{issue}/${ISSUE_NUM}/g" -e "s/{domain}/${PREVIEW_DOMAIN}/g" -e "s/{port_api}/${PORT_API}/g" -e "s/{port}/${PORT}/g"; }
+          if [ -n "$PREVIEW_URL_TEMPLATE" ]; then PREVIEW_URL="$(render "$PREVIEW_URL_TEMPLATE")"; else PREVIEW_URL="https://${PREVIEW_PREFIX}${ISSUE_NUM}.${PREVIEW_DOMAIN}"; fi
           # Use flat subdomain (<prefix>N-api) so the *.<domain> wildcard cert covers it;
           # <prefix>N.api.<domain> is 3rd-level and not covered by the wildcard.
-          BACKEND_URL="https://${PREVIEW_PREFIX}${ISSUE_NUM}-api.${PREVIEW_DOMAIN}"
+          if [ -n "$PREVIEW_BACKEND_URL_TEMPLATE" ]; then BACKEND_URL="$(render "$PREVIEW_BACKEND_URL_TEMPLATE")"; else BACKEND_URL="https://${PREVIEW_PREFIX}${ISSUE_NUM}-api.${PREVIEW_DOMAIN}"; fi
           echo "preview_url=$PREVIEW_URL" >> "$GITHUB_OUTPUT"
           echo "backend_url=$BACKEND_URL" >> "$GITHUB_OUTPUT"
 
       - name: Verify preview is reachable
+        id: verify-preview
+        if: steps.deploy-1.outcome == 'success' || steps.deploy-2.outcome == 'success'
+        continue-on-error: true
         run: |
-          HEALTH="${{ needs.read-config.outputs.health_endpoint }}"
+          HEALTH="${{ needs.read-config.outputs.frontend_health_endpoint }}"
           URL="${{ steps.set-url.outputs.preview_url }}${HEALTH}"
           for i in $(seq 1 30); do
             if curl -sf --max-time 5 "$URL" > /dev/null 2>&1; then
@@ -544,21 +781,39 @@ jobs:
             fi
             sleep 10
           done
-          echo "WARNING: Preview not reachable at $URL"
+          echo "ERROR: Preview not reachable at $URL" >&2
+          exit 1
 
       - name: Verify backend URL is reachable
+        id: verify-backend
+        if: steps.deploy-1.outcome == 'success' || steps.deploy-2.outcome == 'success'
+        continue-on-error: true
         run: |
           HEALTH="${{ needs.read-config.outputs.health_endpoint }}"
           URL="${{ steps.set-url.outputs.backend_url }}${HEALTH}"
           for i in $(seq 1 18); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$URL" 2>/dev/null || echo "000")
-            if [ "$STATUS" != "000" ]; then
-              echo "Backend reachable at $URL (HTTP $STATUS)"
+            if curl -sf --max-time 5 "$URL" > /dev/null 2>&1; then
+              echo "Backend reachable at $URL"
               exit 0
             fi
             sleep 10
           done
-          echo "::warning::Backend not reachable at $URL after 180s — Sentinel may fail"
+          echo "ERROR: Backend not reachable at $URL after 180s" >&2
+          exit 1
+
+      - name: Set preview deploy status
+        id: deploy-status
+        if: always()
+        run: |
+          if { [ "${{ steps.deploy-1.outcome }}" = "success" ] || [ "${{ steps.deploy-2.outcome }}" = "success" ]; } \
+            && [ "${{ steps.verify-preview.outcome }}" = "success" ] \
+            && [ "${{ steps.verify-backend.outcome }}" = "success" ]; then
+            echo "preview_deployed=true" >> "$GITHUB_OUTPUT"
+            echo "Preview deploy and both reachability checks succeeded."
+          else
+            echo "preview_deployed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Preview deploy or reachability failed — downstream preview-dependent checks will be skipped and release readiness will fail closed."
+          fi
 
   # ── Job 6: Run tests ───────────────────────────────────────────────
   test:
@@ -579,8 +834,30 @@ jobs:
         id: checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.head }}
+          ref: ${{ needs.verify-fix-branch.outputs.head_sha }}
           token: ${{ secrets.WORKFLOW_PAT }}
+          persist-credentials: false
+
+      - name: Resolve preview URL inside this job
+        if: needs.deploy-preview.outputs.preview_deployed == 'true'
+        env:
+          OUTPUT_PREVIEW_URL: ${{ needs.deploy-preview.outputs.preview_url || '' }}
+          PREVIEW_URL_TEMPLATE: ${{ vars.PREVIEW_URL_TEMPLATE || '' }}
+          PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
+          PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
+          PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '20000' }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          port=$((PREVIEW_PORT_BASE + ISSUE_NUM)); port_api=$((port + 1000))
+          render() { echo "$1" | sed -e "s/{prefix}/${PREVIEW_PREFIX}/g" -e "s/{issue}/${ISSUE_NUM}/g" -e "s/{domain}/${PREVIEW_DOMAIN}/g" -e "s/{port_api}/${port_api}/g" -e "s/{port}/${port}/g"; }
+          url="$OUTPUT_PREVIEW_URL"
+          if [ -n "$PREVIEW_URL_TEMPLATE" ]; then url="$(render "$PREVIEW_URL_TEMPLATE")"; fi
+          if ! [[ "$url" =~ ^https://[^[:space:]]+$ ]]; then
+            echo "ERROR: could not derive the preview URL inside the test job" >&2
+            exit 1
+          fi
+          echo "TEST_BASE_URL=$url" >> "$GITHUB_ENV"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -613,8 +890,6 @@ jobs:
       - name: Run test command
         id: test
         continue-on-error: true
-        env:
-          TEST_BASE_URL: ${{ needs.deploy-preview.outputs.preview_url || '' }}
         run: ${{ needs.read-config.outputs.test_command }}
 
       - name: Determine result
@@ -628,10 +903,17 @@ jobs:
           fi
 
   # ── Job 7: Teardown preview ────────────────────────────────────────
+  # Finalize owns the preview-hold decision and reports true only after it has a
+  # reviewable PR and successfully posts the Praxis marker. Every other path tears
+  # down, including a failed marker step, so no preview can be stranded without a
+  # release mechanism. Praxis later reclaims a held preview through
+  # reusable-preview-teardown.yml.
   teardown-preview:
     name: "Teardown Preview (#${{ inputs.issue_number }})"
-    needs: [read-config, deploy-preview, test, validate-api, app-tests]
-    if: always() && needs.deploy-preview.result != 'skipped'
+    needs: [read-config, deploy-preview, finalize]
+    if: |
+      always() && needs.deploy-preview.result != 'skipped' &&
+      needs.finalize.outputs.preview_held != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: ${{ inputs.base == 'main' && 'production' || 'dev' }}
@@ -660,7 +942,7 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          envs: DEPLOY_ISSUE,VPS_PATH
+          envs: DEPLOY_ISSUE,VPS_PATH,PREVIEW_PORT_BASE
           script: |
             cd "$VPS_PATH"
             git fetch origin dev --depth 1
@@ -669,6 +951,7 @@ jobs:
         env:
           DEPLOY_ISSUE: ${{ inputs.issue_number }}
           VPS_PATH: ${{ vars.VPS_REPO_PATH }}
+          PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '20000' }}
 
       - name: Delete shadow preview branch from source repo
         if: contains(github.repository, '-shadow')
@@ -690,17 +973,22 @@ jobs:
   # signed attestation that shadow-upstream-pr can verify without re-running.
   validate-api:
     name: "API Validate (#${{ inputs.issue_number }})"
-    needs: [read-config, deploy-preview]
+    needs: [read-config, verify-fix-branch, deploy-preview]
     if: |
       always() && !cancelled() &&
       needs.deploy-preview.result == 'success' &&
-      needs.deploy-preview.outputs.preview_deployed == 'true' &&
-      needs.deploy-preview.outputs.backend_url != ''
+      needs.deploy-preview.outputs.preview_deployed == 'true'
     uses: ./.github/workflows/reusable-validate.yml
     with:
       preview_url:   ${{ needs.deploy-preview.outputs.backend_url }}
+      preview_url_template: ${{ vars.PREVIEW_BACKEND_URL_TEMPLATE || '' }}
+      preview_prefix: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
+      preview_domain: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
+      preview_port_base: ${{ vars.PREVIEW_PORT_BASE || '20000' }}
       target_env:    ${{ inputs.base == 'main' && 'production' || 'dev' }}
       issue_number:  ${{ inputs.issue_number }}
+      sentinel_ref:  '4cc5e066f48898a5e1b5a72c021981cc794630f3'
+      shared_tools_ref: ${{ inputs.shared_tools_ref }}
       # For shadow runs, the validation manifest lives in the source repo, not the shadow.
       # source_repo is empty on non-shadow runs, so manifest_repo defaults to caller repo.
       manifest_repo: ${{ needs.deploy-preview.outputs.source_repo }}
@@ -710,38 +998,135 @@ jobs:
       VALIDATION_ATTESTATION_KEY: ${{ secrets.VALIDATION_ATTESTATION_KEY }}
       E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
       E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
+      TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+      TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
 
-  # ── Job 7.6: Application test suite (advisory) ─────────────────────
+  # ── Job 7.6: Application test suite ────────────────────────────
   # Runs the app's own E2E/integration tests against the live preview.
-  # Advisory — a failure surfaces in the PR body but does not gate merge.
-  # Opt-in per app via `.autopilot/config.json → appTestCommand`.
+  # Failures remain observable in the PR body and block release readiness.
+  # Resolve every executable App Tests setting from one immutable trusted-base
+  # checkout. The caller event ref may be agent-authored and is not an authority
+  # for commands that run in the credential-bearing App Tests job.
+  app-test-config:
+    name: "Resolve App Test Config"
+    needs: authorize-target
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      base_sha: ${{ steps.base.outputs.sha }}
+      app_test_command: ${{ steps.config.outputs.app_test_command }}
+      runtime: ${{ steps.config.outputs.runtime }}
+      python_version: ${{ steps.config.outputs.python_version }}
+      python_requirements: ${{ steps.config.outputs.python_requirements }}
+
+    steps:
+      - name: Resolve trusted base SHA
+        id: base
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_BASE: ${{ inputs.base }}
+        run: |
+          set -euo pipefail
+          base_sha=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${ISSUE_BASE}" --jq '.sha')
+          if ! [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Could not resolve trusted base SHA for ${ISSUE_BASE}"
+            exit 1
+          fi
+          echo "sha=$base_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout trusted base config
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.base.outputs.sha }}
+          token: ${{ github.token }}
+          persist-credentials: false
+
+      - name: Read trusted App Tests config
+        id: config
+        run: |
+          set -euo pipefail
+          if [ -f .autopilot/config.json ]; then
+            config=$(cat .autopilot/config.json)
+          else
+            config='{}'
+          fi
+          app_test_command=$(echo "$config" | jq -r '.appTestCommand // ""')
+          echo "app_test_command<<APP_TEST_EOF" >> "$GITHUB_OUTPUT"
+          echo "$app_test_command" >> "$GITHUB_OUTPUT"
+          echo "APP_TEST_EOF" >> "$GITHUB_OUTPUT"
+          echo "runtime=$(echo "$config" | jq -r '.runtime // ""')" >> "$GITHUB_OUTPUT"
+          echo "python_version=$(echo "$config" | jq -r '.pythonVersion // "3.11"')" >> "$GITHUB_OUTPUT"
+          echo "python_requirements=$(echo "$config" | jq -r '.pythonRequirements // "service/requirements.txt"')" >> "$GITHUB_OUTPUT"
+
+  # Opt-in per app via the trusted base's `.autopilot/config.json →
+  # appTestCommand`.
   app-tests:
     name: "App Tests (#${{ inputs.issue_number }})"
-    needs: [read-config, deploy-preview]
+    needs: [app-test-config, verify-fix-branch, deploy-preview]
     if: |
       always() && !cancelled() &&
+      needs.app-test-config.result == 'success' &&
       needs.deploy-preview.result == 'success' &&
       needs.deploy-preview.outputs.preview_deployed == 'true' &&
-      needs.read-config.outputs.app_test_command != ''
+      needs.app-test-config.outputs.app_test_command != ''
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
     outputs:
       app_tests_passed: ${{ steps.result.outputs.app_tests_passed }}
       app_tests_has_regressions: ${{ steps.compare.outputs.has_regressions }}
+      app_tests_has_report: ${{ steps.compare.outputs.has_report }}
       baseline_label: ${{ steps.compare.outputs.baseline_label }}
 
     steps:
-      - name: Checkout fix branch
+      # App tests exercise the remote fix preview, but both the checked-out code
+      # and executable configuration are bound to the same trusted-base SHA.
+      - name: Checkout trusted base tests
         id: checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.head }}
-          token: ${{ secrets.WORKFLOW_PAT }}
+          ref: ${{ needs.app-test-config.outputs.base_sha }}
+          token: ${{ github.token }}
+          persist-credentials: false
 
       - name: Fetch shared scripts
+        env:
+          WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
+          SHARED_TOOLS_REF: ${{ inputs.shared_tools_ref }}
         run: |
-          git clone --depth 1 https://x-access-token:${{ secrets.WORKFLOW_PAT }}@github.com/cloudwarriors-ai/.github.git /tmp/org-github
+          set -euo pipefail
+          git init /tmp/org-github
+          git -C /tmp/org-github remote add origin \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/cloudwarriors-ai/.github.git"
+          git -C /tmp/org-github fetch --depth 1 origin "$SHARED_TOOLS_REF"
+          git -C /tmp/org-github remote set-url origin https://github.com/cloudwarriors-ai/.github.git
+          git -C /tmp/org-github checkout --detach FETCH_HEAD
+          test "$(git -C /tmp/org-github rev-parse HEAD)" = "$SHARED_TOOLS_REF"
+
+      - name: Resolve preview URLs inside this job
+        env:
+          OUTPUT_PREVIEW_URL: ${{ needs.deploy-preview.outputs.preview_url || '' }}
+          OUTPUT_BACKEND_URL: ${{ needs.deploy-preview.outputs.backend_url || '' }}
+          PREVIEW_URL_TEMPLATE: ${{ vars.PREVIEW_URL_TEMPLATE || '' }}
+          PREVIEW_BACKEND_URL_TEMPLATE: ${{ vars.PREVIEW_BACKEND_URL_TEMPLATE || '' }}
+          PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
+          PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
+          PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '20000' }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          port=$((PREVIEW_PORT_BASE + ISSUE_NUM)); port_api=$((port + 1000))
+          render() { echo "$1" | sed -e "s/{prefix}/${PREVIEW_PREFIX}/g" -e "s/{issue}/${ISSUE_NUM}/g" -e "s/{domain}/${PREVIEW_DOMAIN}/g" -e "s/{port_api}/${port_api}/g" -e "s/{port}/${port}/g"; }
+          preview_url="$OUTPUT_PREVIEW_URL"
+          backend_url="$OUTPUT_BACKEND_URL"
+          if [ -n "$PREVIEW_URL_TEMPLATE" ]; then preview_url="$(render "$PREVIEW_URL_TEMPLATE")"; fi
+          if [ -n "$PREVIEW_BACKEND_URL_TEMPLATE" ]; then backend_url="$(render "$PREVIEW_BACKEND_URL_TEMPLATE")"; fi
+          if ! [[ "$preview_url" =~ ^https://[^[:space:]]+$ ]] || ! [[ "$backend_url" =~ ^https://[^[:space:]]+$ ]]; then
+            echo "ERROR: could not derive both preview URLs inside the app-test job" >&2
+            exit 1
+          fi
+          echo "TEST_BASE_URL=$preview_url" >> "$GITHUB_ENV"
+          echo "SENTINEL_BASE_URL=$backend_url" >> "$GITHUB_ENV"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -759,16 +1144,16 @@ jobs:
           fi
 
       - name: Setup Python
-        if: needs.read-config.outputs.runtime == 'python'
+        if: needs.app-test-config.outputs.runtime == 'python'
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ needs.read-config.outputs.python_version }}
+          python-version: ${{ needs.app-test-config.outputs.python_version }}
           cache: pip
 
       - name: Install Python dependencies
-        if: needs.read-config.outputs.runtime == 'python'
+        if: needs.app-test-config.outputs.runtime == 'python'
         env:
-          REQS: ${{ needs.read-config.outputs.python_requirements }}
+          REQS: ${{ needs.app-test-config.outputs.python_requirements }}
         run: |
           if [ -f "$REQS" ]; then
             python -m pip install --upgrade pip
@@ -776,21 +1161,59 @@ jobs:
           fi
           pip install httpx pytest pytest-asyncio
 
+      # Join only after installing dependencies from the trusted base. The test
+      # command needs the scoped tag:ci identity to reach private preview URLs;
+      # no agent-written fix-branch code executes in this runner job.
+      - name: Connect to Tailscale
+        if: env.TS_OAUTH_CLIENT_ID != ''
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: 1.98.8
+        env:
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+
+      - name: Derive scoped preview throttle bypass
+        env:
+          PREVIEW_THROTTLE_BYPASS_KEY: ${{ secrets.PREVIEW_THROTTLE_BYPASS_KEY }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PREVIEW_THROTTLE_BYPASS_KEY" ]; then
+            rm -f "$RUNNER_TEMP/preview-throttle-bypass" \
+              "$RUNNER_TEMP/preview-throttle-bypass-enabled"
+            exit 0
+          fi
+          derived=$(printf '%s' "preview-throttle:${GITHUB_REPOSITORY}:${ISSUE_NUM}" \
+            | openssl dgst -sha256 -hmac "$PREVIEW_THROTTLE_BYPASS_KEY" -binary \
+            | openssl base64 -A)
+          echo "::add-mask::$derived"
+          umask 077
+          printf '%s' "$derived" > "$RUNNER_TEMP/preview-throttle-bypass"
+          : > "$RUNNER_TEMP/preview-throttle-bypass-enabled"
+
       - name: Run app test suite
-        id: app-tests
+        id: app_tests
         continue-on-error: true
         env:
-          SENTINEL_BASE_URL: ${{ needs.deploy-preview.outputs.backend_url }}
-          TEST_BASE_URL: ${{ needs.deploy-preview.outputs.preview_url }}
           E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
           TEST_USER_EMAIL: ${{ secrets.E2E_EMAIL }}
           TEST_USER_PASSWORD: ${{ secrets.E2E_PASSWORD }}
           BROWSERBASE_LOCAL: 'true'
           CI: 'true'
-          APP_TEST_CMD: ${{ needs.read-config.outputs.app_test_command }}
+          APP_TEST_CMD: ${{ needs.app-test-config.outputs.app_test_command }}
         run: |
-          set -o pipefail
+          set -euo pipefail
+          value_file="$RUNNER_TEMP/preview-throttle-bypass"
+          if [ -s "$value_file" ]; then
+            THROTTLE_BYPASS_SECRET=$(cat "$value_file")
+            export THROTTLE_BYPASS_SECRET
+          else
+            unset THROTTLE_BYPASS_SECRET || true
+          fi
           mkdir -p /tmp/app-tests
           echo "Running: $APP_TEST_CMD"
           bash -c "$APP_TEST_CMD" 2>&1 | tee /tmp/app-tests/run.log
@@ -799,7 +1222,7 @@ jobs:
         id: result
         if: always()
         run: |
-          if [ "${{ steps.app-tests.outcome }}" = "success" ]; then
+          if [ "${{ steps.app_tests.outcome }}" = "success" ]; then
             echo "app_tests_passed=true" >> "$GITHUB_OUTPUT"
           else
             echo "app_tests_passed=false" >> "$GITHUB_OUTPUT"
@@ -808,50 +1231,57 @@ jobs:
       - name: Compare against baseline
         id: compare
         if: always()
-        continue-on-error: true
+        # Missing artifacts/baselines are handled explicitly below. Any other
+        # comparison failure must fail the job so readiness cannot treat an
+        # empty regression output as approval.
         env:
-          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           STATIC_BASELINE="tests/sentinel/baseline.json"
           DAILY_SNAPSHOT="tests/sentinel/daily-snapshot.json"
 
           if [ ! -f /tmp/app-tests/pytest.xml ] || [ ! -f /tmp/app-tests/run.log ]; then
-            echo "::warning::Run artifacts missing at /tmp/app-tests/ — skipping comparison"
-            echo "has_regressions=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Required app-test artifacts are missing; refusing readiness"
+            echo "has_regressions=true" >> "$GITHUB_OUTPUT"
             echo "has_report=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            exit 1
           fi
 
           # Prefer daily-snapshot.json fetched from shadow dev branch (not local
           # checkout — fix branches don't inherit it, and sync would delete it).
           BASELINE_FILE=""
           BASELINE_LABEL=""
-          SHADOW_REPO="${{ inputs.shadow_repo != '' && inputs.shadow_repo || github.repository }}"
+          SHADOW_REPO="$GITHUB_REPOSITORY"
           SNAPSHOT_CONTENT=$(gh api "repos/${SHADOW_REPO}/contents/tests/sentinel/daily-snapshot.json?ref=dev" \
             --jq '.content' 2>/dev/null || echo "")
           if [ -n "$SNAPSHOT_CONTENT" ]; then
-            echo "$SNAPSHOT_CONTENT" | base64 -d > /tmp/app-tests/daily-snapshot.json
-            GENERATED_AT=$(python3 -c "import json; d=json.load(open('/tmp/app-tests/daily-snapshot.json')); print(d.get('generated_at',''))" 2>/dev/null || echo "")
-            if [ -n "$GENERATED_AT" ]; then
-              SNAPSHOT_AGE=$(python3 -c "from datetime import datetime,timezone; t=datetime.fromisoformat('${GENERATED_AT}'.replace('Z','+00:00')); print(int((datetime.now(timezone.utc)-t).total_seconds()))" 2>/dev/null || echo "999999")
-              if [ "$SNAPSHOT_AGE" -lt 86400 ]; then
-                SNAPSHOT_DATE=$(python3 -c "from datetime import datetime; t=datetime.fromisoformat('${GENERATED_AT}'.replace('Z','+00:00')); print(t.strftime('%Y-%m-%d %H:%M UTC'))" 2>/dev/null || echo "$GENERATED_AT")
-                BASELINE_FILE="/tmp/app-tests/daily-snapshot.json"
-                BASELINE_LABEL="daily snapshot (${SNAPSHOT_DATE})"
-                echo "::notice::Using daily snapshot from ${SNAPSHOT_DATE}"
-              else
-                SNAPSHOT_HOURS=$(( SNAPSHOT_AGE / 3600 ))
-                echo "::warning::Daily snapshot is ${SNAPSHOT_HOURS}h old — falling back to static baseline"
+            if printf '%s' "$SNAPSHOT_CONTENT" | tr -d '\r\n' | base64 -d > /tmp/app-tests/daily-snapshot.json 2>/dev/null && \
+               python3 -m json.tool /tmp/app-tests/daily-snapshot.json >/dev/null 2>&1; then
+              GENERATED_AT=$(python3 -c "import json; d=json.load(open('/tmp/app-tests/daily-snapshot.json')); print(d.get('generated_at',''))" 2>/dev/null || echo "")
+              if [ -n "$GENERATED_AT" ]; then
+                SNAPSHOT_AGE=$(python3 -c "from datetime import datetime,timezone; t=datetime.fromisoformat('${GENERATED_AT}'.replace('Z','+00:00')); print(int((datetime.now(timezone.utc)-t).total_seconds()))" 2>/dev/null || echo "999999")
+                if [ "$SNAPSHOT_AGE" -lt 86400 ]; then
+                  SNAPSHOT_DATE=$(python3 -c "from datetime import datetime; t=datetime.fromisoformat('${GENERATED_AT}'.replace('Z','+00:00')); print(t.strftime('%Y-%m-%d %H:%M UTC'))" 2>/dev/null || echo "$GENERATED_AT")
+                  BASELINE_FILE="/tmp/app-tests/daily-snapshot.json"
+                  BASELINE_LABEL="daily snapshot (${SNAPSHOT_DATE})"
+                  echo "::notice::Using daily snapshot from ${SNAPSHOT_DATE}"
+                else
+                  SNAPSHOT_HOURS=$(( SNAPSHOT_AGE / 3600 ))
+                  echo "::warning::Daily snapshot is ${SNAPSHOT_HOURS}h old — falling back to static baseline"
+                fi
               fi
+            else
+              echo "::warning::Daily snapshot content is invalid — falling back to static baseline"
+              SNAPSHOT_CONTENT=""
             fi
           fi
 
           if [ -z "$BASELINE_FILE" ]; then
             if [ ! -f "$STATIC_BASELINE" ]; then
-              echo "::notice::No baseline found — first run or baseline not yet committed"
-              echo "has_regressions=false" >> "$GITHUB_OUTPUT"
+              echo "::error::No trusted app-test baseline found; refusing readiness"
+              echo "has_regressions=true" >> "$GITHUB_OUTPUT"
               echo "has_report=false" >> "$GITHUB_OUTPUT"
-              exit 0
+              exit 1
             fi
             STATIC_DATE=$(python3 -c "import json; d=json.load(open('$STATIC_BASELINE')); print(d.get('generated_at','unknown')[:10])" 2>/dev/null || echo "unknown")
             BASELINE_FILE="$STATIC_BASELINE"
@@ -877,35 +1307,20 @@ jobs:
           echo "has_regressions=${HAS_REGS}" >> "$GITHUB_OUTPUT"
           echo "baseline_label=${BASELINE_LABEL}" >> "$GITHUB_OUTPUT"
 
-      - name: Post or update regression comment
-        if: always() && steps.compare.outputs.has_regressions == 'true'
+      - name: Verify app-test artifacts are credential-free
+        id: artifact_safety
+        if: always()
         env:
-          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
-          HEAD_REF: ${{ inputs.head }}
-          BASE_REF: ${{ inputs.base }}
+          PREVIEW_THROTTLE_VALUE_FILE: ${{ runner.temp }}/preview-throttle-bypass
+          PREVIEW_THROTTLE_ENABLED_MARKER: ${{ runner.temp }}/preview-throttle-bypass-enabled
+          APP_TESTS_ARTIFACT_DIR: /tmp/app-tests
+          PLAYWRIGHT_REPORT_DIR: ${{ github.workspace }}/playwright-report
+          PLAYWRIGHT_TEST_RESULTS_DIR: ${{ github.workspace }}/test-results
         run: |
-          set -euo pipefail
-          PR=$(gh pr list --head "$HEAD_REF" --base "$BASE_REF" --json number --jq '.[0].number' 2>/dev/null || echo "")
-          if [ -z "$PR" ]; then
-            echo "::notice::No open PR for head=$HEAD_REF base=$BASE_REF — regression comment skipped"
-            exit 0
-          fi
-          MARKER="<!-- app-tests-regression-report -->"
-          REPORT_BODY="$(cat /tmp/app-tests/regression-report.md)"
-          BODY="$(printf '%s\n%s' "$MARKER" "$REPORT_BODY")"
-          EXISTING=$(gh api "repos/$GITHUB_REPOSITORY/issues/${PR}/comments" --paginate \
-            --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" | head -n 1 || echo "")
-          if [ -n "$EXISTING" ]; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING" \
-              -f body="$BODY" >/dev/null
-            echo "Updated existing regression comment (id=$EXISTING)"
-          else
-            gh pr comment "$PR" --body "$BODY"
-            echo "Posted new regression comment on PR #$PR"
-          fi
+          bash /tmp/org-github/scripts/autopilot/verify-app-test-artifacts.sh
 
       - name: Upload app-test artifacts
-        if: always()
+        if: always() && steps.artifact_safety.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: app-tests-${{ inputs.issue_number }}
@@ -919,13 +1334,25 @@ jobs:
   # ── Job 8: Upsert PR and update labels ─────────────────────────────
   finalize:
     name: "Finalize (#${{ inputs.issue_number }})"
-    needs: [rlm-fix, read-config, verify-fix-branch, validate, preflight, deploy-preview, test, validate-api, app-tests]
-    if: always() && !cancelled()
+    needs: [authorize-target, rlm-fix, read-config, app-test-config, verify-fix-branch, validate, preflight, deploy-preview, test, validate-api, app-tests]
+    if: always() && !cancelled() && needs.authorize-target.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
     outputs:
       pr_ready: ${{ steps.pr.outputs.pr_ready }}
       pr_number: ${{ steps.pr.outputs.pr_number }}
+      preview_held: ${{ steps.hold-status.outputs.preview_held }}
+
+    # RELEASE_READY is the one merge/readiness contract for gated and ungated work.
+    # PREVIEW_CANDIDATE adds the explicit feature-track preview opt-in. The held
+    # output is not true until the marker step itself succeeds.
+    env:
+      RELEASE_READY: ${{ needs.rlm-fix.result == 'success' && needs.app-test-config.result == 'success' && needs.verify-fix-branch.outputs.branch_ready == 'true' && needs.validate.outputs.validation_passed == 'true' && needs.preflight.outputs.preflight_passed == 'true' && (needs.read-config.outputs.preview_deploy != 'true' || needs.deploy-preview.outputs.preview_deployed == 'true') && (needs.read-config.outputs.test_command == '' || needs.test.outputs.tests_passed == 'true') && (needs.read-config.outputs.preview_deploy != 'true' || (needs.validate-api.result == 'success' && needs.validate-api.outputs.api_validation_passed == 'true' && (needs.read-config.outputs.validation_state != 'active' || needs.validate-api.outputs.verdict != 'skipped'))) && (needs.app-test-config.outputs.app_test_command == '' || (needs.app-tests.result == 'success' && needs.app-tests.outputs.app_tests_passed == 'true' && needs.app-tests.outputs.app_tests_has_regressions == 'false' && needs.app-tests.outputs.app_tests_has_report == 'true')) }}
+      PREVIEW_CANDIDATE: ${{ needs.read-config.outputs.preview_gate == 'true' && inputs.track == 'features' && needs.rlm-fix.result == 'success' && needs.app-test-config.result == 'success' && needs.verify-fix-branch.outputs.branch_ready == 'true' && needs.validate.outputs.validation_passed == 'true' && needs.preflight.outputs.preflight_passed == 'true' && needs.deploy-preview.outputs.preview_deployed == 'true' && (needs.read-config.outputs.test_command == '' || needs.test.outputs.tests_passed == 'true') && needs.validate-api.result == 'success' && needs.validate-api.outputs.api_validation_passed == 'true' && (needs.read-config.outputs.validation_state != 'active' || needs.validate-api.outputs.verdict != 'skipped') && (needs.app-test-config.outputs.app_test_command == '' || (needs.app-tests.result == 'success' && needs.app-tests.outputs.app_tests_passed == 'true' && needs.app-tests.outputs.app_tests_has_regressions == 'false' && needs.app-tests.outputs.app_tests_has_report == 'true')) }}
 
     steps:
       - name: Checkout fix branch
@@ -934,9 +1361,10 @@ jobs:
         continue-on-error: true
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.head }}
+          ref: ${{ needs.verify-fix-branch.outputs.head_sha }}
           token: ${{ secrets.WORKFLOW_PAT }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -945,8 +1373,18 @@ jobs:
 
       - name: Fetch shared scripts
         if: needs.verify-fix-branch.outputs.already_fixed != 'true'
+        env:
+          WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
+          SHARED_TOOLS_REF: ${{ inputs.shared_tools_ref }}
         run: |
-          git clone --depth 1 https://x-access-token:${{ secrets.WORKFLOW_PAT }}@github.com/cloudwarriors-ai/.github.git /tmp/org-github
+          set -euo pipefail
+          git init /tmp/org-github
+          git -C /tmp/org-github remote add origin \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/cloudwarriors-ai/.github.git"
+          git -C /tmp/org-github fetch --depth 1 origin "$SHARED_TOOLS_REF"
+          git -C /tmp/org-github remote set-url origin https://github.com/cloudwarriors-ai/.github.git
+          git -C /tmp/org-github checkout --detach FETCH_HEAD
+          test "$(git -C /tmp/org-github rev-parse HEAD)" = "$SHARED_TOOLS_REF"
 
       - name: Build matrix
         if: always() && needs.verify-fix-branch.outputs.already_fixed != 'true'
@@ -983,6 +1421,7 @@ jobs:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
           ISSUE_NUM: ${{ inputs.issue_number }}
           ISSUE_HEAD: ${{ inputs.head }}
+          EXPECTED_HEAD_SHA: ${{ needs.verify-fix-branch.outputs.head_sha }}
           ISSUE_BASE: ${{ inputs.base }}
           ISSUE_TRACK: ${{ inputs.track }}
           TESTS_RESULT: ${{ needs.test.outputs.tests_passed || 'skipped' }}
@@ -996,10 +1435,17 @@ jobs:
           PREVIEW_DEPLOY_ENABLED: ${{ needs.read-config.outputs.preview_deploy }}
           PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
           PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
+          PREVIEW_BACKEND_URL_TEMPLATE: ${{ vars.PREVIEW_BACKEND_URL_TEMPLATE || '' }}
+          PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '20000' }}
         run: |
           EXISTING_PR=$(gh pr list --head "$ISSUE_HEAD" --base "$ISSUE_BASE" --json number --jq '.[0].number' 2>/dev/null || echo "")
           if [ "$PREVIEW_DEPLOY_ENABLED" = "true" ]; then
-            BACKEND_URL="https://${PREVIEW_PREFIX}${ISSUE_NUM}-api.${PREVIEW_DOMAIN}"
+            PORT=$((PREVIEW_PORT_BASE + ISSUE_NUM)); PORT_API=$((PORT + 1000))
+            if [ -n "$PREVIEW_BACKEND_URL_TEMPLATE" ]; then
+              BACKEND_URL="$(echo "$PREVIEW_BACKEND_URL_TEMPLATE" | sed -e "s/{prefix}/${PREVIEW_PREFIX}/g" -e "s/{issue}/${ISSUE_NUM}/g" -e "s/{domain}/${PREVIEW_DOMAIN}/g" -e "s/{port_api}/${PORT_API}/g" -e "s/{port}/${PORT}/g")"
+            else
+              BACKEND_URL="https://${PREVIEW_PREFIX}${ISSUE_NUM}-api.${PREVIEW_DOMAIN}"
+            fi
           else
             BACKEND_URL="disabled (preview deploy off)"
           fi
@@ -1077,50 +1523,204 @@ jobs:
 
           if [ -n "$EXISTING_PR" ]; then
             gh pr edit "$EXISTING_PR" --body "$PR_BODY"
-            echo "pr_number=$EXISTING_PR" >> "$GITHUB_OUTPUT"
-            echo "pr_ready=true" >> "$GITHUB_OUTPUT"
+            PR_NUM="$EXISTING_PR"
           else
             PR_URL=$(gh pr create \
               --head "$ISSUE_HEAD" \
               --base "$ISSUE_BASE" \
               --title "fix: resolve issue #${ISSUE_NUM}" \
-              --body "$PR_BODY" \
-              --label "autopilot") || true
+              --body "$PR_BODY") || true
             PR_NUM=$(echo "$PR_URL" | grep -oE '[0-9]+$' || echo "")
-            echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
-            if [ -n "$PR_NUM" ]; then
-              echo "pr_ready=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "pr_ready=false" >> "$GITHUB_OUTPUT"
-            fi
           fi
 
+          echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
+          if [ -z "$PR_NUM" ]; then
+            echo "pr_ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh pr edit "$PR_NUM" --add-label "autopilot" || \
+            echo "::warning::Could not add optional 'autopilot' label to PR #${PR_NUM}"
+          PR_HEAD_SHA=$(gh pr view "$PR_NUM" --json headRefOid --jq .headRefOid)
+          if [ "$PR_HEAD_SHA" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "::error::PR head drifted: expected ${EXPECTED_HEAD_SHA}, found ${PR_HEAD_SHA}"
+            echo "pr_ready=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "pr_ready=true" >> "$GITHUB_OUTPUT"
+
       # --- Auto-merge if configured and all checks pass ---
+      # A preview candidate never merges here: it waits on the human verdict. Every
+      # other auto-merge still has to satisfy the complete release contract above.
       - name: Auto-merge
         if: |
+          env.PREVIEW_CANDIDATE != 'true' &&
+          env.RELEASE_READY == 'true' &&
           steps.pr.outputs.pr_ready == 'true' &&
-          needs.read-config.outputs.auto_merge == 'true' &&
-          needs.validate.outputs.validation_passed == 'true' &&
-          needs.preflight.outputs.preflight_passed == 'true' &&
-          (needs.test.outputs.tests_passed == 'true' || needs.test.outputs.tests_passed == '') &&
-          (needs.validate-api.result == 'skipped' || needs.validate-api.outputs.api_validation_passed == 'true')
+          needs.read-config.outputs.auto_merge == 'true'
         env:
           GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          EXPECTED_HEAD_SHA: ${{ needs.verify-fix-branch.outputs.head_sha }}
         run: |
           PR="${{ steps.pr.outputs.pr_number }}"
           if [ -n "$PR" ]; then
-            gh pr merge "$PR" --squash --auto || echo "Auto-merge failed — PR may need reviews"
+            gh pr merge "$PR" --squash --auto --match-head-commit "$EXPECTED_HEAD_SHA" || echo "Auto-merge failed — PR may need reviews or its head changed"
           fi
 
+      # --- Preview gate: hold for a human verdict instead of finishing ---
+      # Runs only for a fully release-ready preview candidate. The PR is
+      # already created and left un-merged; this labels the source issue
+      # PREVIEW: Ready and posts the marker comment Praxis parses.
+      - name: "On hold: label Preview Ready"
+        id: preview-hold
+        if: |
+          env.PREVIEW_CANDIDATE == 'true' &&
+          steps.pr.outputs.pr_ready == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PREVIEW_MARKER_TOKEN }}
+          script: |
+            const prNumber = Number(process.env.PR_NUMBER);
+            const issueNum = String(process.env.ISSUE_NUM || '');
+            const port = Number(process.env.PREVIEW_PORT_BASE || '20000') + Number(issueNum || 0);
+            const renderUrl = (tpl) => tpl
+              .replaceAll('{prefix}', process.env.PREVIEW_PREFIX || 'preview-')
+              .replaceAll('{issue}', issueNum)
+              .replaceAll('{domain}', process.env.PREVIEW_DOMAIN || 'pscx.ai')
+              .replaceAll('{port_api}', String(port + 1000))
+              .replaceAll('{port}', String(port));
+            const previewUrl = process.env.PREVIEW_URL_TEMPLATE
+              ? renderUrl(process.env.PREVIEW_URL_TEMPLATE)
+              : (process.env.PREVIEW_URL || `https://${process.env.PREVIEW_PREFIX || 'preview-'}${issueNum}.${process.env.PREVIEW_DOMAIN || 'pscx.ai'}`);
+            if (!/^https:\/\/\S+$/.test(previewUrl)) {
+              core.setFailed(`hold: could not derive a preview URL (template='${process.env.PREVIEW_URL_TEMPLATE}', output='${process.env.PREVIEW_URL}')`);
+              return;
+            }
+
+            // The PR lives in the repo that ran the fix (the shadow repo on shadow
+            // runs). Its head sha is what the reviewer and Praxis correlate on.
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner, repo: context.repo.repo, pull_number: prNumber,
+            });
+            const headSha = pr.head.sha;
+            const prUrl = pr.html_url;
+            const expectedHeadSha = process.env.EXPECTED_HEAD_SHA;
+            if (headSha !== expectedHeadSha) {
+              core.setFailed(`hold: PR head drifted after verification (expected ${expectedHeadSha}, found ${headSha})`);
+              return;
+            }
+
+            // Where the human verdict is expected. Non-shadow: this repo's issue.
+            // Shadow: the upstream source issue, resolved exactly the way
+            // "Cross-post shadow status to source issue" resolves it below.
+            let targetOwner = context.repo.owner;
+            let targetRepo = context.repo.repo;
+            let targetIssue = Number(process.env.ISSUE_NUM);
+
+            if (context.repo.repo.endsWith('-shadow')) {
+              let config = null;
+              try {
+                const { data } = await github.rest.repos.getContent({
+                  owner: context.repo.owner, repo: context.repo.repo, path: '.shadow/config.json',
+                });
+                config = JSON.parse(Buffer.from(data.content, 'base64').toString());
+              } catch (e) {
+                core.warning(`Cannot read .shadow/config.json: ${e.message}`);
+              }
+              if (config && config.sourceRepo) {
+                const reverseMap = Object.fromEntries(
+                  Object.entries(config.issueMap || {}).map(([src, shad]) => [String(shad), Number(src)])
+                );
+                let sourceIssueNumber = reverseMap[String(targetIssue)];
+                if (!sourceIssueNumber) {
+                  try {
+                    const { data: shadowIssue } = await github.rest.issues.get({
+                      owner: context.repo.owner, repo: context.repo.repo, issue_number: targetIssue,
+                    });
+                    const ms = [...(shadowIssue.body || '').matchAll(/Shadow of \[.*?#(\d+)\]/g)];
+                    if (ms.length) sourceIssueNumber = Number(ms[ms.length - 1][1]);
+                  } catch (e) {
+                    core.warning(`Could not fetch shadow issue body: ${e.message}`);
+                  }
+                }
+                if (sourceIssueNumber) {
+                  [targetOwner, targetRepo] = config.sourceRepo.split('/');
+                  targetIssue = sourceIssueNumber;
+                } else {
+                  core.warning(`No source issue mapping for shadow issue #${targetIssue} — holding on the shadow issue itself`);
+                }
+              }
+            }
+
+            // Held, not in QA: drop In Progress, add PREVIEW: Ready (addLabels
+            // creates the label if the repo does not have it yet), and never add
+            // STATUS: In QA — QA is what the human verdict decides.
+            try {
+              await github.rest.issues.removeLabel({
+                owner: targetOwner, repo: targetRepo,
+                issue_number: targetIssue, name: 'STATUS: In Progress',
+              });
+            } catch {}
+            const heldLabels = await github.rest.issues.listLabelsOnIssue({
+              owner: targetOwner, repo: targetRepo, issue_number: targetIssue,
+            });
+            if (!heldLabels.data.some(l => l.name === 'PREVIEW: Ready')) {
+              await github.rest.issues.addLabels({
+                owner: targetOwner, repo: targetRepo,
+                issue_number: targetIssue, labels: ['PREVIEW: Ready'],
+              });
+            }
+
+            // First line is a machine contract Praxis parses — single spaces, no
+            // trailing text. Keep it byte-exact:
+            //   <!-- praxis:preview url=<preview_url> sha=<40-hex head sha> pr=<pr number> -->
+            const markerPrefix = '<!-- praxis:preview ';
+            const marker = `${markerPrefix}url=${previewUrl} sha=${headSha} pr=${prNumber} -->`;
+            const body = [
+              marker,
+              '### Preview ready for review',
+              '',
+              `**Preview:** ${previewUrl}`,
+              `**Commit:** \`${headSha}\``,
+              `**PR:** ${prUrl}`,
+              '',
+              'This run is held: the preview is still up and the PR is not merged.',
+              'Reply on this issue with exactly one of:',
+              '',
+              '- `preview pass` — the preview is right; release the hold and merge.',
+              '- `preview fail: <why>` — something is wrong; say what, and autopilot takes another pass.',
+              '- `needs decision: <question>` — a product call is needed before this can proceed.',
+            ].join('\n');
+
+            // A marker is attempt-current evidence, not a revision singleton. A fresh run must
+            // always create a fresh comment even when url/sha/pr are unchanged; Praxis's attempt
+            // boundary and same-attempt idempotency decide whether that event advances state.
+            await github.rest.issues.createComment({
+              owner: targetOwner, repo: targetRepo,
+              issue_number: targetIssue, body,
+            });
+            console.log(`Preview gate held ${targetOwner}/${targetRepo}#${targetIssue} on ${previewUrl}`);
+        env:
+          PREVIEW_URL: ${{ needs.deploy-preview.outputs.preview_url }}
+          # Actions drops any job OUTPUT that contains a secret value. The tailnet hostname
+          # noob-root.tailcc6c5f.ts.net contains SSH_USER ("root"), so preview_url above
+          # arrives EMPTY on such hosts. Re-render from the template here instead (env is
+          # not scrubbed); the deploy job already verified the same URL was reachable.
+          PREVIEW_URL_TEMPLATE: ${{ vars.PREVIEW_URL_TEMPLATE || '' }}
+          PREVIEW_PREFIX: ${{ vars.PREVIEW_PREFIX || 'preview-' }}
+          PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN || 'pscx.ai' }}
+          PREVIEW_PORT_BASE: ${{ vars.PREVIEW_PORT_BASE || '20000' }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
+          EXPECTED_HEAD_SHA: ${{ needs.verify-fix-branch.outputs.head_sha }}
+
       # --- Update issue labels ---
+      # A held run stops before In QA — the preview verdict decides that.
       - name: "On success: label In QA"
         if: |
-          needs.rlm-fix.result == 'success' &&
-          needs.verify-fix-branch.outputs.branch_ready == 'true' &&
+          env.PREVIEW_CANDIDATE != 'true' &&
+          env.RELEASE_READY == 'true' &&
           steps.pr.outputs.pr_ready == 'true' &&
-          needs.validate.outputs.validation_passed == 'true' &&
-          needs.preflight.outputs.preflight_passed == 'true' &&
-          (needs.validate-api.result == 'skipped' || needs.validate-api.outputs.api_validation_passed == 'true')
+          needs.verify-fix-branch.outputs.already_fixed != 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -1229,12 +1829,9 @@ jobs:
         if: |
           needs.verify-fix-branch.outputs.already_fixed != 'true' &&
           (
-            needs.rlm-fix.result != 'success' ||
-            needs.verify-fix-branch.outputs.branch_ready != 'true' ||
+            env.RELEASE_READY != 'true' ||
             steps.pr.outputs.pr_ready != 'true' ||
-            needs.validate.outputs.validation_passed != 'true' ||
-            needs.preflight.outputs.preflight_passed != 'true' ||
-            (needs.validate-api.result != 'skipped' && needs.validate-api.outputs.api_validation_passed != 'true')
+            (env.PREVIEW_CANDIDATE == 'true' && steps.preview-hold.outcome != 'success')
           )
         env:
           RLM_RESULT: ${{ needs.rlm-fix.result }}
@@ -1287,6 +1884,12 @@ jobs:
             const apiExtra = apiFailureReason ? `reason: \`${apiFailureReason}\`` : (process.env.API_VERDICT && process.env.API_VERDICT !== 'skipped' ? `verdict: ${process.env.API_VERDICT}` : '');
             const branchExtra = process.env.FIX_BRANCH_FAILURE ? `reason: \`${process.env.FIX_BRANCH_FAILURE}\`` : '';
             const previewExtra = process.env.DEPLOY_PREVIEW_STATUS === 'false' ? 'preview unavailable — preview-dependent checks skipped' : '';
+            const failureClass = (() => {
+              if (process.env.RLM_RESULT !== 'success') return 'writer';
+              if (process.env.DEPLOY_PREVIEW_STATUS === 'false' || apiFailureReason === 'preview-unreachable' || apiFailureReason === 'transient-http') return 'infrastructure';
+              if (process.env.FIX_BRANCH_READY !== 'true' || process.env.VALIDATION_RESULT !== 'true' || process.env.PREFLIGHT_RESULT !== 'true' || process.env.TESTS_RESULT === 'false' || process.env.API_VERDICT === 'regression' || process.env.APP_TESTS_RESULT === 'false') return 'code';
+              return 'release-contract';
+            })();
             const gateRows = [
               gateRow('RLM fix',           process.env.RLM_RESULT === 'success' ? 'true' : 'false'),
               gateRow('Fix branch',        process.env.FIX_BRANCH_READY, branchExtra),
@@ -1321,7 +1924,7 @@ jobs:
                 return 'Sentinel could not reach the preview environment. The VPS deploy may have failed or DNS for the preview URL is not propagating. Check Deploy Preview job and the preview URL.';
               }
               if (apiFailureReason === 'transient-http' || (process.env.API_VALIDATION_RESULT === 'false' && process.env.DEPLOY_PREVIEW_STATUS === 'false')) {
-                return 'Likely infrastructure flake. Consider re-running the API Validate job or merging if the PR diff itself looks good.';
+                return 'Infrastructure failed. Retry the pipeline; do not merge until the required gate is green.';
               }
               if (process.env.API_VERDICT === 'regression' || apiFailureReason === 'goldens-drift') {
                 return 'Sentinel detected an API regression — review the validation report before merging.';
@@ -1332,6 +1935,8 @@ jobs:
             const followUpBody = [
               followUpMarker,
               '### Autopilot — Follow-Up Required',
+              '',
+              `**Failure class:** \`${failureClass}\``,
               '',
               prLine,
               '',
@@ -1474,16 +2079,27 @@ jobs:
             }
             console.log(`Cross-posted shadow ${prNumber ? 'PR' : 'follow-up'} to ${config.sourceRepo}#${sourceIssueNumber}`);
 
-      - name: Fail workflow when no reviewable PR was produced
+      # This is the only output teardown consumes. A candidate is held only when the
+      # human-facing label/comment contract was actually delivered successfully.
+      - name: Record preview hold status
+        id: hold-status
+        if: always()
+        env:
+          HOLD_STEP_OUTCOME: ${{ steps.preview-hold.outcome }}
+        run: |
+          if [ "$PREVIEW_CANDIDATE" = "true" ] && [ "$HOLD_STEP_OUTCOME" = "success" ]; then
+            echo "preview_held=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "preview_held=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fail workflow when no reviewable, gate-passing PR was produced
         if: |
           needs.verify-fix-branch.outputs.already_fixed != 'true' &&
           (
-            needs.rlm-fix.result != 'success' ||
-            needs.verify-fix-branch.outputs.branch_ready != 'true' ||
+            env.RELEASE_READY != 'true' ||
             steps.pr.outputs.pr_ready != 'true' ||
-            needs.validate.outputs.validation_passed != 'true' ||
-            needs.preflight.outputs.preflight_passed != 'true' ||
-            (needs.validate-api.result != 'skipped' && needs.validate-api.outputs.api_validation_passed != 'true')
+            (env.PREVIEW_CANDIDATE == 'true' && steps.preview-hold.outcome != 'success')
           )
         run: |
           echo "Autopilot did not produce a reviewable, gate-passing PR."
@@ -1491,4 +2107,7 @@ jobs:
           echo "Fix branch ready: ${{ needs.verify-fix-branch.outputs.branch_ready || 'false' }}"
           echo "Fix branch failure: ${{ needs.verify-fix-branch.outputs.failure_reason || '' }}"
           echo "PR ready: ${{ steps.pr.outputs.pr_ready || 'false' }}"
+          echo "Release ready: $RELEASE_READY"
+          echo "Preview candidate: $PREVIEW_CANDIDATE"
+          echo "Preview hold step: ${{ steps.preview-hold.outcome }}"
           exit 1

@@ -23,8 +23,26 @@ on:
     inputs:
       preview_url:
         description: 'Base URL of the target environment (e.g. https://preview-123.pscx.ai)'
-        required: true
+        required: false
         type: string
+        default: ''
+      preview_url_template:
+        description: 'Optional URL template rendered inside this job to avoid secret-scrubbed job outputs'
+        required: false
+        type: string
+        default: ''
+      preview_prefix:
+        required: false
+        type: string
+        default: 'preview-'
+      preview_domain:
+        required: false
+        type: string
+        default: 'pscx.ai'
+      preview_port_base:
+        required: false
+        type: string
+        default: '20000'
       manifest_path:
         description: 'Path to validation manifest, relative to caller repo'
         required: false
@@ -49,7 +67,12 @@ on:
         description: 'Git ref of cloudwarriors-ai/sentinel to install (tag or SHA; avoid @main in prod)'
         required: false
         type: string
-        default: 'main'
+        default: '4cc5e066f48898a5e1b5a72c021981cc794630f3'
+      shared_tools_ref:
+        description: 'Immutable cloudwarriors-ai/.github commit used for shared scripts'
+        required: false
+        type: string
+        default: '3e21e600cc5ba2a8ddf80903a76fd2dbb6f04283'
       issue_number:
         description: 'Optional issue number for PR/issue comment linking'
         required: false
@@ -74,6 +97,10 @@ on:
         required: false
       E2E_PASSWORD:
         required: false
+      TS_OAUTH_CLIENT_ID:
+        required: false
+      TS_OAUTH_SECRET:
+        required: false
     outputs:
       verdict:
         description: 'Run verdict from Sentinel'
@@ -90,12 +117,12 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
-  issues: write
+  # The verdict comment uses the explicitly supplied WORKFLOW_PAT. Keep the
+  # ambient GITHUB_TOKEN read-only so nested callers do not need write grants.
 
 jobs:
   validate:
-    name: "Validate (${{ inputs.target_env }}) against ${{ inputs.preview_url }}"
+    name: "Validate API (${{ inputs.target_env }})"
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -110,7 +137,12 @@ jobs:
         if: inputs.manifest_repo == ''
         uses: actions/checkout@v4
         with:
+          # The autopilot runner supplies its already-validated base branch here.
+          # Do not let a branch-selected workflow dispatch substitute its own
+          # manifest before this job joins the tailnet.
+          ref: ${{ inputs.manifest_ref }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Checkout manifest repo (override)
         if: inputs.manifest_repo != ''
@@ -120,6 +152,7 @@ jobs:
           ref: ${{ inputs.manifest_ref }}
           token: ${{ secrets.WORKFLOW_PAT }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Capture manifest HEAD sha
         id: manifest-sha
@@ -131,6 +164,37 @@ jobs:
         id: artifact-name
         run: |
           echo "name=sentinel-validation-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve target URL inside this job
+        env:
+          INPUT_PREVIEW_URL: ${{ inputs.preview_url }}
+          PREVIEW_URL_TEMPLATE: ${{ inputs.preview_url_template }}
+          PREVIEW_PREFIX: ${{ inputs.preview_prefix }}
+          PREVIEW_DOMAIN: ${{ inputs.preview_domain }}
+          PREVIEW_PORT_BASE: ${{ inputs.preview_port_base }}
+          ISSUE_NUM: ${{ inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          url="$INPUT_PREVIEW_URL"
+          if [ -n "$PREVIEW_URL_TEMPLATE" ]; then
+            if ! [[ "$ISSUE_NUM" =~ ^[0-9]+$ ]] || ! [[ "$PREVIEW_PORT_BASE" =~ ^[0-9]+$ ]]; then
+              echo "ERROR: a URL template requires numeric issue_number and preview_port_base" >&2
+              exit 1
+            fi
+            port=$((PREVIEW_PORT_BASE + ISSUE_NUM)); port_api=$((port + 1000))
+            url=$(echo "$PREVIEW_URL_TEMPLATE" | sed \
+              -e "s/{prefix}/${PREVIEW_PREFIX}/g" \
+              -e "s/{issue}/${ISSUE_NUM}/g" \
+              -e "s/{domain}/${PREVIEW_DOMAIN}/g" \
+              -e "s/{port_api}/${port_api}/g" \
+              -e "s/{port}/${port}/g")
+          fi
+          if ! [[ "$url" =~ ^https://[^[:space:]]+$ ]]; then
+            echo "ERROR: could not derive a valid HTTPS validation target" >&2
+            exit 1
+          fi
+          echo "PREVIEW_URL=$url" >> "$GITHUB_ENV"
+          echo "TARGET=$url" >> "$GITHUB_ENV"
 
       - name: Check validation state
         id: state
@@ -180,6 +244,20 @@ jobs:
           echo "reason=$REASON" >> "$GITHUB_OUTPUT"
           echo "run=$RUN" >> "$GITHUB_OUTPUT"
 
+      # Tailnet-only previews use a MagicDNS hostname. Join with the same
+      # least-privilege CI identity as deploy/teardown before Sentinel resolves
+      # or calls the target. Public preview callers can omit the OAuth pair.
+      - name: Connect to Tailscale
+        if: steps.state.outputs.run == 'true' && env.TS_OAUTH_CLIENT_ID != ''
+        uses: tailscale/github-action@6cae46e2d796f265265cfcf628b72a32b4d7cade # v3.3.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: 1.98.8
+        env:
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+
       - name: Setup Python
         if: steps.state.outputs.run == 'true'
         uses: actions/setup-python@v5
@@ -190,10 +268,20 @@ jobs:
         if: steps.state.outputs.run == 'true'
         env:
           SENTINEL_REF: ${{ inputs.sentinel_ref }}
+          WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
         run: |
-          git clone --depth 1 --branch "$SENTINEL_REF" \
-            https://x-access-token:${{ secrets.WORKFLOW_PAT }}@github.com/cloudwarriors-ai/sentinel.git \
-            /tmp/sentinel
+          set -euo pipefail
+          if ! [[ "$SENTINEL_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: sentinel_ref must be an immutable 40-hex commit" >&2
+            exit 1
+          fi
+          git init /tmp/sentinel
+          git -C /tmp/sentinel remote add origin \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/cloudwarriors-ai/sentinel.git"
+          git -C /tmp/sentinel fetch --depth 1 origin "$SENTINEL_REF"
+          git -C /tmp/sentinel remote set-url origin https://github.com/cloudwarriors-ai/sentinel.git
+          git -C /tmp/sentinel checkout --detach FETCH_HEAD
+          test "$(git -C /tmp/sentinel rev-parse HEAD)" = "$SENTINEL_REF"
 
       - name: Install sentinel
         if: steps.state.outputs.run == 'true'
@@ -201,8 +289,22 @@ jobs:
 
       - name: Fetch shared scripts
         if: steps.state.outputs.run == 'true'
+        env:
+          SHARED_TOOLS_REF: ${{ inputs.shared_tools_ref }}
+          WORKFLOW_PAT: ${{ secrets.WORKFLOW_PAT }}
         run: |
-          git clone --depth 1 https://x-access-token:${{ secrets.WORKFLOW_PAT }}@github.com/cloudwarriors-ai/.github.git /tmp/org-github
+          set -euo pipefail
+          if ! [[ "$SHARED_TOOLS_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: shared_tools_ref must be an immutable 40-hex commit" >&2
+            exit 1
+          fi
+          git init /tmp/org-github
+          git -C /tmp/org-github remote add origin \
+            "https://x-access-token:${WORKFLOW_PAT}@github.com/cloudwarriors-ai/.github.git"
+          git -C /tmp/org-github fetch --depth 1 origin "$SHARED_TOOLS_REF"
+          git -C /tmp/org-github remote set-url origin https://github.com/cloudwarriors-ai/.github.git
+          git -C /tmp/org-github checkout --detach FETCH_HEAD
+          test "$(git -C /tmp/org-github rev-parse HEAD)" = "$SHARED_TOOLS_REF"
           cd /tmp/org-github/scripts/autopilot && npm install --silent --no-audit --no-fund
 
       - name: Run validation
@@ -211,7 +313,6 @@ jobs:
         env:
           E2E_EMAIL: ${{ secrets.E2E_EMAIL }}
           E2E_PASSWORD: ${{ secrets.E2E_PASSWORD }}
-          PREVIEW_URL: ${{ inputs.preview_url }}
           MANIFEST_PATH: ${{ inputs.manifest_path }}
           UPDATE_GOLDENS: ${{ inputs.update_goldens }}
         run: |
@@ -377,7 +478,6 @@ jobs:
           VERDICT: ${{ steps.emit.outputs.verdict }}
           PASSED: ${{ steps.emit.outputs.api_validation_passed }}
           ARTIFACT: ${{ steps.artifact-name.outputs.name }}
-          TARGET: ${{ inputs.preview_url }}
           ISSUE: ${{ inputs.issue_number }}
         with:
           github-token: ${{ secrets.WORKFLOW_PAT }}
