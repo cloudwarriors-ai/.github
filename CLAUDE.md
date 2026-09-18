@@ -93,6 +93,76 @@ Ask: is there one more small, local, reversible step that materially improves th
 
 ---
 
+## Filing GitHub Issues
+
+When a user asks you to create a GitHub issue — "file this as an issue," "open a bug
+for this," "track this," or similar — follow this standard. The issue you write will
+be picked up by another session (possibly another LLM) that has no context from this
+conversation.
+
+### Before writing
+
+1. Identify the repository. Use the current working directory's git remote unless the
+   user names a different repo.
+2. Read `.github/ISSUE_TEMPLATE/` if it exists. Use the repo's template structure.
+   If no template exists, use the section order below.
+3. Gather the facts from this session: what you observed, what files are involved,
+   what the user described, any error output or reproduction steps you have.
+
+### Section order
+
+Write every section. If you genuinely have nothing for a section (no reproduction
+steps for a feature request, for example), write "Not applicable" — do not omit the
+heading.
+
+- **Problem** — one paragraph. State the observable symptom (bug) or capability gap
+  (feature/task) in plain technical English. Complete sentences, no shorthand. Do not
+  guess at root cause; state what you observed.
+- **Expected result** — what should be true when this is resolved. Specific enough
+  that the implementer can verify it: a return value, a UI state, a passing test, a
+  behavioral change.
+- **Location** — file paths, function names, line numbers, modules, endpoints. Use
+  `path/to/file.ext:line` format. For new features, name the files or modules it
+  should live in or near. The implementer should open the right file within seconds.
+- **Reproduction** — steps or commands that demonstrate the problem. Paste exact error
+  output, stack traces, or unexpected return values. For a feature request, describe
+  the user action or API call that should work but does not exist. Use code blocks.
+- **Scope** — two lists: **In scope** (what this issue covers) and **Out of scope**
+  (what it does not). Name adjacent work the implementer might drift into and say it
+  is out of scope.
+- **Verification** — a command, test, or check the implementer can run to confirm the
+  work is done. Name the test file, the curl command, the build check. The implementer
+  needs a pass/fail signal, not a description of correctness.
+- **Context** — related issues (link them), environment details, constraints, deadlines,
+  links to specs or docs. Reference files and URLs — do not paste their contents.
+
+### Writing rules
+
+- Plain technical English. Complete sentences. No telegraphic shorthand.
+- Ground every claim in something observable: a file path, an error message, a command
+  output, a behavior. Do not write "the auth module seems broken" — write
+  "POST /auth/token returns 500 with a KeyError on `refresh_token` in
+  `src/auth/handler.py:47`."
+- Do not pad. If the issue is two sentences and three file paths, that is fine.
+- Use the repo's labels if you know them. Otherwise omit labels — a wrong label is
+  worse than no label.
+- Title: a short declarative statement of the problem or request — not a description of
+  the solution. Good: "POST /auth/token returns 500 on expired refresh token." Bad:
+  "Fix auth handler to check token expiry."
+- Ask the user to confirm the issue body before creating it, unless they said to file
+  it without review.
+
+### Creating the issue
+
+```bash
+gh issue create --repo <owner>/<repo> --title "<concise title>" --body "$(cat <<'EOF'
+<issue body>
+EOF
+)"
+```
+
+---
+
 ## RLM Codebase Map
 
 When `.rlm-cache/rlm_summary.md` is present, trust it as the authoritative codebase map. Do not re-explore architecture already captured there. Use it to navigate directly to affected modules.
