@@ -1,34 +1,100 @@
-name: "🐛 Bug report"
-description: Report a reproducible problem
-title: "[BUG] <short summary>"
-labels: ["bug"]
+name: Bug report
+description: Something is broken. Provide enough detail that someone (or an agent) can reproduce, locate, fix, and verify it without asking follow-up questions.
+title: ''
+labels: ['bug']
 body:
-  - type: textarea
-    id: description
+  - type: markdown
     attributes:
-      label: What happened?
-      description: Clear, concise description of the bug.
-      placeholder: e.g., App crashes when clicking Save
+      value: |
+        Write in plain technical English — complete sentences, no shorthand.
+        Ground every claim in something observable: a file path, an error message,
+        a command output, a behavior.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is broken? Describe the observable symptom — what you saw, not what you think the cause is.
+      placeholder: |
+        POST /api/v2/users returns 500 when the department query parameter
+        contains a space. The server log shows a ValueError in the query builder.
     validations:
       required: true
+
   - type: textarea
-    id: steps
+    id: expected_result
     attributes:
-      label: Steps to reproduce
-      placeholder: "1. Go to…\n2. Click…\n3. See error…"
+      label: Expected result
+      description: What should happen instead? Be specific enough that the implementer can verify it — a return value, a UI state, a passing test.
+      placeholder: |
+        GET /api/v2/users?department=Customer%20Success returns 200 with
+        the filtered user list. Any valid URL-encoded string is decoded
+        and matched correctly.
     validations:
       required: true
-  - type: input
-    id: expected
-    attributes:
-      label: Expected behavior
-  - type: input
-    id: env
-    attributes:
-      label: Environment
-      placeholder: "OS, browser/node, app version/commit"
+
   - type: textarea
-    id: logs
+    id: location
     attributes:
-      label: Logs / screenshots
-      render: shell
+      label: Location
+      description: Where in the codebase does this live? File paths, function names, line numbers, endpoints, modules. The more precise, the less time spent searching.
+      placeholder: |
+        - src/api/routes/users.py:84 — list_users passes raw query string to build_filter
+        - src/api/routes/users.py:112 — build_filter fails on the %20 literal
+        - tests/api/test_users.py — no test covers spaces in filter parameters
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Steps, commands, or input that demonstrates the problem. Include exact error output, stack traces, or unexpected return values. Use code blocks for commands and output.
+      placeholder: |
+        ```bash
+        curl -s "http://localhost:8000/api/v2/users?department=Customer%20Success"
+        # returns: {"detail": "Internal server error"}
+        # server log: ValueError: invalid literal in LIKE pattern
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What this issue covers and what it does not. Explicit boundaries prevent drift into adjacent work.
+      placeholder: |
+        In scope:
+        - Fix URL decoding of the department parameter in list_users
+        - Add a test for spaces in filter parameters
+
+        Out of scope:
+        - Refactoring the query builder beyond this fix
+        - Adding URL decoding to other endpoints (file separate issues)
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: How to confirm this is fixed. A test command, a curl, a build check — anything that produces a pass/fail signal. If no automated check exists, describe what a manual check looks like.
+      placeholder: |
+        ```bash
+        curl -s -o /dev/null -w "%{http_code}" "http://localhost:8000/api/v2/users?department=Customer%20Success"
+        # should return: 200
+
+        pytest tests/api/test_users.py -k "test_department_with_spaces" -v
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Related issues, environment details, constraints, links to docs or specs. Reference files and URLs — do not paste their contents.
+      placeholder: |
+        The department parameter was added in PR #241. The same build_filter
+        function is used by /api/v2/teams, which may have the same bug.

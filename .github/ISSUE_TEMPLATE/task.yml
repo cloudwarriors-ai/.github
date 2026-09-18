@@ -1,0 +1,91 @@
+name: Task
+description: A feature, enhancement, refactor, or other unit of work. Provide enough detail that someone (or an agent) can implement, test, and verify it without asking follow-up questions.
+title: ''
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Write in plain technical English — complete sentences, no shorthand.
+        Ground every claim in something observable: a file path, an API contract,
+        a behavior, a requirement.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is missing, insufficient, or needs to change? Describe the gap or motivation — what exists today and why it is not adequate.
+      placeholder: |
+        The /api/v2/reports endpoint returns all results in a single response.
+        For accounts with more than 10,000 records, the response takes over 30
+        seconds and frequently times out behind the load balancer.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_result
+    attributes:
+      label: Expected result
+      description: What should be true when this work is done? Be specific enough that the implementer can verify it — a behavior, a return shape, a performance target, a UI state.
+      placeholder: |
+        The /api/v2/reports endpoint supports cursor-based pagination. Each
+        response returns at most 100 records and a next_cursor field. The full
+        dataset is retrievable by following cursors. Response time for any
+        single page is under 500ms.
+    validations:
+      required: true
+
+  - type: textarea
+    id: location
+    attributes:
+      label: Location
+      description: Where in the codebase should this work happen? File paths, modules, functions, endpoints. For new features, name the files or modules it should live in or near based on existing structure.
+      placeholder: |
+        - src/api/routes/reports.py:45 — list_reports handler, currently returns all rows
+        - src/api/routes/reports.py:78 — build_query, needs a LIMIT/OFFSET or cursor clause
+        - src/models/report.py — Report model, may need an index on created_at
+        - tests/api/test_reports.py — add pagination test cases here
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What this issue covers and what it does not. Explicit boundaries prevent drift into adjacent work.
+      placeholder: |
+        In scope:
+        - Add cursor-based pagination to list_reports
+        - Add tests for first page, middle page, last page, and empty result
+        - Document the new query parameters in the API README
+
+        Out of scope:
+        - Adding pagination to other endpoints (file separate issues)
+        - Changing the database schema beyond adding an index
+        - Migrating existing clients to use pagination
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: How to confirm this is done. A test command, a curl, a build check — anything that produces a pass/fail signal. If no automated check exists, describe what a manual check looks like.
+      placeholder: |
+        ```bash
+        pytest tests/api/test_reports.py -k "test_pagination" -v
+
+        # manual: request with 10k+ records, confirm each page < 500ms
+        curl -s -w "\n%{time_total}" "http://localhost:8000/api/v2/reports?limit=100"
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Related issues, dependencies, constraints, design references, deadlines. Reference files and URLs — do not paste their contents.
+      placeholder: |
+        Related to #312 (client-side pagination UI). The /api/v2/users endpoint
+        already implements cursor pagination — follow that pattern.
