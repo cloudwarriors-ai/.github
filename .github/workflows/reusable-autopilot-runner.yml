@@ -24,6 +24,11 @@ on:
         description: 'Head branch (autofix/issue-<id>)'
         required: true
         type: string
+      review_only:
+        description: 'MACD only: tested PR against main, with no deploy or automatic acceptance'
+        required: false
+        type: boolean
+        default: false
       max_claude_turns:
         description: 'Max turns for Claude in RLM'
         required: false
@@ -140,14 +145,22 @@ jobs:
     steps:
       - name: Enforce dev-only issue branch
         env:
+          REVIEW_ONLY: ${{ inputs.review_only }}
           BASE: ${{ inputs.base }}
           HEAD: ${{ inputs.head }}
           ISSUE_NUM: ${{ inputs.issue_number }}
         run: |
           set -euo pipefail
-          if [ "$BASE" != "dev" ]; then
-            echo "::error::Autopilot publisher is authorized only for base=dev"
-            exit 1
+          if [ "$REVIEW_ONLY" = "true" ]; then
+            test "$GITHUB_REPOSITORY" = "cloudwarriors-ai/macd_agent"
+            test "$BASE" = "main"
+            test "$ISSUE_NUM" -gt 0
+          else
+            if [ "$BASE" != "dev" ]; then
+              echo "::error::Autopilot publisher is authorized only for base=dev"
+              exit 1
+            fi
+            test "$GITHUB_REPOSITORY" != "cloudwarriors-ai/macd_agent"
           fi
           case "$HEAD" in
             dev|main|master)
@@ -169,8 +182,9 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
-    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@931d41d584042d824a7d7aa11d0305c13303c4c0
+    uses: cloudwarriors-ai/workflows/.github/workflows/reusable-claude-autofix-rlm.yml@322bb4b4d68cfa4b28e60af7dc2530d32f19def1
     with:
+      review_only: ${{ inputs.review_only }}
       issue_number: ${{ fromJSON(inputs.issue_number) }}
       head: ${{ inputs.head }}
       base: ${{ inputs.base }}
@@ -223,10 +237,16 @@ jobs:
       - name: Read .autopilot/config.json
         id: config
         env:
+          REVIEW_ONLY: ${{ inputs.review_only }}
           DEPLOY_ENABLED: ${{ vars.DEPLOY_ENABLED || 'true' }}
         run: |
           if [ -f .autopilot/config.json ]; then
             CONFIG=$(cat .autopilot/config.json)
+            if [ "$REVIEW_ONLY" = "true" ]; then
+              # Trusted mode dominates even a config requesting release authority.
+              echo "$CONFIG" | jq -e '.testCommand | type == "string" and length > 0' >/dev/null
+              CONFIG=$(echo "$CONFIG" | jq '.previewDeploy=false | .previewGate=false | .mergeRequirements.autoMerge=false | .appTestCommand="" | .dbMigrateCommand=""')
+            fi
             echo "config_json<<EOF" >> "$GITHUB_OUTPUT"
             echo "$CONFIG" >> "$GITHUB_OUTPUT"
             echo "EOF" >> "$GITHUB_OUTPUT"
@@ -259,6 +279,10 @@ jobs:
               '[.buildCommand // "", .lintCommand // "", .testCommand // ""] | map(select(length > 0))')
             echo "validation_commands_b64=$(printf '%s' "$VALIDATION_COMMANDS" | base64 -w0)" >> "$GITHUB_OUTPUT"
           else
+            if [ "$REVIEW_ONLY" = "true" ]; then
+              echo "::error::Reviewed PR requires a trusted validation config"
+              exit 1
+            fi
             echo "No .autopilot/config.json found — using defaults" >&2
             echo "config_json={}" >> "$GITHUB_OUTPUT"
             echo "build_command=" >> "$GITHUB_OUTPUT"
@@ -520,6 +544,7 @@ jobs:
     name: "Deploy Preview (#${{ inputs.issue_number }})"
     needs: [authorize-target, rlm-fix, read-config, verify-fix-branch, preflight]
     if: |
+      !inputs.review_only &&
       needs.verify-fix-branch.outputs.branch_ready == 'true' &&
       needs.read-config.outputs.preview_deploy == 'true' &&
       vars.DEPLOY_ENABLED != 'false' &&
@@ -924,6 +949,7 @@ jobs:
     name: "Teardown Preview (#${{ inputs.issue_number }})"
     needs: [read-config, deploy-preview, finalize]
     if: |
+      !inputs.review_only &&
       always() && needs.deploy-preview.result != 'skipped' &&
       needs.finalize.outputs.preview_held != 'true'
     runs-on: ubuntu-latest
@@ -987,6 +1013,7 @@ jobs:
     name: "API Validate (#${{ inputs.issue_number }})"
     needs: [read-config, verify-fix-branch, deploy-preview]
     if: |
+      !inputs.review_only &&
       always() && !cancelled() &&
       needs.deploy-preview.result == 'success' &&
       needs.deploy-preview.outputs.preview_deployed == 'true'
@@ -1076,6 +1103,7 @@ jobs:
     name: "App Tests (#${{ inputs.issue_number }})"
     needs: [app-test-config, verify-fix-branch, deploy-preview]
     if: |
+      !inputs.review_only &&
       always() && !cancelled() &&
       needs.app-test-config.result == 'success' &&
       needs.deploy-preview.result == 'success' &&
@@ -1423,6 +1451,7 @@ jobs:
 
       - name: Upsert PR
         if: |
+          (!inputs.review_only || needs.test.outputs.tests_passed == 'true') &&
           needs.rlm-fix.result == 'success' &&
           needs.verify-fix-branch.outputs.branch_ready == 'true' &&
           steps.checkout.outcome == 'success' &&
@@ -1565,6 +1594,7 @@ jobs:
       # other auto-merge still has to satisfy the complete release contract above.
       - name: Auto-merge
         if: |
+          !inputs.review_only &&
           env.PREVIEW_CANDIDATE != 'true' &&
           env.RELEASE_READY == 'true' &&
           steps.pr.outputs.pr_ready == 'true' &&
@@ -1585,6 +1615,7 @@ jobs:
       - name: "On hold: label Preview Ready"
         id: preview-hold
         if: |
+          !inputs.review_only &&
           env.PREVIEW_CANDIDATE == 'true' &&
           steps.pr.outputs.pr_ready == 'true'
         uses: actions/github-script@v7
@@ -1729,6 +1760,7 @@ jobs:
       # A held run stops before In QA — the preview verdict decides that.
       - name: "On success: label In QA"
         if: |
+          !inputs.review_only &&
           env.PREVIEW_CANDIDATE != 'true' &&
           env.RELEASE_READY == 'true' &&
           steps.pr.outputs.pr_ready == 'true' &&
@@ -1762,6 +1794,7 @@ jobs:
 
       - name: "On already fixed: mark no PR needed"
         if: |
+          !inputs.review_only &&
           needs.rlm-fix.result == 'success' &&
           needs.verify-fix-branch.outputs.already_fixed == 'true'
         uses: actions/github-script@v7
@@ -2105,9 +2138,18 @@ jobs:
             echo "preview_held=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Review-only result
+        if: inputs.review_only
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          ALREADY_FIXED: ${{ needs.verify-fix-branch.outputs.already_fixed }}
+        run: |
+          echo "Human review required. No deployment, merge, or issue acceptance occurred." >> "$GITHUB_STEP_SUMMARY"
+          echo "PR: ${PR_NUMBER:-none}; already-fixed claim: ${ALREADY_FIXED:-false}" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Fail workflow when no reviewable, gate-passing PR was produced
         if: |
-          needs.verify-fix-branch.outputs.already_fixed != 'true' &&
+          (inputs.review_only || needs.verify-fix-branch.outputs.already_fixed != 'true') &&
           (
             env.RELEASE_READY != 'true' ||
             steps.pr.outputs.pr_ready != 'true' ||

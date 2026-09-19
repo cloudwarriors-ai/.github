@@ -10,7 +10,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / ".github/workflows/reusable-autopilot-runner.yml"
 VALIDATE = ROOT / ".github/workflows/reusable-validate.yml"
-UPSTREAM_SHA = "931d41d584042d824a7d7aa11d0305c13303c4c0"
+UPSTREAM_SHA = "322bb4b4d68cfa4b28e60af7dc2530d32f19def1"
 SHARED_TOOLS_SHA = "8f83e52d35646082eba9a3333b895416a1c7bf2d"
 ARTIFACT_GUARD = ROOT / "scripts/autopilot/verify-app-test-artifacts.sh"
 
