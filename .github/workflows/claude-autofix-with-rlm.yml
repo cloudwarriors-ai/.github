@@ -22,6 +22,10 @@ concurrency:
 jobs:
   # Step 1: Run RLM codebase analysis
   rlm-analysis:
+    # Explicit token scope, so this job keeps working when the organization default becomes read-only.
+    permissions:
+      contents: read
+      issues: write
     name: RLM Codebase Analysis
     if: |
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||

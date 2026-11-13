@@ -20,6 +20,10 @@ on:
 
 jobs:
   validate-fix:
+    # Explicit token scope, so this job keeps working when the organization default becomes read-only.
+    permissions:
+      contents: read
+      pull-requests: read
     uses: cloudwarriors-ai/.github/.github/workflows/reusable-shadow-validate.yml@main
     with:
       shadow_repo: cloudwarriors-ai/project-pulse-shadow
