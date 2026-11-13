@@ -714,6 +714,12 @@ jobs:
               .write();
 
   review-upstream-pr:
+    # Explicit token scope, so this job keeps working when the organization default becomes read-only.
+    permissions:
+      actions: read
+      contents: write
+      issues: write
+      pull-requests: write
     needs: upstream-pr
     if: >
       needs.upstream-pr.outputs.source_pr_number != '' &&
