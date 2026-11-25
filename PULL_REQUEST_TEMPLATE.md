@@ -32,6 +32,20 @@ Describe the testing strategy.
 
 ---
 
+## 🔎 Proof
+<!--
+Three lines, one each, so a reviewer never has to ask whether the work was checked.
+Judge lines start with `clean`, `fixed` or `not required`, then what was checked (and found).
+Real-Path says how the change ran where a person uses it (a dev site, a browser, a real
+account) and the result, or `none — <why the tests cover the whole behavior>`.
+Check: python3 ~/.claude/scripts/check-proof.py --pr <number> (agents run it before merging).
+-->
+Judge-Validation: <clean, fixed or not required — what the correctness review checked>
+Judge-Elegance: <clean, fixed or not required — what the simplicity review checked>
+Real-Path: <how it ran where a person uses it, and the result>
+
+---
+
 ## 💣 What are the potential risks or dependencies?
 <!-- 
 This section is critical for technical and compliance review. Be explicit.
